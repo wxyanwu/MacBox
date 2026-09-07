@@ -1531,7 +1531,7 @@ private struct PlayerWindowSettingsControl: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                .frame(width: 250)
+                .frame(width: 330)
 
                 Button(SettingsL10n.string("settings.common.restore-default", "Restore Default"), action: restoreDefault)
                     .help(SettingsL10n.string("settings.player-window.restore.help", "Clear the saved player window size, position, and mode"))
