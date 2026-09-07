@@ -40,6 +40,21 @@ private final class SuspendedAppRelaunchHelperLauncher:
     }
 }
 
+@MainActor
+private final class AppTerminationRequestSchedulerSpy:
+    AppTerminationRequestScheduling {
+    private(set) var scheduledRequests: [@MainActor () -> Void] = []
+
+    func schedule(_ request: @escaping @MainActor () -> Void) {
+        scheduledRequests.append(request)
+    }
+
+    func runNextRequest() {
+        guard !scheduledRequests.isEmpty else { return }
+        scheduledRequests.removeFirst()()
+    }
+}
+
 final class OKVideoMacTests: XCTestCase {
     func testApplicationBundleProhibitsMultipleInstances() {
         XCTAssertEqual(
@@ -176,6 +191,7 @@ final class OKVideoMacTests: XCTestCase {
     @MainActor
     func testRelaunchCoordinatorArmsHelperBeforeTermination() async throws {
         let helper = AppRelaunchHelperLauncherSpy()
+        let scheduler = AppTerminationRequestSchedulerSpy()
         let bundleURL = URL(fileURLWithPath: "/Applications/OKVideoMac.app")
         var terminationCount = 0
         let coordinator = AppRelaunchCoordinator(
@@ -183,7 +199,8 @@ final class OKVideoMacTests: XCTestCase {
             bundleURLProvider: { bundleURL },
             bundleIdentifierProvider: { "com.okvideomac.OKVideoMac" },
             processIdentifierProvider: { 1_234 },
-            terminationRequest: { terminationCount += 1 }
+            terminationRequest: { terminationCount += 1 },
+            terminationScheduler: scheduler
         )
 
         try await coordinator.restartApplication()
@@ -196,14 +213,36 @@ final class OKVideoMacTests: XCTestCase {
             "com.okvideomac.OKVideoMac"
         )
         XCTAssertFalse(helper.requests.first?.handshakeToken.isEmpty ?? true)
-        XCTAssertEqual(terminationCount, 1)
+        XCTAssertEqual(terminationCount, 0)
+        XCTAssertEqual(scheduler.scheduledRequests.count, 1)
         XCTAssertEqual(coordinator.state, .terminationRequested)
+        scheduler.runNextRequest()
+        XCTAssertEqual(terminationCount, 1)
+    }
+
+    @MainActor
+    func testMainRunLoopTerminationSchedulerLeavesCurrentConcurrencyJob() async {
+        let scheduler = MainRunLoopAppTerminationRequestScheduler()
+        let didRun = expectation(description: "scheduled termination request")
+        var terminationRequested = false
+
+        scheduler.schedule {
+            terminationRequested = true
+            didRun.fulfill()
+        }
+
+        // Regression guard: synchronously entering NSApp.terminate from the
+        // language alert's MainActor Task deadlocks AppDelegate's cleanup Task.
+        XCTAssertFalse(terminationRequested)
+        await fulfillment(of: [didRun], timeout: 1)
+        XCTAssertTrue(terminationRequested)
     }
 
     @MainActor
     func testRelaunchCoordinatorKeepsAppRunningWhenHelperFails() async {
         let helper = AppRelaunchHelperLauncherSpy()
         helper.failure = .helperHandshakeFailed
+        let scheduler = AppTerminationRequestSchedulerSpy()
         var terminationCount = 0
         let coordinator = AppRelaunchCoordinator(
             helperLauncher: helper,
@@ -212,7 +251,8 @@ final class OKVideoMacTests: XCTestCase {
             },
             bundleIdentifierProvider: { "com.okvideomac.OKVideoMac" },
             processIdentifierProvider: { 1_234 },
-            terminationRequest: { terminationCount += 1 }
+            terminationRequest: { terminationCount += 1 },
+            terminationScheduler: scheduler
         )
 
         do {
@@ -224,12 +264,14 @@ final class OKVideoMacTests: XCTestCase {
 
         XCTAssertEqual(helper.requests.count, 1)
         XCTAssertEqual(terminationCount, 0)
+        XCTAssertTrue(scheduler.scheduledRequests.isEmpty)
         XCTAssertEqual(coordinator.state, .idle)
     }
 
     @MainActor
     func testRelaunchCoordinatorStartsOnlyOneConcurrentHelper() async throws {
         let helper = SuspendedAppRelaunchHelperLauncher()
+        let scheduler = AppTerminationRequestSchedulerSpy()
         var terminationCount = 0
         let coordinator = AppRelaunchCoordinator(
             helperLauncher: helper,
@@ -238,7 +280,8 @@ final class OKVideoMacTests: XCTestCase {
             },
             bundleIdentifierProvider: { "com.okvideomac.OKVideoMac" },
             processIdentifierProvider: { 1_234 },
-            terminationRequest: { terminationCount += 1 }
+            terminationRequest: { terminationCount += 1 },
+            terminationScheduler: scheduler
         )
 
         let firstRequest = Task { @MainActor in
@@ -253,6 +296,9 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(terminationCount, 0)
         helper.finishPreparation()
         try await firstRequest.value
+        XCTAssertEqual(terminationCount, 0)
+        XCTAssertEqual(scheduler.scheduledRequests.count, 1)
+        scheduler.runNextRequest()
         XCTAssertEqual(terminationCount, 1)
     }
 
@@ -308,6 +354,7 @@ final class OKVideoMacTests: XCTestCase {
             activeLanguage: .simplifiedChinese
         )
         let helper = AppRelaunchHelperLauncherSpy()
+        let scheduler = AppTerminationRequestSchedulerSpy()
         let coordinator = AppRelaunchCoordinator(
             helperLauncher: helper,
             bundleURLProvider: {
@@ -315,9 +362,11 @@ final class OKVideoMacTests: XCTestCase {
             },
             bundleIdentifierProvider: { "com.okvideomac.OKVideoMac" },
             processIdentifierProvider: { 1_234 },
-            terminationRequest: {}
+            terminationRequest: {},
+            terminationScheduler: scheduler
         )
         try await coordinator.restartApplication()
+        scheduler.runNextRequest()
 
         XCTAssertEqual(
             defaults.string(

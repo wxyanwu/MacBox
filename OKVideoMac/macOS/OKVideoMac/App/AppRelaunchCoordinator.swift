@@ -22,6 +22,30 @@ protocol AppRelaunchHelperLaunching {
 }
 
 @MainActor
+protocol AppTerminationRequestScheduling {
+    func schedule(_ request: @escaping @MainActor () -> Void)
+}
+
+/// Leaves the current Swift concurrency job before entering AppKit's
+/// synchronous termination decision loop. AppDelegate is then free to run its
+/// MainActor cleanup task and reply to `applicationShouldTerminate`.
+@MainActor
+struct MainRunLoopAppTerminationRequestScheduler:
+    AppTerminationRequestScheduling {
+    func schedule(_ request: @escaping @MainActor () -> Void) {
+        // `NSApplication.terminate(_:)` enters a nested AppKit event loop when
+        // AppDelegate returns `.terminateLater`. A main-dispatch callback is
+        // not re-entered by that loop, so scheduling there would starve the
+        // MainActor shutdown task that must eventually send the reply. A main
+        // RunLoop block has the same execution context as a menu-bar Cmd-Q and
+        // allows the nested loop to service MainActor work normally.
+        RunLoop.main.perform(inModes: [.common]) {
+            request()
+        }
+    }
+}
+
+@MainActor
 final class AppRelaunchCoordinator {
     enum State: Equatable {
         case idle
@@ -37,6 +61,7 @@ final class AppRelaunchCoordinator {
     private let bundleIdentifierProvider: () -> String?
     private let processIdentifierProvider: () -> Int32
     private let terminationRequest: @MainActor () -> Void
+    private let terminationScheduler: any AppTerminationRequestScheduling
 
     init(
         helperLauncher: (any AppRelaunchHelperLaunching)? = nil,
@@ -49,13 +74,16 @@ final class AppRelaunchCoordinator {
         },
         terminationRequest: @escaping @MainActor () -> Void = {
             NSApp.terminate(nil)
-        }
+        },
+        terminationScheduler: (any AppTerminationRequestScheduling)? = nil
     ) {
         self.helperLauncher = helperLauncher ?? ProcessAppRelaunchHelperLauncher()
         self.bundleURLProvider = bundleURLProvider
         self.bundleIdentifierProvider = bundleIdentifierProvider
         self.processIdentifierProvider = processIdentifierProvider
         self.terminationRequest = terminationRequest
+        self.terminationScheduler = terminationScheduler
+            ?? MainRunLoopAppTerminationRequestScheduler()
     }
 
     /// Arms one process-external relaunch operation before requesting the
@@ -83,7 +111,10 @@ final class AppRelaunchCoordinator {
             throw error
         }
         state = .terminationRequested
-        terminationRequest()
+        let terminationRequest = self.terminationRequest
+        terminationScheduler.schedule {
+            terminationRequest()
+        }
     }
 }
 
