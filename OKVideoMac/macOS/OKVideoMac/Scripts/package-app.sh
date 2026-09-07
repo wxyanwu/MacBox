@@ -223,10 +223,11 @@ fi
 
 mkdir -p "$ARTIFACTS"
 cp -R "$APP_SOURCE" "$APP_DESTINATION"
-# Xcode keeps DWARF sections in the unsigned Release executable even when it
-# also emits an external dSYM. Strip those sections before signing so absolute
-# build paths cannot leak into the distributable App; runtime symbols remain.
+# Xcode keeps DWARF sections in unsigned Release executables even when it also
+# emits external dSYMs. Strip those sections before signing so absolute build
+# paths cannot leak into either project-owned executable; runtime symbols remain.
 /usr/bin/strip -S "$EXECUTABLE"
+/usr/bin/strip -S "$RELAUNCHER"
 APP_VERSION="$(
   /usr/libexec/PlistBuddy \
     -c 'Print :CFBundleShortVersionString' \
