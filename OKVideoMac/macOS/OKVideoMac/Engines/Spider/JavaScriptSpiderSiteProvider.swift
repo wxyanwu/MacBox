@@ -1824,19 +1824,19 @@ enum AndroidRuntimeStartupStage: String, Codable, CaseIterable, Sendable {
 
     var title: String {
         switch self {
-        case .idle: return "等待启动"
-        case .locatingSDK: return "正在检查 Android SDK"
-        case .preparingAVD: return "正在准备专用 Android 环境"
-        case .launchingEmulator: return "正在启动 Android Emulator"
-        case .waitingForADB: return "正在等待专用 Emulator 连接"
-        case .waitingForAndroidBoot: return "正在等待 Android 系统启动"
-        case .configuringPortForward: return "正在配置 Bridge 端口映射"
-        case .checkingEmulatorNetwork: return "正在检查 Emulator 网络"
-        case .installingBridge: return "正在安装 Android Bridge"
-        case .launchingBridge: return "正在启动 Android Bridge"
-        case .probingBridge: return "正在等待 Android Bridge 响应"
-        case .ready: return "Android 兼容环境已就绪"
-        case .stopping: return "正在停止 Android Emulator"
+        case .idle: return L10n.string("android.stage.idle", fallback: "Waiting to Start")
+        case .locatingSDK: return L10n.string("android.stage.locating-sdk", fallback: "Checking Android SDK")
+        case .preparingAVD: return L10n.string("android.stage.preparing-avd", fallback: "Preparing Dedicated Android Environment")
+        case .launchingEmulator: return L10n.string("android.stage.launching-emulator", fallback: "Starting Android Emulator")
+        case .waitingForADB: return L10n.string("android.stage.waiting-adb", fallback: "Waiting for Dedicated Emulator")
+        case .waitingForAndroidBoot: return L10n.string("android.stage.waiting-boot", fallback: "Waiting for Android to Start")
+        case .configuringPortForward: return L10n.string("android.stage.port-forward", fallback: "Configuring Bridge Port Mapping")
+        case .checkingEmulatorNetwork: return L10n.string("android.stage.network", fallback: "Checking Emulator Network")
+        case .installingBridge: return L10n.string("android.stage.installing-bridge", fallback: "Installing Android Bridge")
+        case .launchingBridge: return L10n.string("android.stage.launching-bridge", fallback: "Starting Android Bridge")
+        case .probingBridge: return L10n.string("android.stage.probing-bridge", fallback: "Waiting for Android Bridge")
+        case .ready: return L10n.string("android.stage.ready", fallback: "Android Compatibility Environment Ready")
+        case .stopping: return L10n.string("android.stage.stopping", fallback: "Stopping Android Emulator")
         }
     }
 
@@ -2098,63 +2098,65 @@ struct AndroidRuntimeFailureError: LocalizedError, Sendable {
 
     var errorDescription: String? { record.message }
 
-    var userFacingTitle: String { "Android 兼容环境启动失败" }
+    var userFacingTitle: String {
+        L10n.string("android.failure.title", fallback: "Android Compatibility Environment Failed to Start")
+    }
 
     var userFacingMessage: String {
         switch record.category {
         case .sdkIncomplete:
-            return "Android SDK 不完整，请在设置中选择包含 ADB、Emulator 和系统镜像的 SDK。"
+            return L10n.string("android.failure.sdk-incomplete", fallback: "The Android SDK is incomplete. In Settings, choose an SDK containing ADB, Emulator, and a system image.")
         case .javaRuntimeMissing:
-            return "创建专用 Android 环境需要 Java Runtime。请安装 JDK，或安装包含 JBR 的 Android Studio。"
+            return L10n.string("android.failure.java-missing", fallback: "A Java Runtime is required to create the dedicated Android environment. Install a JDK or Android Studio with JBR.")
         case .adbUnavailable:
-            return "ADB 无法使用，无法连接专用 Android Emulator。"
+            return L10n.string("android.failure.adb-unavailable", fallback: "ADB is unavailable, so the dedicated Android Emulator cannot be connected.")
         case .adbPrivateServerFailed:
-            return "OKVideoMac 无法启动独立的 ADB 服务；没有连接或关闭系统默认 ADB。"
+            return L10n.string("android.failure.private-adb", fallback: "OKVideoMac could not start its isolated ADB service. The system ADB service was not connected or stopped.")
         case .adbDeviceMissing, .adbSerialMissingTimeout:
-            return "Android Emulator 仍在运行，但 ADB 未发现目标设备。"
+            return L10n.string("android.failure.adb-device-missing", fallback: "Android Emulator is still running, but ADB did not find the target device.")
         case .adbDeviceOffline, .adbOfflineTimeout,
              .hostGPUADBOfflineTimeout, .softwareGPUADBOfflineTimeout:
-            return "ADB 已发现专用 Android Emulator，但设备一直处于 offline 状态。"
+            return L10n.string("android.failure.adb-offline", fallback: "ADB found the dedicated Android Emulator, but the device remained offline.")
         case .adbReconnectFailed:
-            return "专用 Android Emulator 的有界 ADB 重连失败。"
+            return L10n.string("android.failure.adb-reconnect", fallback: "The bounded ADB reconnect for the dedicated Android Emulator failed.")
         case .privateAVDRecoveryRequired:
-            return "专用 Android Runtime 使用硬件和软件渲染均无法启动；请在设置中重建 Runtime。"
+            return L10n.string("android.failure.avd-rebuild", fallback: "The dedicated Android Runtime could not start with hardware or software rendering. Rebuild the Runtime in Settings.")
         case .emulatorLaunchFailed, .emulatorLaunchTimedOut,
              .emulatorExitedBeforeADB,
              .emulatorExitedEarly, .emulatorExited, .runtimeExited:
-            return "Android Emulator 未能正常启动，请导出诊断后重试。"
+            return L10n.string("android.failure.emulator-launch", fallback: "Android Emulator did not start normally. Export diagnostics, then try again.")
         case .appRequestedTermination:
-            return "Android Emulator 启动已由 App 取消或结束。"
+            return L10n.string("android.failure.cancelled", fallback: "Android Emulator startup was cancelled or ended by the app.")
         case .emulatorOwnershipMismatch:
-            return "无法安全确认专用 Android Emulator，已停止操作其他设备。"
+            return L10n.string("android.failure.ownership", fallback: "The dedicated Android Emulator could not be identified safely. No other devices were modified.")
         case .emulatorProcessMismatch:
-            return "Android Emulator PID 已不再属于本次启动实例。"
+            return L10n.string("android.failure.process-mismatch", fallback: "The Android Emulator PID no longer belongs to this launch instance.")
         case .emulatorRuntimeConflict:
-            return "检测到其他 Emulator 正在使用专用 AVD 或记录端口，未执行任何操作。"
+            return L10n.string("android.failure.runtime-conflict", fallback: "Another Emulator is using the dedicated AVD or recorded port. No action was taken.")
         case .portConflict:
-            return "Android Emulator 所需端口被其他进程占用，未终止占用进程。"
+            return L10n.string("android.failure.port-conflict", fallback: "A port required by Android Emulator is in use. The occupying process was not terminated.")
         case .unexpectedSerial:
-            return "ADB 发现了其他 Emulator，但没有发现本次启动所预期的设备。"
+            return L10n.string("android.failure.unexpected-device", fallback: "ADB found another Emulator but not the device expected for this launch.")
         case .androidBootTimedOut:
-            return "Android 系统启动超时，兼容环境没有在预期时间内完成启动。"
+            return L10n.string("android.failure.boot-timeout", fallback: "Android startup timed out before the compatibility environment became ready.")
         case .emulatorNetworkUnavailable:
-            return "Android Emulator 没有建立可用网络，请检查网络后重试。"
+            return L10n.string("android.failure.network", fallback: "Android Emulator did not establish a usable network. Check your network and try again.")
         case .bridgeAPKMissing, .bridgeInstallFailed:
-            return "Android Bridge 安装失败，请重新安装测试版或导出诊断。"
+            return L10n.string("android.failure.bridge-install", fallback: "Android Bridge installation failed. Reinstall the app or export diagnostics.")
         case .bridgeLaunchFailed:
-            return "Android Bridge 服务启动失败，请使用“修复”后重试。"
+            return L10n.string("android.failure.bridge-launch", fallback: "Android Bridge failed to start. Use Repair, then try again.")
         case .portForwardFailed:
-            return "ADB 端口映射失败，Android Bridge 无法连接到 Mac。"
+            return L10n.string("android.failure.port-forward", fallback: "ADB port mapping failed, so Android Bridge cannot connect to the Mac.")
         case .hostPortConflict:
-            return "本机 Android Bridge 端口被占用，请关闭冲突程序后重试。"
+            return L10n.string("android.failure.host-port", fallback: "The local Android Bridge port is in use. Close the conflicting app and try again.")
         case .bridgeIdentityMismatch:
-            return "检测到的 Android Bridge 不属于当前启动实例；已拒绝连接，请重新启动兼容环境。"
+            return L10n.string("android.failure.bridge-identity", fallback: "The detected Android Bridge does not belong to this launch instance. The connection was rejected; restart the compatibility environment.")
         case .bridgeVersionMismatch:
-            return "Android Bridge 与当前 App 版本不一致；请使用“修复”重新安装当前 Bridge。"
+            return L10n.string("android.failure.bridge-version", fallback: "Android Bridge does not match this app version. Use Repair to reinstall the current Bridge.")
         case .bridgeHealthTimedOut:
-            return "Android Bridge 未在限定时间内建立连接；本次启动已失败，请重试或使用“修复”。"
+            return L10n.string("android.failure.bridge-timeout", fallback: "Android Bridge did not connect in time. Startup failed; try again or use Repair.")
         case .unknown:
-            return "Android 兼容环境启动失败，请立即导出诊断信息。"
+            return L10n.string("android.failure.unknown", fallback: "The Android compatibility environment failed to start. Export diagnostics now.")
         }
     }
 }
@@ -2171,8 +2173,8 @@ struct AndroidRuntimeStatus: Equatable, Sendable {
     static let checking = AndroidRuntimeStatus(
         phase: .checking,
         stage: .locatingSDK,
-        title: "准备中",
-        detail: "正在检查 Android 兼容环境…",
+        title: L10n.string("android.status.preparing", fallback: "Preparing"),
+        detail: L10n.string("android.status.checking", fallback: "Checking the Android compatibility environment…"),
         progress: nil
     )
 
@@ -2180,7 +2182,7 @@ struct AndroidRuntimeStatus: Equatable, Sendable {
         AndroidRuntimeStatus(
             phase: .unavailable,
             stage: .locatingSDK,
-            title: "需要处理",
+            title: L10n.string("android.status.action-required", fallback: "Action Required"),
             detail: detail,
             progress: nil
         )
@@ -2189,19 +2191,19 @@ struct AndroidRuntimeStatus: Equatable, Sendable {
     static let stopped = AndroidRuntimeStatus(
         phase: .stopped,
         stage: .idle,
-        title: "已停止",
-        detail: "Java/Dex 站点需要时将自动启动",
+        title: L10n.string("android.status.stopped", fallback: "Stopped"),
+        detail: L10n.string("android.status.auto-start", fallback: "Starts automatically when a Java/Dex site needs it"),
         progress: nil
     )
 
     static func starting(
-        _ detail: String = "首次启动可能需要 1–4 分钟",
+        _ detail: String = L10n.string("android.status.first-start-time", fallback: "First launch may take 1–4 minutes"),
         progress: Double = 0
     ) -> AndroidRuntimeStatus {
         AndroidRuntimeStatus(
             phase: .starting,
             stage: .stage(for: progress),
-            title: "准备中",
+            title: L10n.string("android.status.preparing", fallback: "Preparing"),
             detail: detail,
             progress: min(max(progress, 0), 1)
         )
@@ -2214,7 +2216,7 @@ struct AndroidRuntimeStatus: Equatable, Sendable {
         AndroidRuntimeStatus(
             phase: .starting,
             stage: stage,
-            title: "准备中",
+            title: L10n.string("android.status.preparing", fallback: "Preparing"),
             detail: stage.title,
             progress: progress ?? stage.progress
         )
@@ -2223,16 +2225,16 @@ struct AndroidRuntimeStatus: Equatable, Sendable {
     static let running = AndroidRuntimeStatus(
         phase: .running,
         stage: .ready,
-        title: "已就绪",
-        detail: "Java/Dex 站点可正常使用",
+        title: L10n.string("android.status.ready", fallback: "Ready"),
+        detail: L10n.string("android.status.available", fallback: "Java/Dex sites are available"),
         progress: 1
     )
 
     static let stopping = AndroidRuntimeStatus(
         phase: .stopping,
         stage: .stopping,
-        title: "正在停止",
-        detail: "正在关闭 Android 模拟器",
+        title: L10n.string("android.status.stopping", fallback: "Stopping"),
+        detail: L10n.string("android.status.stopping-emulator", fallback: "Closing Android Emulator"),
         progress: nil
     )
 
@@ -2243,8 +2245,8 @@ struct AndroidRuntimeStatus: Equatable, Sendable {
         AndroidRuntimeStatus(
             phase: .failed,
             stage: stage,
-            title: "需要处理",
-            detail: "\(stage.title)：\(detail)",
+            title: L10n.string("android.status.action-required", fallback: "Action Required"),
+            detail: L10n.string("android.status.failure-detail", fallback: "%1$@: %2$@", stage.title, detail),
             progress: nil
         )
     }
@@ -2259,7 +2261,10 @@ enum AndroidRuntimeFailureStatePolicy {
             return operationStatus
         }
         guard let lastFailure else { return nil }
-        return .failed(lastFailure.message, stage: lastFailure.stage)
+        return .failed(
+            AndroidRuntimeFailureError(record: lastFailure).userFacingMessage,
+            stage: lastFailure.stage
+        )
     }
 }
 
@@ -6850,10 +6855,10 @@ actor AndroidDexBridgeRuntime {
 
         if fileManager.fileExists(atPath: manifestURL.path) {
             guard var identity = loadIdentity() else {
-                return .failed("Android 运行记录损坏，需要重新初始化")
+                return .failed(L10n.string("android.status.record-damaged", fallback: "The Android runtime record is damaged and must be reinitialized."))
             }
             guard let toolchain = resolver().toolchain(at: identity.sdkRoot) else {
-                return .failed("原 Android SDK 已不可用，无法安全确认运行实例")
+                return .failed(L10n.string("android.status.original-sdk-unavailable", fallback: "The original Android SDK is unavailable, so the runtime instance cannot be verified safely."))
             }
             let observation = observeRuntimeOwnership(
                 identity,
@@ -6884,18 +6889,18 @@ actor AndroidDexBridgeRuntime {
                 clearRuntimeRecord()
             case .rejectConflictingRuntime:
                 return .failed(
-                    "检测到其他 Emulator 使用了记录端口，未执行任何操作"
+                    L10n.string("android.status.emulator-conflict", fallback: "Another Emulator is using the recorded port. No action was taken.")
                 )
             }
         }
 
         ready = false
         guard let toolchain = resolver().resolve() else {
-            return .unavailable("未找到完整 Android SDK，请选择包含 adb 和 emulator 的 SDK")
+            return .unavailable(L10n.string("android.status.sdk-not-found", fallback: "No complete Android SDK was found. Choose an SDK containing adb and emulator."))
         }
         guard !resolver().interactiveSystemImages(in: toolchain).isEmpty else {
             return .unavailable(
-                "缺少可显示原生界面的 arm64 Android system image（ATD 不支持界面捕获）"
+                L10n.string("android.status.visual-system-image-missing", fallback: "An arm64 Android system image that can display native UI is required. ATD images do not support UI capture.")
             )
         }
         if fileManager.fileExists(
@@ -6904,11 +6909,11 @@ actor AndroidDexBridgeRuntime {
             return .stopped
         }
         guard toolchain.avdManager != nil else {
-            return .unavailable("缺少 Android SDK Command-line Tools（avdmanager）")
+            return .unavailable(L10n.string("android.status.avdmanager-missing", fallback: "Android SDK Command-line Tools (avdmanager) are missing."))
         }
         guard resolver().resolveJavaRuntime() != nil else {
             return .unavailable(
-                "创建 AVD 缺少 Java Runtime；请安装 JDK 或 Android Studio JBR"
+                L10n.string("android.status.java-missing", fallback: "A Java Runtime is required to create the AVD. Install a JDK or Android Studio JBR.")
             )
         }
         return .stopped

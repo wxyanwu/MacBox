@@ -37,7 +37,7 @@ struct DetailLoadingView: View {
                     }
                     HStack(spacing: 10) {
                         AppActivityIndicator(size: .small)
-                        Text("正在加载详情和播放线路…")
+                        Text(L10n.string("detail.loading", fallback: "Loading details and streams…"))
                             .foregroundColor(.secondary)
                     }
                     .padding(.top, 12)
@@ -94,8 +94,8 @@ struct DetailView: View {
                 if detail.playSources.isEmpty {
                     EmptyStateView(
                         systemImage: "play.slash",
-                        title: "没有播放线路",
-                        message: "站点详情未提供可用分集。"
+                        title: L10n.string("detail.no-streams.title", fallback: "No Streams"),
+                        message: L10n.string("detail.no-streams.message", fallback: "This provider did not return any playable episodes.")
                     )
                     .frame(minHeight: 260)
                 } else {
@@ -118,12 +118,22 @@ struct DetailView: View {
                     Task { await state.toggleFavorite(detail) }
                 } label: {
                     Label(
-                        isFavorite ? "取消收藏" : "收藏",
+                        isFavorite
+                            ? L10n.string("detail.unfavorite", fallback: "Remove from Favorites")
+                            : L10n.string("detail.favorite", fallback: "Add to Favorites"),
                         systemImage: isFavorite ? "star.fill" : "star"
                     )
                 }
-                .help(isFavorite ? "取消收藏" : "收藏影片")
-                .accessibilityLabel(isFavorite ? "取消收藏" : "收藏影片")
+                .help(
+                    isFavorite
+                        ? L10n.string("detail.unfavorite", fallback: "Remove from Favorites")
+                        : L10n.string("detail.favorite", fallback: "Add to Favorites")
+                )
+                .accessibilityLabel(
+                    isFavorite
+                        ? L10n.string("detail.unfavorite", fallback: "Remove from Favorites")
+                        : L10n.string("detail.favorite", fallback: "Add to Favorites")
+                )
             }
         }
         .onAppear {
@@ -187,8 +197,8 @@ struct DetailView: View {
                         if synopsis.count > 120 {
                             DetailExpandButton(
                                 isExpanded: showsFullSynopsis,
-                                expandTitle: "更多",
-                                collapseTitle: "收起"
+                                expandTitle: L10n.string("common.more", fallback: "More"),
+                                collapseTitle: L10n.string("common.collapse", fallback: "Show Less")
                             ) {
                                 showsFullSynopsis.toggle()
                             }
@@ -198,7 +208,7 @@ struct DetailView: View {
 
                 if let actors = displayActors {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("演员")
+                        Text(L10n.string("detail.cast", fallback: "Cast"))
                             .font(.callout.weight(.semibold))
                         Text(actors)
                             .font(.callout)
@@ -207,8 +217,8 @@ struct DetailView: View {
                         if actors.count > 90 {
                             DetailExpandButton(
                                 isExpanded: showsAllActors,
-                                expandTitle: "更多",
-                                collapseTitle: "收起"
+                                expandTitle: L10n.string("common.more", fallback: "More"),
+                                collapseTitle: L10n.string("common.collapse", fallback: "Show Less")
                             ) {
                                 showsAllActors.toggle()
                             }
@@ -217,12 +227,16 @@ struct DetailView: View {
                 }
 
                 Button(action: playPrimaryEpisode) {
-                    Label("播放", systemImage: "play.fill")
+                    Label(L10n.string("common.play", fallback: "Play"), systemImage: "play.fill")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(primaryEpisode == nil)
-                .help(primaryEpisode == nil ? "没有可播放分集" : "播放首个可用分集")
+                .help(
+                    primaryEpisode == nil
+                        ? L10n.string("detail.no-playable-episode", fallback: "No playable episodes")
+                        : L10n.string("detail.play-first", fallback: "Play the first available episode")
+                )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -255,9 +269,9 @@ struct DetailView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text("播放线路")
+                    Text(L10n.string("detail.streams", fallback: "Streams"))
                         .font(.title3.weight(.semibold))
-                    Text("共 \(detail.playSources.count) 条")
+                    Text(L10n.string("detail.stream-count", fallback: "%d streams", detail.playSources.count))
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Spacer()
@@ -333,7 +347,7 @@ struct DetailView: View {
                 HStack(spacing: 7) {
                     Image(systemName: "magnifyingglass")
                         .foregroundColor(.secondary)
-                    TextField("搜索集数或原始名称", text: $episodeSearchKeyword)
+                    TextField(L10n.string("detail.episode-search", fallback: "Search episodes or original names"), text: $episodeSearchKeyword)
                         .textFieldStyle(.plain)
                 }
                 .padding(.horizontal, 10)
@@ -347,7 +361,7 @@ struct DetailView: View {
 
                 Spacer(minLength: 8)
 
-                Picker("排序", selection: $episodeSortOrder) {
+                Picker(L10n.string("common.sort", fallback: "Sort"), selection: $episodeSortOrder) {
                     ForEach(EpisodeSortOrder.allCases) { option in
                         Text(option.title).tag(option)
                     }
@@ -357,8 +371,8 @@ struct DetailView: View {
                 .disabled(!canSortEpisodes)
                 .help(
                     canSortEpisodes
-                        ? "只使用真实识别到的集数排序"
-                        : "当前线路没有足够的可靠集数信息"
+                        ? L10n.string("detail.sort.available", fallback: "Sort using reliably detected episode numbers")
+                        : L10n.string("detail.sort.unavailable", fallback: "This stream does not contain enough reliable episode numbers")
                 )
             }
         }
@@ -369,7 +383,7 @@ struct DetailView: View {
         if isPreparingEpisodes {
             VStack(spacing: 10) {
                 AppActivityIndicator(size: .small)
-                Text("正在整理 \(selectedSource?.episodes.count ?? 0) 集…")
+                Text(L10n.string("detail.organizing-episodes", fallback: "Organizing %d episodes…", selectedSource?.episodes.count ?? 0))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -377,14 +391,14 @@ struct DetailView: View {
         } else if filteredPresentations.isEmpty {
             EmptyStateView(
                 systemImage: "magnifyingglass",
-                title: "没有匹配的分集",
-                message: "请更换关键词或选择其他分集区间。"
+                title: L10n.string("detail.no-matching-episodes.title", fallback: "No Matching Episodes"),
+                message: L10n.string("detail.no-matching-episodes.message", fallback: "Try another search term or episode range.")
             )
         } else {
             VStack(alignment: .leading, spacing: 18) {
                 if !regularPresentations.isEmpty {
                     EpisodeSection(
-                        title: "剧集",
+                        title: L10n.string("detail.episodes", fallback: "Episodes"),
                         episodes: regularPresentations,
                         onPlay: playSelectedEpisode
                     )
@@ -393,8 +407,10 @@ struct DetailView: View {
                 if !otherPresentations.isEmpty {
                     EpisodeSection(
                         title: isSingleEpisode
-                            ? "播放"
-                            : regularPresentations.isEmpty ? "播放资源" : "其他资源",
+                            ? L10n.string("common.play", fallback: "Play")
+                            : regularPresentations.isEmpty
+                                ? L10n.string("detail.playable-resources", fallback: "Playable Resources")
+                                : L10n.string("detail.other-resources", fallback: "Other Resources"),
                         episodes: otherPresentations,
                         onPlay: playSelectedEpisode
                     )
@@ -409,19 +425,19 @@ struct DetailView: View {
     private var detailFacts: [DetailFact] {
         var facts = [
             DetailFact(
-                title: "来源",
+                title: L10n.string("detail.provider", fallback: "Provider"),
                 value: detail.summary.siteName,
                 systemImage: "network"
             )
         ]
         if let year = detail.summary.year?.trimmedNonEmpty {
             facts.append(
-                DetailFact(title: "年份", value: year, systemImage: "calendar")
+                DetailFact(title: L10n.string("detail.year", fallback: "Year"), value: year, systemImage: "calendar")
             )
         }
         if let category = detail.summary.categoryName?.trimmedNonEmpty {
             facts.append(
-                DetailFact(title: "类型", value: category, systemImage: "tag")
+                DetailFact(title: L10n.string("detail.genre", fallback: "Genre"), value: category, systemImage: "tag")
             )
         }
         if let remarks = VideoCardMetadata.secondaryText(
@@ -429,7 +445,7 @@ struct DetailView: View {
         ) {
             facts.append(
                 DetailFact(
-                    title: "状态",
+                    title: L10n.string("common.status", fallback: "Status"),
                     value: remarks,
                     systemImage: "text.badge.checkmark"
                 )
@@ -437,7 +453,7 @@ struct DetailView: View {
         }
         facts.append(
             DetailFact(
-                title: "线路",
+                title: L10n.string("detail.streams", fallback: "Streams"),
                 value: "\(detail.playSources.count)",
                 systemImage: "point.3.connected.trianglepath.dotted"
             )
@@ -563,10 +579,10 @@ private struct DetailBackButton: View {
 
     var body: some View {
         Button(action: action) {
-            Label("返回", systemImage: "chevron.left")
+            Label(L10n.string("common.back", fallback: "Back"), systemImage: "chevron.left")
         }
-        .help("返回上一页")
-        .accessibilityLabel("返回上一页")
+        .help(L10n.string("common.back-previous", fallback: "Back to the previous page"))
+        .accessibilityLabel(L10n.string("common.back-previous", fallback: "Back to the previous page"))
     }
 }
 
@@ -705,11 +721,11 @@ enum EpisodeSortOrder: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .sourceOrder:
-            return "源顺序"
+            return L10n.string("detail.sort.source-order", fallback: "Provider Order")
         case .episodeAscending:
-            return "集数正序"
+            return L10n.string("detail.sort.episode-ascending", fallback: "Episode Number: Ascending")
         case .episodeDescending:
-            return "集数倒序"
+            return L10n.string("detail.sort.episode-descending", fallback: "Episode Number: Descending")
         }
     }
 }
@@ -828,7 +844,7 @@ private struct EpisodeRangePicker: View {
         case .chips:
             ScrollView(.horizontal, showsIndicators: true) {
                 HStack(spacing: 7) {
-                    rangeButton(title: "全部", id: nil)
+                    rangeButton(title: L10n.string("common.all", fallback: "All"), id: nil)
                     ForEach(options) { option in
                         rangeButton(title: option.title, id: option.id)
                     }
@@ -842,14 +858,14 @@ private struct EpisodeRangePicker: View {
 
     private var compactPicker: some View {
         HStack(spacing: 8) {
-            rangeButton(title: "全部", id: nil)
+            rangeButton(title: L10n.string("common.all", fallback: "All"), id: nil)
 
-            Text("分集区间")
+            Text(L10n.string("detail.episode-range", fallback: "Episode Range"))
                 .font(.caption)
                 .foregroundColor(.secondary)
 
-            Picker("分集区间", selection: $selectedID) {
-                Text("选择区间").tag(String?.none)
+            Picker(L10n.string("detail.episode-range", fallback: "Episode Range"), selection: $selectedID) {
+                Text(L10n.string("detail.choose-range", fallback: "Choose a Range")).tag(String?.none)
                 ForEach(options) { option in
                     Text(option.title).tag(Optional(option.id))
                 }
@@ -874,7 +890,7 @@ private struct EpisodeRangePicker: View {
                 selectedID: selectedID,
                 offset: -1
             ))
-            .help("上一分集区间")
+            .help(L10n.string("detail.previous-range", fallback: "Previous Episode Range"))
 
             Button {
                 selectedID = EpisodeRangePickerPolicy.adjacentID(
@@ -892,7 +908,7 @@ private struct EpisodeRangePicker: View {
                 selectedID: selectedID,
                 offset: 1
             ))
-            .help("下一分集区间")
+            .help(L10n.string("detail.next-range", fallback: "Next Episode Range"))
 
             Spacer(minLength: 0)
         }
@@ -1033,12 +1049,12 @@ private struct DetailEpisodeButtonPopoverInteraction: View {
         }
         .buttonStyle(DetailEpisodeButtonStyle())
         .contextMenu {
-            Button("查看原始名称…") {
+            Button(L10n.string("detail.original-name.view", fallback: "View Original Name…")) {
                 DispatchQueue.main.async {
                     showsOriginalNamePopover = true
                 }
             }
-            Button("复制原始名称") {
+            Button(L10n.string("detail.original-name.copy", fallback: "Copy Original Name")) {
                 DetailEpisodeOriginalNameActions.copy(presentation.originalName)
             }
         }
@@ -1051,8 +1067,8 @@ private struct DetailEpisodeButtonPopoverInteraction: View {
                 onClose: { showsOriginalNamePopover = false }
             )
         }
-        .accessibilityLabel("播放 \(presentation.displayName)")
-        .accessibilityHint("右键可以查看或复制原始名称")
+        .accessibilityLabel(L10n.string("detail.play-episode", fallback: "Play %@", presentation.displayName))
+        .accessibilityHint(L10n.string("detail.original-name.hint", fallback: "Right-click to view or copy the original name"))
     }
 }
 
@@ -1066,7 +1082,7 @@ struct DetailEpisodeOriginalNamePopover: View {
             HStack(spacing: 7) {
                 Image(systemName: "doc.text")
                     .foregroundColor(.secondary)
-                Text("文件信息")
+                Text(L10n.string("detail.file-info", fallback: "File Information"))
                     .font(.headline)
                 Spacer()
                 Button(action: onClose) {
@@ -1077,11 +1093,11 @@ struct DetailEpisodeOriginalNamePopover: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(.secondary)
-                .help("关闭")
-                .accessibilityLabel("关闭文件信息")
+                .help(L10n.string("common.close", fallback: "Close"))
+                .accessibilityLabel(L10n.string("detail.file-info.close", fallback: "Close File Information"))
             }
 
-            Text("原始名称")
+            Text(L10n.string("detail.original-name", fallback: "Original Name"))
                 .font(.caption)
                 .foregroundColor(.secondary)
 
@@ -1107,7 +1123,9 @@ struct DetailEpisodeOriginalNamePopover: View {
                     didCopy = true
                 } label: {
                     Label(
-                        didCopy ? "已复制" : "复制名称",
+                        didCopy
+                            ? L10n.string("common.copied", fallback: "Copied")
+                            : L10n.string("detail.copy-name", fallback: "Copy Name"),
                         systemImage: didCopy ? "checkmark" : "doc.on.doc"
                     )
                 }
@@ -1116,7 +1134,7 @@ struct DetailEpisodeOriginalNamePopover: View {
 
                 Spacer()
 
-                Text("点击外部或按 Esc 关闭")
+                Text(L10n.string("detail.popover-dismiss-hint", fallback: "Click outside or press Esc to close"))
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
@@ -1236,7 +1254,7 @@ enum EpisodeNameParser {
         ), let season = Int(values[0]), let number = Int(values[1]) {
             return EpisodePresentation(
                 episode: episode,
-                displayName: "第 \(season) 季 · 第 \(number) 集",
+                displayName: L10n.string("episode.season-and-number", fallback: "Season %d · Episode %d", season, number),
                 originalName: original.isEmpty ? compact : original,
                 seasonNumber: season,
                 episodeNumber: number,
@@ -1259,7 +1277,7 @@ enum EpisodeNameParser {
                 compact: compact,
                 original: original,
                 number: number,
-                displayName: "第 \(number) 集",
+                displayName: L10n.string("episode.number", fallback: "Episode %d", number),
                 sourceIndex: sourceIndex
             )
         }
@@ -1274,7 +1292,7 @@ enum EpisodeNameParser {
                 compact: compact,
                 original: original,
                 number: number,
-                displayName: "第 \(number) 集",
+                displayName: L10n.string("episode.number", fallback: "Episode %d", number),
                 sourceIndex: sourceIndex
             )
         }
@@ -1290,7 +1308,11 @@ enum EpisodeNameParser {
                 compact: compact,
                 original: original,
                 number: number,
-                displayName: "第 \(number) \(unit)",
+                displayName: L10n.string(
+                    unit == "话" ? "episode.number.chapter" : "episode.number",
+                    fallback: unit == "话" ? "Chapter %d" : "Episode %d",
+                    number
+                ),
                 sourceIndex: sourceIndex
             )
         }
@@ -1305,7 +1327,7 @@ enum EpisodeNameParser {
                 compact: compact,
                 original: original,
                 number: number,
-                displayName: "第 \(number) 集",
+                displayName: L10n.string("episode.number", fallback: "Episode %d", number),
                 sourceIndex: sourceIndex
             )
         }
@@ -1320,7 +1342,7 @@ enum EpisodeNameParser {
                 compact: compact,
                 original: original,
                 number: number,
-                displayName: "第 \(number) 集",
+                displayName: L10n.string("episode.number", fallback: "Episode %d", number),
                 sourceIndex: sourceIndex
             )
         }
@@ -1379,7 +1401,9 @@ enum EpisodeNameParser {
             options: .regularExpression
         )
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "未命名资源" : trimmed
+        return trimmed.isEmpty
+            ? L10n.string("detail.unnamed-resource", fallback: "Unnamed Resource")
+            : trimmed
     }
 
     fileprivate static func sequenceCandidates(
@@ -1634,7 +1658,7 @@ enum EpisodeListPresentation {
         if values.count == 1, let only = values.first {
             values[0] = EpisodePresentation(
                 episode: only.episode,
-                displayName: "正片",
+                displayName: L10n.string("episode.feature", fallback: "Feature"),
                 originalName: only.originalName,
                 seasonNumber: nil,
                 episodeNumber: nil,
@@ -1787,9 +1811,9 @@ enum EpisodeListPresentation {
     ) -> EpisodePresentation {
         let displayName: String
         if let season = candidate.seasonNumber {
-            displayName = "第 \(season) 季 · 第 \(candidate.number) 集"
+            displayName = L10n.string("episode.season-and-number", fallback: "Season %d · Episode %d", season, candidate.number)
         } else {
-            displayName = "第 \(candidate.number) 集"
+            displayName = L10n.string("episode.number", fallback: "Episode %d", candidate.number)
         }
         return EpisodePresentation(
             episode: original.episode,
@@ -1834,9 +1858,9 @@ enum EpisodeListPresentation {
             let title: String
             if first.seasonNumber == last.seasonNumber,
                let season = first.seasonNumber {
-                title = "第 \(season) 季 · \(firstNumber)–\(lastNumber) 集"
+                title = L10n.string("episode.range.season", fallback: "Season %d · Episodes %d–%d", season, firstNumber, lastNumber)
             } else {
-                title = "\(firstNumber)–\(lastNumber) 集"
+                title = L10n.string("episode.range", fallback: "Episodes %d–%d", firstNumber, lastNumber)
             }
             return EpisodeRangeOption(
                 id: "\(start)-\(end)",

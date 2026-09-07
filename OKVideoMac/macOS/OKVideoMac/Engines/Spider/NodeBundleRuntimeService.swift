@@ -1106,11 +1106,16 @@ enum CatPawModuleKind: String, CaseIterable, Codable, Sendable {
 
     var localizedName: String {
         switch self {
-        case .video: return "影视"
-        case .read: return "小说"
-        case .comic: return "漫画"
-        case .music: return "音乐"
-        case .pan: return "网盘"
+        case .video:
+            return L10n.string("node.module-kind.video", fallback: "Video")
+        case .read:
+            return L10n.string("node.module-kind.read", fallback: "Reading")
+        case .comic:
+            return L10n.string("node.module-kind.comic", fallback: "Comics")
+        case .music:
+            return L10n.string("node.module-kind.music", fallback: "Music")
+        case .pan:
+            return L10n.string("node.module-kind.pan", fallback: "Cloud Drive")
         }
     }
 }

@@ -401,13 +401,13 @@ enum QuarkEpisodeReference {
         with stoken: String
     ) throws -> String {
         guard let identity = identity(from: rawValue) else {
-            throw AppError.playback("夸克分集令牌格式无效，无法刷新分享授权")
+            throw AppError.playback(L10n.string("provider.quark.token.invalid", fallback: "The Quark episode token is invalid, so share authorization cannot be refreshed."))
         }
         let normalizedStoken = stoken.trimmingCharacters(
             in: .whitespacesAndNewlines
         )
         guard !normalizedStoken.isEmpty else {
-            throw AppError.playback("夸克分享令牌编码失败")
+            throw AppError.playback(L10n.string("provider.quark.token.encode.failed", fallback: "Unable to encode the Quark share token."))
         }
 
         // Rebuild the smallest token understood by Node /play. Never copy
@@ -423,7 +423,7 @@ enum QuarkEpisodeReference {
             options: [.sortedKeys, .withoutEscapingSlashes]
         )
         guard let tokenString = String(data: tokenData, encoding: .utf8) else {
-            throw AppError.playback("夸克分享令牌编码失败")
+            throw AppError.playback(L10n.string("provider.quark.token.encode.failed", fallback: "Unable to encode the Quark share token."))
         }
         let outer: [String: Any] = [
             "fileId": identity.fileID,
@@ -768,7 +768,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         configurationSemanticRevision: String? = nil
     ) throws {
         guard Self.canHandle(site: site, baseURL: baseURL) else {
-            throw AppError.spider("NodeHTTPSpiderSiteProvider 站点配置无效")
+            throw AppError.spider(L10n.string("provider.node.configuration.invalid", fallback: "The Node provider configuration is invalid."))
         }
         self.site = site
         self.baseURL = baseURL
@@ -937,9 +937,9 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         switch try await select(id: id) {
         case .detail(let detail): return detail
         case .action:
-            throw AppError.spider("该卡片执行的是设置操作，不包含影视详情")
+            throw AppError.spider(L10n.string("provider.card.settings-only", fallback: "This card performs a settings action and has no video details."))
         case .search:
-            throw AppError.spider("该卡片只提供发现信息，不包含影视详情")
+            throw AppError.spider(L10n.string("provider.card.discovery-only", fallback: "This card provides discovery information only and has no video details."))
         }
     }
 
@@ -958,7 +958,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
     func select(action item: SiteActionItem) async throws -> SiteSelectionResult {
         switch item.resolvedRoute {
         case .actionCategory:
-            throw AppError.spider("配置分类必须先加载操作列表，不能作为影视详情打开")
+            throw AppError.spider(L10n.string("provider.category.actions-required", fallback: "A configuration category must load its actions first and cannot be opened as video details."))
         case .command(let action):
             return .action(try await self.action(action))
         case .providerSelection(let itemID):
@@ -1077,7 +1077,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         }
         if await routeClient.capabilityState(for: .search) == .unsupported {
             throw SiteSearchError(
-                "\(site.name) search 失败：该 Bundle 与 Profile 已确认未注册搜索路由",
+                L10n.string("provider.search.route-unregistered", fallback: "%@ search failed: this Bundle and Profile do not register a search route.", site.name),
                 category: .unsupportedRoute
             )
         }
@@ -1117,7 +1117,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
            let message = Self.serverMessage(from: invocation.value),
            Self.isUpstreamUnavailableMessage(message) {
             throw SiteSearchError(
-                "\(site.name) 搜索失败：\(message)",
+                L10n.string("provider.search.failed", fallback: "%1$@ search failed: %2$@", site.name, message),
                 category: .upstreamUnavailable
             )
         }
@@ -1152,7 +1152,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
               ),
               !locatorCandidate.hasPrefix("runtime-v1.") else {
             throw ProviderPlaybackError(
-                "CatPaw 历史内部引用不能作为媒体地址，必须重新获取当前详情"
+                L10n.string("provider.history.internal-reference", fallback: "A CatPaw internal history reference cannot be used as a media URL. Refresh the current details first.")
             )
         }
         var resolvedEpisodeURL = episodeURL
@@ -1184,8 +1184,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                     )
                 } catch {
                     throw AppError.spider(
-                        "\(site.name) play 失败：已刷新夸克分享令牌，但转存仍失败："
-                            + error.localizedDescription
+                        L10n.string(
+                            "provider.quark.transfer-after-refresh.failed",
+                            fallback: "%1$@ playback failed: the Quark share token was refreshed, but transfer still failed: %2$@",
+                            site.name,
+                            error.localizedDescription
+                        )
                     )
                 }
             }
@@ -1231,7 +1235,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
            acceptsPlaybackResourceReference(reference) {
             guard let sourceName = requestedSourceName,
                   !sourceName.isEmpty else {
-                throw ProviderPlaybackError("历史记录缺少原播放线路标识")
+                throw ProviderPlaybackError(L10n.string("provider.history.source-id-missing", fallback: "The history item is missing its original playback source identifier."))
             }
             let directResult: SitePlaybackResult
             do {
@@ -1258,7 +1262,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             if let requestedEpisodeName, !requestedEpisodeName.isEmpty {
                 episodeName = requestedEpisodeName
             } else {
-                episodeName = "历史分集"
+                episodeName = L10n.string("history.episode.fallback", fallback: "History Episode")
             }
             let episode = PlayEpisode(
                 name: episodeName,
@@ -1465,7 +1469,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         )
         guard MediaURLClassifier.isSupportedAbsoluteMediaURL(result.url) else {
             throw ProviderPlaybackError(
-                "CatPaw 播放响应未返回可用的绝对媒体地址"
+                L10n.string("provider.playback.absolute-url-missing", fallback: "The CatPaw playback response did not return a usable absolute media URL.")
             )
         }
         result.qualities = result.qualities.compactMap {
@@ -1492,7 +1496,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         result.url = transportSelection.url
         guard MediaURLClassifier.isSupportedAbsoluteMediaURL(result.url) else {
             throw ProviderPlaybackError(
-                "CatPaw 播放传输层未返回可用的绝对媒体地址"
+                L10n.string("provider.playback.transport-url-missing", fallback: "The CatPaw playback transport did not return a usable absolute media URL.")
             )
         }
         if result.url != selectedProviderURL {
@@ -1755,7 +1759,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         in episodeURL: String
     ) async throws -> String {
         guard let identity = QuarkEpisodeReference.identity(from: episodeURL) else {
-            throw AppError.playback("夸克分集令牌缺少分享或文件标识")
+            throw AppError.playback(
+                L10n.string(
+                    "provider.quark.token.identifiers-missing",
+                    fallback: "The Quark episode token is missing a share or file identifier."
+                )
+            )
         }
         let body = try JSONSerialization.data(
             withJSONObject: [
@@ -1785,14 +1794,30 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         let message = value.flatMap { Self.serverMessage(from: $0) }
         guard (200...299).contains(response.statusCode) else {
             let code = value.flatMap(Self.serverCode)
-            let detail = [code.map { "错误码 \($0)" }, message]
+            let detail = [
+                code.map {
+                    L10n.string(
+                        "common.error-code",
+                        fallback: "Error code %@",
+                        $0
+                    )
+                },
+                message
+            ]
                 .compactMap { $0 }
-                .joined(separator: "：")
+                .joined(separator: L10n.string("common.detail-separator", fallback: ": "))
             throw AppError.playback(
-                "夸克分享令牌刷新失败："
-                    + (detail.isEmpty
-                        ? "HTTP 状态码 \(response.statusCode)"
-                        : detail)
+                L10n.string(
+                    "provider.quark.token.refresh.failed-prefix",
+                    fallback: "Unable to refresh the Quark share token: %@",
+                    detail.isEmpty
+                        ? L10n.string(
+                            "common.http-status",
+                            fallback: "HTTP status %lld",
+                            response.statusCode
+                        )
+                        : detail
+                )
             )
         }
         guard let stoken = value?.objectValue?["data"]?
@@ -1800,8 +1825,14 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             .trimmingCharacters(in: .whitespacesAndNewlines),
               !stoken.isEmpty else {
             throw AppError.playback(
-                "夸克分享令牌刷新失败："
-                    + (message ?? "接口未返回新 stoken，分享可能已失效")
+                L10n.string(
+                    "provider.quark.token.refresh.failed-prefix",
+                    fallback: "Unable to refresh the Quark share token: %@",
+                    message ?? L10n.string(
+                        "provider.quark.token.missing-new",
+                        fallback: "The service did not return a new stoken; the share may have expired."
+                    )
+                )
             )
         }
         return try QuarkEpisodeReference.replacingStoken(
@@ -1881,7 +1912,13 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         usesAggregateSearchTransport: Bool = false
     ) async throws -> InvocationResult {
         guard let route = CatPawRoute(rawValue: method) else {
-            throw AppError.spider("未知 CatPaw 路由：\(method)")
+            throw AppError.spider(
+                L10n.string(
+                    "provider.catpaw.route.unknown",
+                    fallback: "Unknown CatPaw route: %@",
+                    method
+                )
+            )
         }
         let attempts = max(1, maximumAttempts)
         let requestHTTPClient = usesAggregateSearchTransport
@@ -1957,7 +1994,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                         )
                     } catch {
                         throw AppError.spider(
-                            "Node 站点 \(site.name) 的 \(method) 响应不是有效 JSON"
+                            L10n.string(
+                                "provider.node.response.not-json",
+                                fallback: "The %1$@ response from Node site %2$@ is not valid JSON.",
+                                method,
+                                site.name
+                            )
                         )
                     }
                 }
@@ -1990,7 +2032,11 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                     )
                 }
                 let message = Self.serverMessage(from: value)
-                    ?? "HTTP 状态码 \(response.statusCode)"
+                    ?? L10n.string(
+                        "common.http-status",
+                        fallback: "HTTP status %lld",
+                        response.statusCode
+                    )
                 if CatPawRouteClient.isExactRouteNotFound(
                     statusCode: response.statusCode,
                     message: message,
@@ -2061,7 +2107,13 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                     continue
                 }
                 throw AppError.spider(
-                    "\(site.name) \(method) 失败：\(message)"
+                    L10n.string(
+                        "provider.node.method.failed",
+                        fallback: "%1$@ %2$@ failed: %3$@",
+                        site.name,
+                        method,
+                        message
+                    )
                 )
             } catch let authorization as NodeWebAuthorizationRequired {
                 throw authorization
@@ -2071,7 +2123,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                 if route == .search,
                    case .unsupportedRoute = error {
                     throw SiteSearchError(
-                        "\(site.name) search 失败：\(error.localizedDescription)",
+                        L10n.string(
+                            "provider.search.failed",
+                            fallback: "%1$@ search failed: %2$@",
+                            site.name,
+                            error.localizedDescription
+                        ),
                         category: .unsupportedRoute
                     )
                 }
@@ -2106,7 +2163,14 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                 throw error
             }
         }
-        throw AppError.spider("Node 站点 \(site.name) 的 \(method) 请求失败")
+        throw AppError.spider(
+            L10n.string(
+                "provider.node.request.failed",
+                fallback: "The %1$@ request to Node site %2$@ failed.",
+                method,
+                site.name
+            )
+        )
     }
 
     private static func isTransientHTTPStatus(_ statusCode: Int) -> Bool {
@@ -2140,7 +2204,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         statusCode: Int,
         message: String
     ) -> SiteSearchError {
-        let fullMessage = "\(siteName) search 失败：\(message)"
+        let fullMessage = L10n.string(
+            "provider.search.failed",
+            fallback: "%1$@ search failed: %2$@",
+            siteName,
+            message
+        )
         let value = message.lowercased()
         if statusCode == 404,
            value.contains("route post:"),
@@ -2205,7 +2274,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         siteName: String,
         error: Error
     ) -> SiteSearchError {
-        let message = "\(siteName) search 失败：\(error.localizedDescription)"
+        let message = L10n.string(
+            "provider.search.failed",
+            fallback: "%1$@ search failed: %2$@",
+            siteName,
+            error.localizedDescription
+        )
         guard let clientError = error as? HTTPClientError else {
             return SiteSearchError(
                 message,
@@ -3246,7 +3320,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             in: .whitespacesAndNewlines
         )
         guard let provider, !provider.isEmpty else { return message }
-        return "网盘代理（\(provider)）：\(message)"
+        return L10n.string(
+            "provider.cloud-proxy.error",
+            fallback: "Cloud-drive proxy (%1$@): %2$@",
+            provider,
+            message
+        )
     }
 
     private static func shouldAwaitLateAuthorizationMessage(

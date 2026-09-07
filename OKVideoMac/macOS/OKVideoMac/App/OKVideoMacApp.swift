@@ -1351,7 +1351,7 @@ private struct PlayerPlaybackWindowRoot: View {
             Alert(
                 title: Text(error.title),
                 message: Text(error.message),
-                dismissButton: .default(Text("好"))
+                dismissButton: .default(Text(L10n.string("common.ok", fallback: "OK")))
             )
         }
         .appConfigurationSheet(scope: .player)
@@ -1608,7 +1608,7 @@ struct AppCommands: Commands {
     @ObservedObject var state: AppState
 
     var body: some Commands {
-        CommandMenu("导航") {
+        CommandMenu(L10n.string("menu.navigation", fallback: "Navigate")) {
             ForEach(Array(AppSection.allCases.enumerated()), id: \.element.id) {
                 index, section in
                 Button(section.title) {
@@ -1623,19 +1623,19 @@ struct AppCommands: Commands {
 
             Divider()
 
-            Button("搜索") {
+            Button(L10n.string("menu.navigation.search", fallback: "Search")) {
                 state.focusGlobalSearch()
             }
             .keyboardShortcut("f", modifiers: .command)
             .disabled(!state.allowsBrowserShortcuts)
 
-            Button("快速切换…") {
+            Button(L10n.string("menu.navigation.quick-switcher", fallback: "Quick Switcher…")) {
                 state.presentQuickSwitcher()
             }
             .keyboardShortcut("k", modifiers: .command)
             .disabled(!state.allowsBrowserShortcuts)
 
-            Button("打开点播配置") {
+            Button(L10n.string("menu.navigation.open-vod-configuration", fallback: "Open VOD Configuration")) {
                 state.selectedSettingsPane = .configurations
                 state.selectSection(.settings)
             }
@@ -1644,19 +1644,19 @@ struct AppCommands: Commands {
 
             Divider()
 
-            Button("刷新当前页面") {
+            Button(L10n.string("menu.navigation.refresh", fallback: "Reload Current Page")) {
                 Task { await state.performContextRefresh() }
             }
             .keyboardShortcut("r", modifiers: .command)
             .disabled(!state.allowsBrowserShortcuts)
 
-            Button("返回") {
+            Button(L10n.string("menu.navigation.back", fallback: "Back")) {
                 Task { await state.performBackShortcut() }
             }
             .keyboardShortcut("[", modifiers: .command)
             .disabled(!state.allowsBrowserShortcuts)
 
-            Button("停止当前操作") {
+            Button(L10n.string("menu.navigation.stop", fallback: "Stop Current Operation")) {
                 state.stopCurrentShortcutOperation()
             }
             .keyboardShortcut(".", modifiers: .command)
@@ -1664,41 +1664,41 @@ struct AppCommands: Commands {
 
             Divider()
 
-            Button("键盘快捷键") {
+            Button(L10n.string("menu.navigation.shortcuts", fallback: "Keyboard Shortcuts")) {
                 state.presentShortcutHelp()
             }
             .keyboardShortcut("/", modifiers: .command)
             .disabled(!state.allowsBrowserShortcuts)
         }
 
-        CommandMenu("播放") {
-            Button("播放/暂停") {
+        CommandMenu(L10n.string("menu.playback", fallback: "Playback")) {
+            Button(L10n.string("menu.playback.play-pause", fallback: "Play/Pause")) {
                 Task { await state.togglePlayPause() }
             }
                 .keyboardShortcut(.space, modifiers: [])
                 .disabled(!state.allowsPlayerShortcuts)
-            Button("快退 10 秒") {
+            Button(L10n.string("menu.playback.seek-back-10", fallback: "Back 10 Seconds")) {
                 Task { await state.seek(by: -10) }
             }
                 .keyboardShortcut(.leftArrow, modifiers: [])
                 .disabled(
                     !state.allowsPlayerShortcuts || !state.canSeekPlayback
                 )
-            Button("快进 10 秒") {
+            Button(L10n.string("menu.playback.seek-forward-10", fallback: "Forward 10 Seconds")) {
                 Task { await state.seek(by: 10) }
             }
                 .keyboardShortcut(.rightArrow, modifiers: [])
                 .disabled(
                     !state.allowsPlayerShortcuts || !state.canSeekPlayback
                 )
-            Button("快退 30 秒") {
+            Button(L10n.string("menu.playback.seek-back-30", fallback: "Back 30 Seconds")) {
                 Task { await state.seek(by: -30) }
             }
                 .keyboardShortcut(.leftArrow, modifiers: .shift)
                 .disabled(
                     !state.allowsPlayerShortcuts || !state.canSeekPlayback
                 )
-            Button("快进 30 秒") {
+            Button(L10n.string("menu.playback.seek-forward-30", fallback: "Forward 30 Seconds")) {
                 Task { await state.seek(by: 30) }
             }
                 .keyboardShortcut(.rightArrow, modifiers: .shift)
@@ -1708,14 +1708,14 @@ struct AppCommands: Commands {
 
             Divider()
 
-            Button("上一集") {
+            Button(L10n.string("menu.playback.previous-episode", fallback: "Previous Episode")) {
                 Task { await state.playAdjacentEpisode(offset: -1) }
             }
                 .keyboardShortcut(.leftArrow, modifiers: .option)
                 .disabled(
                     !state.allowsPlayerShortcuts || !state.hasPreviousEpisode
                 )
-            Button("下一集") {
+            Button(L10n.string("menu.playback.next-episode", fallback: "Next Episode")) {
                 Task { await state.playAdjacentEpisode(offset: 1) }
             }
                 .keyboardShortcut(.rightArrow, modifiers: .option)
@@ -1725,14 +1725,14 @@ struct AppCommands: Commands {
 
             Divider()
 
-            Button("上一个直播频道") {
+            Button(L10n.string("menu.playback.previous-channel", fallback: "Previous Live Channel")) {
                 Task { await state.switchLiveChannel(by: -1) }
             }
                 .keyboardShortcut(.upArrow, modifiers: [])
                 .disabled(
                     !state.allowsPlayerShortcuts || !state.canSwitchLiveChannel
                 )
-            Button("下一个直播频道") {
+            Button(L10n.string("menu.playback.next-channel", fallback: "Next Live Channel")) {
                 Task { await state.switchLiveChannel(by: 1) }
             }
                 .keyboardShortcut(.downArrow, modifiers: [])
@@ -1742,17 +1742,17 @@ struct AppCommands: Commands {
 
             Divider()
 
-            Button("静音/取消静音") {
+            Button(L10n.string("menu.playback.toggle-mute", fallback: "Mute/Unmute")) {
                 Task { await state.togglePlayerMute() }
             }
                 .keyboardShortcut("m", modifiers: [])
                 .disabled(!state.allowsPlayerShortcuts)
-            Button("降低音量") {
+            Button(L10n.string("menu.playback.volume-down", fallback: "Volume Down")) {
                 Task { await state.adjustPlayerVolume(by: -5) }
             }
                 .keyboardShortcut("-", modifiers: [])
                 .disabled(!state.allowsPlayerShortcuts)
-            Button("提高音量") {
+            Button(L10n.string("menu.playback.volume-up", fallback: "Volume Up")) {
                 Task { await state.adjustPlayerVolume(by: 5) }
             }
                 .keyboardShortcut("=", modifiers: [])
@@ -1760,7 +1760,7 @@ struct AppCommands: Commands {
 
             Divider()
 
-            Button("字幕开关") {
+            Button(L10n.string("menu.playback.toggle-subtitles", fallback: "Toggle Subtitles")) {
                 Task { await state.togglePlayerSubtitles() }
             }
                 .keyboardShortcut("c", modifiers: [])
@@ -1768,7 +1768,7 @@ struct AppCommands: Commands {
                     !state.allowsPlayerShortcuts
                         || !state.hasPlayerSubtitleTracks
                 )
-            Button("下一个音轨") {
+            Button(L10n.string("menu.playback.next-audio-track", fallback: "Next Audio Track")) {
                 Task { await state.cyclePlayerAudioTrack() }
             }
                 .keyboardShortcut("a", modifiers: [])
@@ -1776,12 +1776,12 @@ struct AppCommands: Commands {
                     !state.allowsPlayerShortcuts || !state.hasPlayerAudioTracks
                 )
 
-            Button("降低播放速度") {
+            Button(L10n.string("menu.playback.speed-down", fallback: "Decrease Playback Speed")) {
                 Task { await state.adjustPlayerSpeed(by: -0.25) }
             }
                 .keyboardShortcut(",", modifiers: .shift)
                 .disabled(!state.allowsPlayerShortcuts || state.isLivePlayback)
-            Button("提高播放速度") {
+            Button(L10n.string("menu.playback.speed-up", fallback: "Increase Playback Speed")) {
                 Task { await state.adjustPlayerSpeed(by: 0.25) }
             }
                 .keyboardShortcut(".", modifiers: .shift)
@@ -1789,18 +1789,18 @@ struct AppCommands: Commands {
 
             Divider()
 
-            Button("进入/退出全屏 (F)") {
+            Button(L10n.string("menu.playback.toggle-full-screen-f", fallback: "Enter/Exit Full Screen (F)")) {
                 state.togglePlayerFullScreen()
             }
                 .keyboardShortcut("f", modifiers: [])
                 .disabled(!state.allowsPlayerShortcuts)
-            Button("进入/退出全屏") {
+            Button(L10n.string("menu.playback.toggle-full-screen", fallback: "Enter/Exit Full Screen")) {
                 state.togglePlayerFullScreen()
             }
                 .keyboardShortcut("f", modifiers: [.command, .control])
                 .disabled(!state.allowsPlayerShortcuts)
 
-            Button("关闭面板或退出全屏") {
+            Button(L10n.string("menu.playback.close-panel-or-full-screen", fallback: "Close Panel or Exit Full Screen")) {
                 state.requestPlayerEscapeHandling()
             }
                 .keyboardShortcut(.cancelAction)

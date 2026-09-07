@@ -16,8 +16,8 @@ struct FavoritesView: View {
             if state.favorites.isEmpty {
                 EmptyStateView(
                     systemImage: "star",
-                    title: "暂无收藏",
-                    message: "在影片详情中选择收藏后会显示在这里。"
+                    title: L10n.string("favorites.empty.title", fallback: "No Favorites"),
+                    message: L10n.string("favorites.empty.message", fallback: "Movies and shows you add to Favorites appear here.")
                 )
             } else {
                 favoritesList
@@ -25,7 +25,7 @@ struct FavoritesView: View {
         }
         .navigationTitle("")
         .toolbar {
-            PrimaryPageToolbarLeadingContent(title: "收藏")
+            PrimaryPageToolbarLeadingContent(title: L10n.string(.sectionFavorites))
             ToolbarItemGroup(placement: .primaryAction) {
                 if !state.isDetailPagePresented,
                    !state.favorites.isEmpty {
@@ -37,8 +37,8 @@ struct FavoritesView: View {
             deletionTitle,
             isPresented: deletionAlertIsPresented
         ) {
-            Button("取消", role: .cancel) {}
-            Button("删除", role: .destructive) {
+            Button(L10n.string(.commonCancel), role: .cancel) {}
+            Button(L10n.string("common.delete", fallback: "Delete"), role: .destructive) {
                 performDeletion()
             }
         } message: {
@@ -119,7 +119,7 @@ struct FavoritesView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(favorite.title)
                             .font(.headline)
-                        Text("站点：\(favorite.siteKey)")
+                        Text(L10n.string("favorites.provider", fallback: "Provider: %@", favorite.siteKey))
                             .font(.caption)
                             .foregroundColor(.secondary)
                         if let synopsis = favorite.synopsis {
@@ -142,7 +142,7 @@ struct FavoritesView: View {
                 Button(role: .destructive) {
                     pendingDeletion = .items([favorite.id])
                 } label: {
-                    Label("删除这条收藏", systemImage: "trash")
+                    Label(L10n.string("favorites.delete-one", fallback: "Remove Favorite"), systemImage: "trash")
                 }
             }
 
@@ -156,7 +156,7 @@ struct FavoritesView: View {
                 .buttonStyle(.plain)
                 .appInteractiveHover(cornerRadius: 8, destructive: true)
                 .foregroundStyle(.secondary)
-                .help("删除这条收藏")
+                .help(L10n.string("favorites.delete-one", fallback: "Remove Favorite"))
             }
         }
     }
@@ -199,13 +199,19 @@ struct FavoritesView: View {
                 : Set(state.favorites.map(\.id))
         } label: {
             Label(
-                allItemsSelected ? "取消全选" : "全选",
+                allItemsSelected
+                    ? L10n.string("common.deselect-all", fallback: "Deselect All")
+                    : L10n.string("common.select-all", fallback: "Select All"),
                 systemImage: allItemsSelected
                     ? "checkmark.circle.badge.xmark"
                     : "checkmark.circle"
             )
         }
-        .help(allItemsSelected ? "取消全选" : "全选")
+        .help(
+            allItemsSelected
+                ? L10n.string("common.deselect-all", fallback: "Deselect All")
+                : L10n.string("common.select-all", fallback: "Select All")
+        )
     }
 
     private var deleteSelectedButton: some View {
@@ -214,17 +220,21 @@ struct FavoritesView: View {
         } label: {
             Label(
                 selectedIDs.isEmpty
-                    ? "删除所选"
-                    : "删除所选（\(selectedIDs.count)）",
+                    ? L10n.string("common.delete-selected", fallback: "Delete Selected")
+                    : L10n.string("common.delete-selected-count", fallback: "Delete Selected (%d)", selectedIDs.count),
                 systemImage: "trash"
             )
         }
         .disabled(selectedIDs.isEmpty)
-        .help(selectedIDs.isEmpty ? "请先选择收藏" : "删除所选收藏")
+        .help(
+            selectedIDs.isEmpty
+                ? L10n.string("favorites.select-first", fallback: "Select favorites first")
+                : L10n.string("favorites.delete-selected", fallback: "Delete Selected Favorites")
+        )
     }
 
     private var finishSelectionButton: some View {
-        Button("完成") {
+        Button(L10n.string("common.done", fallback: "Done")) {
             isSelecting = false
             selectedIDs.removeAll()
         }
@@ -234,18 +244,18 @@ struct FavoritesView: View {
         Button {
             isSelecting = true
         } label: {
-            Label("选择", systemImage: "checklist")
+            Label(L10n.string("common.select", fallback: "Select"), systemImage: "checklist")
         }
-        .help("选择收藏")
+        .help(L10n.string("favorites.select", fallback: "Select Favorites"))
     }
 
     private var clearAllButton: some View {
         Button(role: .destructive) {
             pendingDeletion = .all
         } label: {
-            Label("清空收藏", systemImage: "trash")
+            Label(L10n.string("favorites.clear", fallback: "Clear Favorites"), systemImage: "trash")
         }
-        .help("清空收藏")
+        .help(L10n.string("favorites.clear", fallback: "Clear Favorites"))
     }
 
     private var selectionManagementMenu: some View {
@@ -253,10 +263,10 @@ struct FavoritesView: View {
             selectAllButton
             deleteSelectedButton
         } label: {
-            Label("选择操作", systemImage: "ellipsis.circle")
+            Label(L10n.string("common.selection-actions", fallback: "Selection Actions"), systemImage: "ellipsis.circle")
                 .labelStyle(.iconOnly)
         }
-        .help("选择操作")
+        .help(L10n.string("common.selection-actions", fallback: "Selection Actions"))
     }
 
     private var normalManagementMenu: some View {
@@ -264,10 +274,10 @@ struct FavoritesView: View {
             beginSelectionButton
             clearAllButton
         } label: {
-            Label("管理收藏", systemImage: "ellipsis.circle")
+            Label(L10n.string("favorites.manage", fallback: "Manage Favorites"), systemImage: "ellipsis.circle")
                 .labelStyle(.iconOnly)
         }
-        .help("管理收藏")
+        .help(L10n.string("favorites.manage", fallback: "Manage Favorites"))
     }
 
     private var allItemsSelected: Bool {
@@ -283,17 +293,17 @@ struct FavoritesView: View {
 
     private var deletionTitle: String {
         if case .some(.all) = pendingDeletion {
-            return "清空全部收藏？"
+            return L10n.string("favorites.clear.title", fallback: "Clear All Favorites?")
         }
-        return "删除收藏？"
+        return L10n.string("favorites.delete.title", fallback: "Delete Favorites?")
     }
 
     private var deletionMessage: String {
         switch pendingDeletion {
         case .some(.all):
-            return "将删除全部影片收藏，此操作无法撤销。"
+            return L10n.string("favorites.clear.message", fallback: "All movie and show favorites will be removed. This cannot be undone.")
         case let .some(.items(ids)):
-            return "将删除所选的 \(ids.count) 条收藏，此操作无法撤销。"
+            return L10n.string("favorites.delete.message", fallback: "%d selected favorites will be removed. This cannot be undone.", ids.count)
         case nil:
             return ""
         }

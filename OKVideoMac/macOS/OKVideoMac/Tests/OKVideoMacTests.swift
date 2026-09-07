@@ -79,6 +79,68 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertFalse(chinese.usedEnglishFallback)
     }
 
+    func testStringCatalogAppliesEnglishPluralRules() {
+        let english = AppLocalizer(language: .english)
+        let chinese = AppLocalizer(language: .simplifiedChinese)
+        let key = L10nKey(rawValue: "player.stream-count")
+
+        XCTAssertEqual(
+            english.string(key, fallback: "%d streams", arguments: [1]),
+            "1 stream"
+        )
+        XCTAssertEqual(
+            english.string(key, fallback: "%d streams", arguments: [2]),
+            "2 streams"
+        )
+        XCTAssertEqual(
+            chinese.string(key, fallback: "%d 条线路", arguments: [1]),
+            "1 条线路"
+        )
+        XCTAssertEqual(
+            chinese.string(key, fallback: "%d 条线路", arguments: [2]),
+            "2 条线路"
+        )
+    }
+
+    func testUnknownSystemLanguageFallsBackToEnglishResources() {
+        let resolved = AppLanguageResolver.resolve(
+            mode: .system,
+            preferredLanguages: ["fr-FR"]
+        )
+        let localizer = AppLocalizer(language: resolved)
+
+        XCTAssertEqual(resolved, .english)
+        XCTAssertEqual(localizer.string(.sectionSettings), "Settings")
+    }
+
+    func testCommonRuntimeErrorsDoNotLeakAppAuthoredChineseInEnglish() {
+        let english = AppLocalizer(language: .english)
+        let chinese = AppLocalizer(language: .simplifiedChinese)
+        let legacyError = AppError.network("网络连接失败")
+
+        XCTAssertEqual(
+            CommonUserFacingErrorMapper.message(
+                for: legacyError,
+                localizer: english
+            ),
+            "The network request failed. Check your connection and try again."
+        )
+        XCTAssertEqual(
+            CommonUserFacingErrorMapper.message(
+                for: legacyError,
+                localizer: chinese
+            ),
+            "网络连接失败"
+        )
+        XCTAssertEqual(
+            CommonUserFacingErrorMapper.message(
+                for: ProviderPlaybackError("服务端要求重新登录"),
+                localizer: english
+            ),
+            "服务端要求重新登录"
+        )
+    }
+
     func testThemeLegacyValuesMigrateToStableIdentity() {
         XCTAssertEqual(AppTheme(persistedValue: "跟随系统"), .system)
         XCTAssertEqual(AppTheme(persistedValue: "浅色"), .light)
@@ -124,9 +186,7 @@ final class OKVideoMacTests: XCTestCase {
         )
 
         XCTAssertThrowsError(try ApplicationInstanceLease(lockURL: lockURL)) {
-            XCTAssertTrue(
-                $0.localizedDescription.contains("另一个 OKVideoMac 实例")
-            )
+            XCTAssertTrue($0.localizedDescription.contains("OKVideoMac"))
         }
 
         first?.close()
@@ -2596,13 +2656,37 @@ final class OKVideoMacTests: XCTestCase {
     func testSidebarSearchUsesSectionSpecificLanguage() {
         let video = SidebarSearchPresentationPolicy.presentation(for: .home)
         XCTAssertEqual(video.kind, .video)
-        XCTAssertEqual(video.placeholder, "搜索点播内容…")
-        XCTAssertEqual(video.accessibilityLabel, "搜索点播内容")
+        XCTAssertEqual(
+            video.placeholder,
+            L10n.string(
+                "sidebar.search.video.placeholder",
+                fallback: "Search videos…"
+            )
+        )
+        XCTAssertEqual(
+            video.accessibilityLabel,
+            L10n.string(
+                "sidebar.search.video.accessibility",
+                fallback: "Search videos"
+            )
+        )
 
         let live = SidebarSearchPresentationPolicy.presentation(for: .live)
         XCTAssertEqual(live.kind, .liveChannels)
-        XCTAssertEqual(live.placeholder, "搜索频道…")
-        XCTAssertEqual(live.accessibilityLabel, "搜索直播频道")
+        XCTAssertEqual(
+            live.placeholder,
+            L10n.string(
+                "sidebar.search.live.placeholder",
+                fallback: "Search channels…"
+            )
+        )
+        XCTAssertEqual(
+            live.accessibilityLabel,
+            L10n.string(
+                "sidebar.search.live.accessibility",
+                fallback: "Search live TV channels"
+            )
+        )
 
         for section in [AppSection.favorites, .history, .settings] {
             XCTAssertEqual(
@@ -11126,7 +11210,12 @@ final class OKVideoMacTests: XCTestCase {
         )
         XCTAssertEqual(status.phase, .failed)
         XCTAssertEqual(status.stage, .checkingEmulatorNetwork)
-        XCTAssertTrue(status.detail.contains("network evidence"))
+        XCTAssertTrue(
+            status.detail.contains(
+                AndroidRuntimeFailureError(record: failure).userFacingMessage
+            )
+        )
+        XCTAssertFalse(status.detail.contains("network evidence"))
     }
 
     func testAndroidRecoveryIsBoundedAndSkipsKnownFailedCommand() {

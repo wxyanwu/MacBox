@@ -8,8 +8,8 @@ enum AndroidRuntimeMode: String, Codable, CaseIterable, Sendable {
 
     var userFacingName: String {
         switch self {
-        case .managed: return "OKVideoMac 自动管理"
-        case .external: return "现有 Android SDK"
+        case .managed: return L10n.string("android.mode.managed", fallback: "Managed by OKVideoMac")
+        case .external: return L10n.string("android.mode.external", fallback: "Existing Android SDK")
         }
     }
 }
@@ -64,11 +64,11 @@ enum AndroidRuntimeModeStoreError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .unreadableSelection:
-            return "Android 运行环境选择记录无法读取"
+            return L10n.string("android.selection.unreadable", fallback: "The Android runtime selection could not be read.")
         case .unsupportedSelectionSchema(let schema):
-            return "Android 运行环境选择记录版本不受支持（\(schema)）"
+            return L10n.string("android.selection.unsupported-schema", fallback: "Android runtime selection schema %lld is unsupported.", schema)
         case .externalSDKRequired:
-            return "使用现有 Android SDK 时必须先选择 SDK 文件夹"
+            return L10n.string("android.selection.sdk-required", fallback: "Choose an SDK folder before using an existing Android SDK.")
         }
     }
 }
@@ -476,17 +476,18 @@ struct ExternalAndroidRuntimeValidation: Equatable, Sendable {
     var userFacingStatus: String {
         if canPrepareRuntime {
             if launchCapability.available {
-                return "可用；可以直接启动现有专用 Android 环境"
+                return L10n.string("android.external.status.ready", fallback: "Available; the existing dedicated Android environment can start directly.")
             }
-            return "可用；首次启动时将创建专用 Android 环境"
+            return L10n.string("android.external.status.create-on-start", fallback: "Available; a dedicated Android environment will be created on first launch.")
         }
-        return issues.first?.detail ?? "现有 Android SDK 配置不可用"
+        return issues.first?.detail
+            ?? L10n.string("android.external.status.unavailable", fallback: "The existing Android SDK configuration is unavailable.")
     }
 
     var userFacingSelectionStatus: String {
         if canPrepareRuntime { return userFacingStatus }
         if createRepairCapability.available {
-            return "SDK 可用，但现有专用 Android 环境不兼容；切换后需要由用户明确执行备份并重建"
+            return L10n.string("android.external.status.rebuild-required", fallback: "The SDK is available, but the existing dedicated Android environment is incompatible. After switching, explicitly choose Back Up and Rebuild.")
         }
         return userFacingStatus
     }
@@ -540,7 +541,7 @@ struct ExternalAndroidRuntimeValidator {
         ), isDirectory.boolValue else {
             issues.append(.init(
                 code: .missingSDKRoot,
-                detail: "以前配置的 Android SDK 文件夹已不存在"
+                detail: L10n.string("android.external.issue.sdk-folder-missing", fallback: "The previously configured Android SDK folder no longer exists.")
             ))
             return unavailable(
                 sdkRoot: sdkRoot,
@@ -592,7 +593,7 @@ struct ExternalAndroidRuntimeValidator {
         if toolchain != nil, images.isEmpty {
             issues.append(.init(
                 code: .missingInteractiveSystemImage,
-                detail: "所选 SDK 没有可用的 arm64 Android system image"
+                detail: L10n.string("android.external.issue.system-image-missing", fallback: "The selected SDK has no usable arm64 Android system image.")
             ))
         }
         let java = javaResolver()
@@ -610,7 +611,7 @@ struct ExternalAndroidRuntimeValidator {
         if avdExists && !configExists {
             issues.append(.init(
                 code: .incompleteAVD,
-                detail: "OKVideoMac 专用 Android 环境目录不完整；未自动覆盖现有数据"
+                detail: L10n.string("android.external.issue.avd-incomplete", fallback: "The OKVideoMac Android environment folder is incomplete. Existing data was not overwritten.")
             ))
         } else if configExists {
             guard let contents = try? String(
@@ -620,7 +621,7 @@ struct ExternalAndroidRuntimeValidator {
                 .systemImageDirectory(in: contents) else {
                 issues.append(.init(
                     code: .invalidAVDConfiguration,
-                    detail: "OKVideoMac 专用 Android 环境的 system image 配置无法读取"
+                    detail: L10n.string("android.external.issue.avd-config-unreadable", fallback: "The system image configuration for the OKVideoMac Android environment could not be read.")
                 ))
                 return result(
                     sdkRoot: sdkRoot,
@@ -645,7 +646,7 @@ struct ExternalAndroidRuntimeValidator {
             guard let image = exactImage else {
                 issues.append(.init(
                     code: .avdSystemImageMissingFromSelectedSDK,
-                    detail: "专用 Android 环境引用的 system image 不在所选 SDK 中"
+                    detail: L10n.string("android.external.issue.avd-image-missing", fallback: "The system image used by the dedicated Android environment is not present in the selected SDK.")
                 ))
                 return result(
                     sdkRoot: sdkRoot,
@@ -665,7 +666,7 @@ struct ExternalAndroidRuntimeValidator {
             if !Self.avdConfiguration(contents, matches: image) {
                 issues.append(.init(
                     code: .avdSystemImageMismatch,
-                    detail: "专用 Android 环境的 API、ABI、tag 与 system image 元数据不一致"
+                    detail: L10n.string("android.external.issue.avd-image-mismatch", fallback: "The dedicated Android environment's API, ABI, or tag does not match the system image metadata.")
                 ))
             }
             let expected = Self.externalFingerprint(
@@ -687,7 +688,7 @@ struct ExternalAndroidRuntimeValidator {
             if case .incompatible(let reason) = fingerprintStatus {
                 issues.append(.init(
                     code: .incompatibleAVDFingerprint,
-                    detail: "专用 Android 环境与现有 SDK 不兼容（\(reason)）；未修改 userdata"
+                    detail: L10n.string("android.external.issue.avd-incompatible", fallback: "The dedicated Android environment is incompatible with the existing SDK (%@). userdata was not modified.", reason)
                 ))
             }
         } else {
@@ -722,11 +723,13 @@ struct ExternalAndroidRuntimeValidator {
             systemImage: nil,
             launchCapability: .init(
                 available: false,
-                detail: issues.first?.detail ?? "无法启动"
+                detail: issues.first?.detail
+                    ?? L10n.string("android.capability.cannot-launch", fallback: "Unable to launch")
             ),
             createRepairCapability: .init(
                 available: false,
-                detail: issues.first?.detail ?? "无法创建或修复"
+                detail: issues.first?.detail
+                    ?? L10n.string("android.capability.cannot-create-repair", fallback: "Unable to create or repair")
             ),
             avdExists: fileManager.fileExists(atPath: layout.avdDirectory.path),
             avdConfigurationExists: false,
@@ -779,13 +782,13 @@ struct ExternalAndroidRuntimeValidator {
         if toolchain?.avdManager == nil {
             createIssues.append(.init(
                 code: .missingAVDManager,
-                detail: "创建或修复专用 Android 环境需要 avdmanager"
+                detail: L10n.string("android.external.issue.avdmanager-required", fallback: "avdmanager is required to create or repair the dedicated Android environment.")
             ))
         }
         if java == nil {
             createIssues.append(.init(
                 code: .missingJava,
-                detail: "创建或修复专用 Android 环境需要 Java Runtime"
+                detail: L10n.string("android.external.issue.java-required", fallback: "A Java Runtime is required to create or repair the dedicated Android environment.")
             ))
         }
         let createAvailable = toolchain != nil
@@ -802,14 +805,16 @@ struct ExternalAndroidRuntimeValidator {
             launchCapability: .init(
                 available: launchAvailable,
                 detail: launchAvailable
-                    ? "现有专用 Android 环境可直接启动"
-                    : (launchIssue?.detail ?? "尚未创建专用 Android 环境")
+                    ? L10n.string("android.capability.launch-ready", fallback: "The existing dedicated Android environment is ready to launch.")
+                    : (launchIssue?.detail
+                        ?? L10n.string("android.capability.not-created", fallback: "The dedicated Android environment has not been created."))
             ),
             createRepairCapability: .init(
                 available: createAvailable,
                 detail: createAvailable
-                    ? "可以创建或修复专用 Android 环境"
-                    : (createIssues.first?.detail ?? "无法创建或修复")
+                    ? L10n.string("android.capability.create-repair-ready", fallback: "The dedicated Android environment can be created or repaired.")
+                    : (createIssues.first?.detail
+                        ?? L10n.string("android.capability.cannot-create-repair", fallback: "Unable to create or repair"))
             ),
             avdExists: avdExists,
             avdConfigurationExists: configExists,
@@ -829,20 +834,23 @@ struct ExternalAndroidRuntimeValidator {
         issues: inout [ExternalAndroidRuntimeIssue]
     ) {
         guard fileManager.fileExists(atPath: url.path) else {
-            issues.append(.init(code: missing, detail: "所选 SDK 缺少 \(label)"))
+            issues.append(.init(
+                code: missing,
+                detail: L10n.string("android.external.issue.tool-missing", fallback: "The selected SDK is missing %@.", label)
+            ))
             return
         }
         guard fileManager.isExecutableFile(atPath: url.path) else {
             issues.append(.init(
                 code: notExecutable,
-                detail: "所选 SDK 的 \(label) 没有执行权限"
+                detail: L10n.string("android.external.issue.tool-not-executable", fallback: "%@ in the selected SDK is not executable.", label)
             ))
             return
         }
         guard architectureInspector(url) else {
             issues.append(.init(
                 code: unsupportedArchitecture,
-                detail: "所选 SDK 的 \(label) 不支持当前 Mac 架构"
+                detail: L10n.string("android.external.issue.tool-architecture", fallback: "%@ in the selected SDK does not support this Mac's architecture.", label)
             ))
             return
         }
@@ -1001,17 +1009,17 @@ enum AndroidRuntimeModeCoordinatorError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .externalNotConfigured:
-            return "尚未选择现有 Android SDK"
+            return L10n.string("android.coordinator.external-not-configured", fallback: "No existing Android SDK has been selected.")
         case .externalUnavailable(let reason):
-            return "现有 Android SDK 当前不可用：\(reason)"
+            return L10n.string("android.coordinator.external-unavailable", fallback: "The existing Android SDK is unavailable: %@", reason)
         case .incompatibleAVD(let reason):
-            return "专用 Android 环境与当前运行环境不兼容（\(reason)）。为保护登录数据，未自动删除或重建。"
+            return L10n.string("android.coordinator.avd-incompatible", fallback: "The dedicated Android environment is incompatible with the current runtime (%@). To protect sign-in data, it was not deleted or rebuilt automatically.", reason)
         case .runtimeMustStop:
-            return "切换 Android 运行环境前，请先停止当前 Android 兼容模块"
+            return L10n.string("android.coordinator.must-stop", fallback: "Stop the Android compatibility module before switching runtimes.")
         case .runtimeSelectionChanged:
-            return "Android 运行环境选择已变化，请重试"
+            return L10n.string("android.coordinator.selection-changed", fallback: "The Android runtime selection changed. Try again.")
         case .managedRuntimeUnavailable:
-            return "OKVideoMac 托管 Android 环境当前不可用"
+            return L10n.string("android.coordinator.managed-unavailable", fallback: "The OKVideoMac-managed Android environment is unavailable.")
         }
     }
 }

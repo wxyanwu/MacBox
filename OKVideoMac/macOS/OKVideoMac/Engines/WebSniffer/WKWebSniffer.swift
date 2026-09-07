@@ -16,11 +16,11 @@ final class WKWebSniffer: NSObject, WebSnifferClient {
     func sniff(_ request: WebSniffRequest) async throws -> SniffedMedia {
         cancel()
         guard ["http", "https"].contains(request.url.scheme?.lowercased() ?? "") else {
-            throw AppError.parsing("Web 嗅探只允许 HTTP/HTTPS 页面")
+            throw AppError.parsing(L10n.string("web-sniffer.scheme.invalid", fallback: "Web sniffing only allows HTTP/HTTPS pages."))
         }
         guard request.allowsPrivateNetworkAccess
                 || !Self.isPrivateNetworkURL(request.url) else {
-            throw AppError.parsing("Web 嗅探拒绝访问本机或内网地址")
+            throw AppError.parsing(L10n.string("web-sniffer.local-address.denied", fallback: "Web sniffing cannot access local or private-network addresses."))
         }
         activeRequest = request
         let configuration = makeConfiguration()
@@ -43,7 +43,7 @@ final class WKWebSniffer: NSObject, WebSnifferClient {
             try? await Task.sleep(nanoseconds: nanoseconds)
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                self?.finish(.failure(AppError.parsing("Web 嗅探超时")))
+                self?.finish(.failure(AppError.parsing(L10n.string("web-sniffer.timeout", fallback: "Web sniffing timed out."))))
             }
         }
 
@@ -95,7 +95,7 @@ final class WKWebSniffer: NSObject, WebSnifferClient {
             backing: .buffered,
             defer: false
         )
-        panel.title = "OKVideoMac Web 嗅探调试"
+        panel.title = L10n.string("web-sniffer.debug.title", fallback: "OKVideoMac Web Sniffing Debugger")
         panel.contentView = webView
         panel.center()
         panel.makeKeyAndOrderFront(nil)
@@ -274,7 +274,7 @@ extension WKWebSniffer: WKNavigationDelegate {
                     self?.finish(
                         .failure(
                             AppError.parsing(
-                                "点击脚本执行失败：\(error.localizedDescription)"
+                                L10n.string("web-sniffer.click-script.failed", fallback: "Click script failed: %@", error.localizedDescription)
                             )
                         )
                     )
@@ -288,7 +288,7 @@ extension WKWebSniffer: WKNavigationDelegate {
         didFail navigation: WKNavigation!,
         withError error: Error
     ) {
-        finish(.failure(AppError.parsing("网页加载失败：\(error.localizedDescription)")))
+        finish(.failure(AppError.parsing(L10n.string("web-sniffer.page-load.failed", fallback: "Web page loading failed: %@", error.localizedDescription))))
     }
 
     func webView(
@@ -296,7 +296,7 @@ extension WKWebSniffer: WKNavigationDelegate {
         didFailProvisionalNavigation navigation: WKNavigation!,
         withError error: Error
     ) {
-        finish(.failure(AppError.parsing("网页导航失败：\(error.localizedDescription)")))
+        finish(.failure(AppError.parsing(L10n.string("web-sniffer.navigation.failed", fallback: "Web navigation failed: %@", error.localizedDescription))))
     }
 }
 

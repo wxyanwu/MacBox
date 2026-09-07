@@ -1195,8 +1195,8 @@ final class CatPawAuthorizationCoordinator {
             websiteURL: url,
             title: site.name.replacingOccurrences(of: "|", with: " "),
             message: providerChallenge == nil
-                ? "已打开当前 CatPaw Runtime 提供的内部页面。"
-                : "等待网盘授权，请使用对应网盘 App 扫码。",
+                ? L10n.string("node.authorization.internal-page-open", fallback: "The internal page provided by the current CatPaw Runtime is open.")
+                : L10n.string("node.authorization.scan", fallback: "Waiting for cloud-drive authorization. Scan the code using the corresponding app."),
             provider: provider,
             profileRevision: profileRevision,
             transport: transport,
@@ -1218,13 +1218,13 @@ final class CatPawAuthorizationCoordinator {
         let providerName = provider?.displayName ?? challenge.providerID
         let detail = message.trimmingCharacters(in: .whitespacesAndNewlines)
         let prompt = detail.isEmpty
-            ? "完成登录后将自动重新验证当前影片。"
-            : "完成登录后将自动重新验证当前影片。\n\(detail)"
+            ? L10n.string("node.authorization.playback-retry", fallback: "After sign-in, the current video will be verified again automatically.")
+            : L10n.string("node.authorization.playback-retry-detail", fallback: "After sign-in, the current video will be verified again automatically.\n%@", detail)
         return NodeWebAuthorizationRequired(
             challengeID: challenge.challengeID,
             requestID: challenge.playbackRequestID.uuidString.lowercased(),
             websiteURL: baseURL.appendingPathComponent("website"),
-            title: "需要\(providerName)授权",
+            title: L10n.string("node.authorization.required", fallback: "%@ Authorization Required", providerName),
             message: prompt,
             provider: providerName,
             profileRevision: challenge.profileRevisionBefore,

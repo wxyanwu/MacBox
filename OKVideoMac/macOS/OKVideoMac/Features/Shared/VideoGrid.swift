@@ -89,7 +89,7 @@ struct AppActivityIndicator: View {
         .frame(width: size.diameter, height: size.diameter)
         .fixedSize()
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("正在加载")
+        .accessibilityLabel(L10n.string("common.loading", fallback: "Loading"))
         .onAppear {
             lifecycle.appear(reduceMotion: reduceMotion)
         }
@@ -245,7 +245,7 @@ struct BrowseSegmentedNavigationLabel: View {
 struct BrowseSegmentedMoreLabel: View {
     var body: some View {
         HStack(spacing: 5) {
-            Text("更多")
+            Text(L10n.string("common.more", fallback: "More"))
             Image(systemName: "chevron.down")
                 .font(.caption2.weight(.semibold))
         }
@@ -369,7 +369,7 @@ private struct VideoCard: View {
         .zIndex(isHovering ? 1 : 0)
         .animation(.easeOut(duration: 0.16), value: isHovering)
         .onHover { isHovering = $0 }
-        .accessibilityLabel("\(item.title)，来源 \(item.siteName)")
+        .accessibilityLabel(L10n.string("video.provider-accessibility", fallback: "%@, from %@", item.title, item.siteName))
     }
 
     private var secondaryText: String? {
@@ -446,7 +446,7 @@ struct VideoPosterView: View {
                         .background(Color.black.opacity(0.62))
                         .clipShape(Circle())
                         .padding(7)
-                        .accessibilityLabel("分类导航")
+                        .accessibilityLabel(L10n.string("video.category-navigation", fallback: "Category Navigation"))
                 }
             }
             .overlay(alignment: .bottomTrailing) {
@@ -462,7 +462,7 @@ struct VideoPosterView: View {
                         .background(Color.black.opacity(0.72))
                         .clipShape(Capsule())
                         .padding(7)
-                        .accessibilityLabel("评分 \(rating)")
+                        .accessibilityLabel(L10n.string("video.rating", fallback: "Rating %@", rating))
                 }
             }
     }
@@ -475,14 +475,14 @@ struct VideoPosterView: View {
                 Image(systemName: "rectangle.stack.fill")
                     .font(.system(size: 34, weight: .medium))
                     .foregroundStyle(Color.accentColor)
-                Text("分类导航")
+                Text(L10n.string("video.category-navigation", fallback: "Category Navigation"))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
             }
         }
         .aspectRatio(2 / 3, contentMode: .fit)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("分类导航")
+        .accessibilityLabel(L10n.string("video.category-navigation", fallback: "Category Navigation"))
     }
 }
 
@@ -499,16 +499,16 @@ struct AutomaticPageLoader: View {
             if isLoading {
                 VideoGridSkeleton()
             } else if errorMessage != nil {
-                Button("加载失败，点击重试") {
+                Button(L10n.string("pagination.failed.retry", fallback: "Loading Failed — Try Again")) {
                     onLoad()
                 }
                 .buttonStyle(.bordered)
                 .frame(maxWidth: .infinity)
-                .help(errorMessage ?? "下一页加载失败")
+                .help(errorMessage ?? L10n.string("pagination.failed", fallback: "The next page could not be loaded"))
             } else if hasTriggered {
                 HStack(spacing: 8) {
                     AppActivityIndicator(size: .small)
-                    Text("正在准备下一页…")
+                    Text(L10n.string("pagination.preparing", fallback: "Preparing the next page…"))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -543,10 +543,12 @@ struct AutomaticPageLoader: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(
-            isLoading ? "正在加载下一页" :
+            isLoading ? L10n.string("pagination.loading", fallback: "Loading the next page") :
                 (errorMessage != nil
-                    ? "下一页加载失败，点击重试"
-                    : (hasTriggered ? "正在准备下一页" : "继续滚动以加载下一页"))
+                    ? L10n.string("pagination.failed.retry", fallback: "Loading Failed — Try Again")
+                    : (hasTriggered
+                        ? L10n.string("pagination.preparing", fallback: "Preparing the next page…")
+                        : L10n.string("pagination.scroll", fallback: "Keep scrolling to load the next page")))
         )
     }
 }
@@ -555,12 +557,12 @@ struct PaginationCompletionFooter: View {
     let itemCount: Int
 
     var body: some View {
-        Label("已加载全部，共 \(itemCount) 项", systemImage: "checkmark.circle")
+        Label(L10n.string("pagination.complete", fallback: "All %d items loaded", itemCount), systemImage: "checkmark.circle")
             .font(.caption)
             .foregroundColor(.secondary)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 8)
-            .accessibilityLabel("已加载全部，共 \(itemCount) 项")
+            .accessibilityLabel(L10n.string("pagination.complete", fallback: "All %d items loaded", itemCount))
     }
 }
 

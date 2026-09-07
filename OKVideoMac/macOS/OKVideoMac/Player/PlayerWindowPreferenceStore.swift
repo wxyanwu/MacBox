@@ -9,8 +9,8 @@ enum PlayerWindowMode: String, CaseIterable, Codable, Identifiable, Sendable {
 
     var title: String {
         switch self {
-        case .automaticAspect: return "自动匹配画面"
-        case .fixedFrame: return "固定上次大小"
+        case .automaticAspect: return L10n.string("player.window-sizing.automatic", fallback: "Match Video Automatically")
+        case .fixedFrame: return L10n.string("player.window-sizing.fixed", fallback: "Use Last Window Size")
         }
     }
 }

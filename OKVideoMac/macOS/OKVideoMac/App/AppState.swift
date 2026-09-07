@@ -800,19 +800,19 @@ enum NodeUserFacingErrorMapper {
             switch nodeError {
             case .unsupportedHostContract:
                 return .init(
-                    title: "Node 兼容模式不受支持",
-                    message: "该内容源需要当前版本尚未支持的宿主能力，已停止加载。"
+                    title: L10n.string("node.error.unsupported.title", fallback: "Unsupported Node Compatibility Mode"),
+                    message: L10n.string("node.error.unsupported.message", fallback: "This provider requires host capabilities that are not supported by this version. Loading stopped.")
                 )
             case .configurationContractInvalid:
                 return .init(
-                    title: "Node 源配置无效",
-                    message: "该源提供的运行配置不完整或格式不受支持。"
+                    title: L10n.string("node.error.invalid-config.title", fallback: "Invalid Node Provider Configuration"),
+                    message: L10n.string("node.error.invalid-config.message", fallback: "This provider supplied an incomplete or unsupported runtime configuration.")
                 )
             case .hostCapabilityUnavailable, .portAllocationFailed,
                  .loopbackEnforcementFailed, .contractBReadinessFailed:
                 return .init(
-                    title: "Node Runtime 启动失败",
-                    message: "本地运行服务未能通过安全启动检查，请稍后重试。"
+                    title: L10n.string("node.error.startup.title", fallback: "Node Runtime Failed to Start"),
+                    message: L10n.string("node.error.startup.message", fallback: "The local runtime service did not pass its startup security checks. Try again later.")
                 )
             default:
                 break
@@ -820,45 +820,184 @@ enum NodeUserFacingErrorMapper {
             switch nodeError.diagnosticClassification.category {
             case .transport:
                 return .init(
-                    title: "Node 组件连接失败",
-                    message: "无法获取运行组件，已尝试使用经过校验的本地缓存。请稍后重试。"
+                    title: L10n.string("node.error.component-connection.title", fallback: "Node Component Connection Failed"),
+                    message: L10n.string("node.error.component-connection.message", fallback: "The runtime component could not be retrieved. A verified local cache was attempted. Try again later.")
                 )
             case .trust:
                 return .init(
-                    title: "Node 安全校验失败",
-                    message: "远程运行组件未通过完整性校验，已停止加载。"
+                    title: L10n.string("node.error.integrity.title", fallback: "Node Security Check Failed"),
+                    message: L10n.string("node.error.integrity.message", fallback: "The remote runtime component failed integrity validation. Loading stopped.")
                 )
             case .cache:
                 return .init(
-                    title: "Node 缓存不可用",
-                    message: "本地运行组件缓存无法通过校验或升级，请稍后重试。"
+                    title: L10n.string("node.error.cache.title", fallback: "Node Cache Unavailable"),
+                    message: L10n.string("node.error.cache.message", fallback: "The local runtime component cache could not be validated or upgraded. Try again later.")
                 )
             case .runtime:
                 return .init(
-                    title: "Node Runtime 启动失败",
-                    message: "内置运行环境未能正常启动，请重启应用后重试。"
+                    title: L10n.string("node.error.startup.title", fallback: "Node Runtime Failed to Start"),
+                    message: L10n.string("node.error.bundled-startup.message", fallback: "The built-in runtime did not start correctly. Restart the app and try again.")
                 )
             case .spiderSite:
                 return .init(
-                    title: "内容源请求失败",
-                    message: "当前站点暂时无响应，其他站点仍可继续使用。"
+                    title: L10n.string("provider.error.request.title", fallback: "Provider Request Failed"),
+                    message: L10n.string("provider.error.unresponsive.message", fallback: "The current provider is temporarily unresponsive. Other providers remain available.")
                 )
             }
         }
         if let appError = error as? AppError {
             switch appError {
-            case .contentUnavailable(let message):
-                return .init(title: "无法打开内容", message: message)
             case .spider:
                 return .init(
-                    title: "内容源请求失败",
-                    message: "当前站点返回了无法处理的结果，请稍后重试或更换站点。"
+                    title: L10n.string("provider.error.request.title", fallback: "Provider Request Failed"),
+                    message: L10n.string("provider.error.invalid-response.message", fallback: "The current provider returned a result that could not be processed. Try again later or choose another provider.")
                 )
             default:
                 break
             }
         }
         return nil
+    }
+}
+
+enum CommonUserFacingErrorMapper {
+    static func message(
+        for error: Error,
+        localizer: AppLocalizer = .shared
+    ) -> String? {
+        if let playbackError = error as? ProviderPlaybackError {
+            // Provider-authored text is content, not application chrome. Keep
+            // it intact while removing AppError's legacy Chinese prefix.
+            return LogRedactor.text(playbackError.message)
+        }
+        guard let appError = error as? AppError else { return nil }
+        switch appError {
+        case .cancelled:
+            return localizer.string(
+                L10nKey(rawValue: "error.common.cancelled"),
+                fallback: "The operation was cancelled."
+            )
+        case .configuration(let message):
+            return localizedOrGeneric(
+                message,
+                key: "error.common.configuration",
+                fallback: "The configuration could not be processed. Check it and try again.",
+                localizer: localizer
+            )
+        case .network(let message):
+            return localizedOrGeneric(
+                message,
+                key: "error.common.network",
+                fallback: "The network request failed. Check your connection and try again.",
+                localizer: localizer
+            )
+        case .decoding(let message):
+            return localizedOrGeneric(
+                message,
+                key: "error.common.decoding",
+                fallback: "The returned data could not be processed. Try another provider or try again later.",
+                localizer: localizer
+            )
+        case .site(let message):
+            return localizedOrGeneric(
+                message,
+                key: "error.common.site",
+                fallback: "The provider could not complete this request. Try again later or use another provider.",
+                localizer: localizer
+            )
+        case .contentUnavailable(let message):
+            return localizedOrGeneric(
+                message,
+                key: "error.common.content-unavailable",
+                fallback: "This content cannot be opened from the current provider.",
+                localizer: localizer
+            )
+        case .spider(let message), .javascript(let message):
+            return localizedOrGeneric(
+                message,
+                key: "error.common.provider-script",
+                fallback: "The provider script could not complete the request.",
+                localizer: localizer
+            )
+        case .parsing(let message):
+            return localizedOrGeneric(
+                message,
+                key: "error.common.parsing",
+                fallback: "The playback address could not be resolved. Try another stream or provider.",
+                localizer: localizer
+            )
+        case .playback(let message):
+            return localizedOrGeneric(
+                message,
+                key: "error.common.playback",
+                fallback: "Playback could not be started or completed.",
+                localizer: localizer
+            )
+        case .live(let message):
+            return localizedOrGeneric(
+                message,
+                key: "error.common.live",
+                fallback: "The Live TV operation could not be completed.",
+                localizer: localizer
+            )
+        case .database(let message):
+            return localizedOrGeneric(
+                message,
+                key: "error.common.database",
+                fallback: "The local database operation failed. Export diagnostics if the problem continues.",
+                localizer: localizer
+            )
+        case .filesystem(let message):
+            return localizedOrGeneric(
+                message,
+                key: "error.common.filesystem",
+                fallback: "The file operation failed. Check the selected file or folder and try again.",
+                localizer: localizer
+            )
+        case .unsupported(let message):
+            return localizedOrGeneric(
+                message,
+                key: "error.common.unsupported",
+                fallback: "This operation is not supported.",
+                localizer: localizer
+            )
+        }
+    }
+
+    private static func localizedOrGeneric(
+        _ message: String,
+        key: String,
+        fallback: String,
+        localizer: AppLocalizer
+    ) -> String {
+        let redacted = LogRedactor.text(message)
+        guard localizer.language == .english,
+              redacted.unicodeScalars.contains(where: {
+                  (0x4E00...0x9FFF).contains(Int($0.value))
+              }) else {
+            return redacted
+        }
+        return localizer.string(
+            L10nKey(rawValue: key),
+            fallback: fallback
+        )
+    }
+}
+
+enum RuntimeUserFacingMessageMapper {
+    static func message(for error: Error) -> String {
+        if let presentation = AndroidRuntimeUserFacingErrorMapper.presentation(
+            for: error
+        ) {
+            return presentation.message
+        }
+        if let presentation = NodeUserFacingErrorMapper.presentation(for: error) {
+            return presentation.message
+        }
+        if let message = CommonUserFacingErrorMapper.message(for: error) {
+            return message
+        }
+        return LogRedactor.text(error.localizedDescription)
     }
 }
 
@@ -1818,19 +1957,20 @@ enum SearchScopeSiteAvailabilityPolicy {
         providerCapability: SiteCapability?
     ) -> SearchScopeSiteAvailability {
         if site.extra["okNodeUnsupportedModule"] == .bool(true) {
-            let kind = site.extra["okNodeModuleKind"]?.stringValue ?? "其他"
-            return .unavailable("已识别 \(kind) 模块，当前版本尚未启用对应界面")
+            let kind = site.extra["okNodeModuleKind"]?.stringValue
+                ?? L10n.string("common.other", fallback: "Other")
+            return .unavailable(L10n.string("node.module.unavailable", fallback: "%@ module detected; its interface is not enabled in this version", kind))
         }
         let isCatalogueDisabled = site.extra["okNodeCatalogDisabled"]
             == .bool(true)
         if site.extra["okNodeConfigurationRequired"] == .bool(true) {
-            return .unavailable("未配置账号或挂载")
+            return .unavailable(L10n.string("node.module.account-required", fallback: "No account or mount configured"))
         }
         if site.hide != 0, !isCatalogueDisabled {
-            return .unavailable("配置中已隐藏")
+            return .unavailable(L10n.string("node.module.hidden", fallback: "Hidden by the configuration"))
         }
         if providerCapability == nil || providerCapability == .unsupportedSpider {
-            return .unavailable("当前运行环境不支持")
+            return .unavailable(L10n.string("node.module.runtime-unsupported", fallback: "Unsupported by the current runtime"))
         }
         if site.searchable == 2 || isCatalogueDisabled {
             return .userDisabled
@@ -2441,7 +2581,7 @@ enum HomePresentationPolicy {
                 siteName: siteName,
                 itemID: category.id,
                 title: category.name,
-                remarks: "打开配置功能",
+                remarks: L10n.string("configuration.action.open", fallback: "Open Configuration Action"),
                 route: .actionCategory(categoryID: category.id)
             )
         ]
@@ -3246,13 +3386,13 @@ enum SearchFolderNavigationPolicy {
     ) -> String {
         switch backDestination(pathCount: pathCount, origin: origin) {
         case .parentFolder:
-            return "上一级"
+            return L10n.string("navigation.up", fallback: "Up One Level")
         case .home:
-            return "返回点播"
+            return L10n.string("navigation.back-browse", fallback: "Back to Browse")
         case .searchResults:
-            return "返回搜索结果"
+            return L10n.string("navigation.back-search-results", fallback: "Back to Search Results")
         case .none:
-            return "返回点播"
+            return L10n.string("navigation.back-browse", fallback: "Back to Browse")
         }
     }
 
@@ -3262,13 +3402,13 @@ enum SearchFolderNavigationPolicy {
     ) -> String {
         switch backDestination(pathCount: pathCount, origin: origin) {
         case .parentFolder:
-            return "返回上一级目录"
+            return L10n.string("navigation.back-parent-folder", fallback: "Back to Parent Folder")
         case .home:
-            return "关闭目录并返回进入前的点播分类"
+            return L10n.string("navigation.close-folder-browse", fallback: "Close this folder and return to the previous Browse category")
         case .searchResults:
-            return "关闭目录并返回全部搜索结果"
+            return L10n.string("navigation.close-folder-search", fallback: "Close this folder and return to all search results")
         case .none:
-            return "返回点播"
+            return L10n.string("navigation.back-browse", fallback: "Back to Browse")
         }
     }
 }
@@ -4111,11 +4251,11 @@ enum ConfigurationImportPhase: Equatable {
 
     var title: String {
         switch self {
-        case .downloadingAndParsing: return "正在下载并解析…"
-        case .parsing: return "正在解析配置…"
-        case .startingNodeRuntime: return "正在启动 Node Runtime…"
-        case .saving: return "正在保存配置…"
-        case .activating: return "正在启用配置…"
+        case .downloadingAndParsing: return L10n.string("configuration.stage.download-parse", fallback: "Downloading and parsing…")
+        case .parsing: return L10n.string("configuration.stage.parsing", fallback: "Parsing configuration…")
+        case .startingNodeRuntime: return L10n.string("configuration.stage.starting-node", fallback: "Starting Node Runtime…")
+        case .saving: return L10n.string("configuration.stage.saving", fallback: "Saving configuration…")
+        case .activating: return L10n.string("configuration.stage.activating", fallback: "Activating configuration…")
         }
     }
 }
@@ -4128,10 +4268,10 @@ enum LiveSourceImportPhase: Equatable {
 
     var title: String {
         switch self {
-        case .downloadingAndParsing: return "正在下载并解析…"
-        case .parsing: return "正在解析直播源…"
-        case .saving: return "正在保存直播源…"
-        case .publishing: return "正在发布到直播列表…"
+        case .downloadingAndParsing: return L10n.string("live.stage.download-parse", fallback: "Downloading and parsing…")
+        case .parsing: return L10n.string("live.stage.parsing", fallback: "Parsing Live TV source…")
+        case .saving: return L10n.string("live.stage.saving", fallback: "Saving Live TV source…")
+        case .publishing: return L10n.string("live.stage.publishing", fallback: "Publishing channels…")
         }
     }
 }
@@ -4282,7 +4422,7 @@ final class PlaybackStartupGateController {
                 requestID: requestID,
                 expectedIdentity: identity,
                 error: AppError.playback(
-                    "该线路已载入，但 \(seconds) 秒内没有产生音视频"
+                    L10n.string("player.validation.no-media", fallback: "The stream loaded but produced no audio or video within %d seconds", seconds)
                 )
             )
         }
@@ -4864,15 +5004,15 @@ final class AppState: ObservableObject {
     private var observedNodeProfileRevision: NodeProfileRevisionSnapshot?
     private var activeNodeRuntimeEndpoint: URL?
     private var lastReadyNodeRuntimeEndpoint: URL?
-    private var nodeRuntimeUnavailableReason = "Node Runtime 尚未启动"
+    private var nodeRuntimeUnavailableReason = L10n.string("node.runtime.not-started", fallback: "Node Runtime has not started")
 
     static func bootstrap() -> AppState {
         do {
             let environment = try AppEnvironment.live()
             let warning = environment.recoveredDatabaseDirectory.map {
                 UserFacingError(
-                    title: "已恢复数据库",
-                    message: "损坏的数据库已保留在 \($0.path)，应用已创建新数据库。"
+                    title: L10n.string("database.recovered.title", fallback: "Database Recovered"),
+                    message: L10n.string("database.recovered.message", fallback: "The damaged database was preserved at %@ and a new database was created.", $0.path)
                 )
             }
             return AppState(environment: environment, startupError: warning)
@@ -4880,8 +5020,9 @@ final class AppState: ObservableObject {
             return AppState(
                 environment: nil,
                 startupError: UserFacingError(
-                    title: "无法初始化应用",
-                    message: error.localizedDescription
+                    title: L10n.string("app.initialization.failed", fallback: "Unable to Initialize App"),
+                    message: CommonUserFacingErrorMapper.message(for: error)
+                        ?? LogRedactor.text(error.localizedDescription)
                 )
             )
         }
@@ -4963,7 +5104,7 @@ final class AppState: ObservableObject {
             }
         } catch {
             isHomeLoading = false
-            show(error, title: "启动失败")
+            show(error, title: L10n.string("app.startup.failed", fallback: "Startup Failed"))
         }
     }
 
@@ -4999,16 +5140,16 @@ final class AppState: ObservableObject {
         guard let environment else {
             return .failure(
                 UserFacingError(
-                    title: "配置导入失败",
-                    message: "应用环境尚未初始化"
+                    title: L10n.string("configuration.import.failed", fallback: "Configuration Import Failed"),
+                    message: L10n.string("app.environment.not-initialized", fallback: "The app environment has not been initialized")
                 )
             )
         }
         guard configurationImportOperationID == nil else {
             return .failure(
                 UserFacingError(
-                    title: "配置导入失败",
-                    message: "已有配置正在导入，请稍候"
+                    title: L10n.string("configuration.import.failed", fallback: "Configuration Import Failed"),
+                    message: L10n.string("configuration.import.in-progress", fallback: "Another configuration is already being imported. Wait for it to finish.")
                 )
             )
         }
@@ -5092,7 +5233,7 @@ final class AppState: ObservableObject {
                 nodeRuntimeUnavailableReason = ""
             } else {
                 activeNodeRuntimeEndpoint = nil
-                nodeRuntimeUnavailableReason = "Node Runtime 未用于当前配置"
+                nodeRuntimeUnavailableReason = L10n.string("node.runtime.not-used", fallback: "Node Runtime is not used by the current configuration")
             }
             rebuildProviders()
             selectedSiteKey = HomeLandingSitePolicy.defaultSiteKey(
@@ -5120,7 +5261,7 @@ final class AppState: ObservableObject {
             return .cancelled
         } catch {
             return .failure(
-                userFacingError(for: error, title: "配置导入失败")
+                userFacingError(for: error, title: L10n.string("configuration.import.failed", fallback: "Configuration Import Failed"))
             )
         }
     }
@@ -5138,8 +5279,8 @@ final class AppState: ObservableObject {
         clearConfigurationSwitchFeedback()
         guard activeConfigurationRecord?.sourceKind == .remote else {
             show(
-                AppError.configuration("只有 URL 配置可以直接刷新"),
-                title: "无法刷新"
+                AppError.configuration(L10n.string("configuration.refresh.remote-only", fallback: "Only URL configurations can be refreshed directly")),
+                title: L10n.string("common.refresh.failed", fallback: "Unable to Refresh")
             )
             return
         }
@@ -5159,8 +5300,8 @@ final class AppState: ObservableObject {
               let record = activeConfigurationRecord,
               let sourceURL = activeNodeRuntimeSourceURL else {
             show(
-                AppError.configuration("请先启用一个 CatPawOpen Node 配置。"),
-                title: "无法导入 CatPaw 配置"
+                AppError.configuration(L10n.string("configuration.catpaw.enable-first", fallback: "Enable a CatPawOpen Node configuration first.")),
+                title: L10n.string("configuration.catpaw.import.failed", fallback: "Unable to Import CatPaw Configuration")
             )
             return
         }
@@ -5180,11 +5321,11 @@ final class AppState: ObservableObject {
                 reportErrors: true
             )
             presentedError = UserFacingError(
-                title: "CatPaw 配置已导入",
-                message: "动态站点目录已按新 profile 重新加载，无需重启应用。"
+                title: L10n.string("configuration.catpaw.imported.title", fallback: "CatPaw Configuration Imported"),
+                message: L10n.string("configuration.catpaw.imported.message", fallback: "Dynamic provider directories were reloaded with the new profile. No restart is required.")
             )
         } catch {
-            show(error, title: "无法导入 CatPaw 配置")
+            show(error, title: L10n.string("configuration.catpaw.import.failed", fallback: "Unable to Import CatPaw Configuration"))
         }
     }
 
@@ -5283,7 +5424,7 @@ final class AppState: ObservableObject {
                 return true
             } catch {
                 if reportErrors {
-                    self.show(error, title: "配置刷新失败")
+                    self.show(error, title: L10n.string("configuration.refresh.failed", fallback: "Configuration Refresh Failed"))
                 }
                 // Automatic refresh is best-effort. Keep the last valid cached
                 // configuration so an offline launch remains usable.
@@ -5441,7 +5582,7 @@ final class AppState: ObservableObject {
                 scheduleConfigurationSwitchFeedbackDismissal(for: token)
                 return
             }
-            let presentation = userFacingError(for: error, title: "切换配置失败")
+            let presentation = userFacingError(for: error, title: L10n.string("configuration.switch.failed", fallback: "Configuration Switch Failed"))
             configurationSwitchFeedback = ConfigurationSwitchFeedbackPolicy.failure(
                 current: configurationSwitchFeedback,
                 token: token,
@@ -5482,7 +5623,7 @@ final class AppState: ObservableObject {
         _ record: StoredConfiguration
     ) async throws -> PreparedConfigurationActivation {
         guard environment != nil else {
-            throw AppError.configuration("应用环境尚未初始化")
+            throw AppError.configuration(L10n.string("app.environment.not-initialized", fallback: "The app environment has not been initialized"))
         }
         if record.sourceKind == .remote,
            let sourceValue = record.sourceValue,
@@ -5542,8 +5683,8 @@ final class AppState: ObservableObject {
         lastAutomaticConfigurationRefreshAttemptAt = activeRecord.updatedAt
         activeNodeRuntimeEndpoint = prepared.nodeRuntimeEndpoint
         nodeRuntimeUnavailableReason = prepared.usesNodeRuntime
-            ? "Node Runtime 正在从本地缓存启动"
-            : "Node Runtime 未用于当前配置"
+            ? L10n.string("node.runtime.starting-cache", fallback: "Node Runtime is starting from the local cache")
+            : L10n.string("node.runtime.not-used", fallback: "Node Runtime is not used by the current configuration")
         rebuildProviders()
         selectedSiteKey = HomeLandingSitePolicy.defaultSiteKey(
             from: supportedSites
@@ -5589,7 +5730,7 @@ final class AppState: ObservableObject {
         configurationPostActivationSessionID = UUID()
         let sessionID = configurationPostActivationSessionID
         configurationPostActivationTask?.cancel()
-        nodeRuntimeUnavailableReason = "Node Runtime 正在从本地缓存启动"
+        nodeRuntimeUnavailableReason = L10n.string("node.runtime.starting-cache", fallback: "Node Runtime is starting from the local cache")
         configurationPostActivationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             await self.prepareNodeConfigurationInBackground(
@@ -5646,7 +5787,7 @@ final class AppState: ObservableObject {
                 return
             }
             activeNodeRuntimeEndpoint = nil
-            nodeRuntimeUnavailableReason = "本地缓存不可用，正在后台刷新 Node bundle"
+            nodeRuntimeUnavailableReason = L10n.string("node.runtime.refreshing-bundle", fallback: "Local cache unavailable; refreshing the Node bundle in the background")
         }
 
         do {
@@ -5680,7 +5821,10 @@ final class AppState: ObservableObject {
             // A refresh failure must not take a validated running cache back
             // offline. Only expose the error when no usable Runtime was found.
             if !restoredValidatedCache, activeNodeRuntimeEndpoint == nil {
-                nodeRuntimeUnavailableReason = error.localizedDescription
+                nodeRuntimeUnavailableReason = L10n.string(
+                    "node.runtime.failed.user-facing",
+                    fallback: "Node Runtime is unavailable. Export diagnostics for details."
+                )
             }
         }
 
@@ -5819,7 +5963,7 @@ final class AppState: ObservableObject {
                 try await reloadHistory()
             }
         } catch {
-            show(error, title: "删除配置失败")
+            show(error, title: L10n.string("configuration.delete.failed", fallback: "Configuration Deletion Failed"))
         }
     }
 
@@ -6180,7 +6324,7 @@ final class AppState: ObservableObject {
                 for: queryKey,
                 page: page,
                 generation: generation,
-                message: error.localizedDescription,
+                message: localizedRuntimeErrorMessage(error),
                 isCancellation: isCancellation
             )
             guard let state,
@@ -6192,7 +6336,7 @@ final class AppState: ObservableObject {
                 preserveCurrentPage: state.page == nil && categoryPage != nil
             )
             if !isCancellation, page == 1, reportErrors {
-                show(error, title: "分类加载失败")
+                show(error, title: L10n.string("category.load.failed", fallback: "Category Loading Failed"))
             }
             return false
         }
@@ -6256,7 +6400,7 @@ final class AppState: ObservableObject {
                   $0.id == categoryID && $0.resolvedContentKind == .action
               }) else {
             show(
-                AppError.site("配置页面已更新，请重新打开"),
+                AppError.site(L10n.string("configuration.page.updated", fallback: "The configuration page was updated. Open it again.")),
                 title: item.title
             )
             return
@@ -6289,8 +6433,8 @@ final class AppState: ObservableObject {
               }) else {
             closeConfigurationCategory()
             show(
-                AppError.site("配置页面已更新，请重新打开"),
-                title: "配置中心"
+                AppError.site(L10n.string("configuration.page.updated", fallback: "The configuration page was updated. Open it again.")),
+                title: L10n.string("configuration.center", fallback: "Configuration Center")
             )
             return
         }
@@ -6338,7 +6482,7 @@ final class AppState: ObservableObject {
             configurationCategoryPresentation?.items = items
             configurationCategoryPresentation?.isLoading = false
             configurationCategoryPresentation?.errorMessage = items.isEmpty
-                ? "该配置分类没有返回可执行操作。"
+                ? L10n.string("configuration.actions.empty", fallback: "This configuration category did not return any available actions.")
                 : nil
         } catch is CancellationError {
             guard configurationCategoryLoadSessionID == sessionID,
@@ -6356,7 +6500,7 @@ final class AppState: ObservableObject {
             configurationCategoryPresentation?.errorMessage =
                 AsyncCancellationPolicy.isCancellation(error)
                 ? nil
-                : error.localizedDescription
+                : localizedRuntimeErrorMessage(error)
         }
     }
 
@@ -6414,7 +6558,7 @@ final class AppState: ObservableObject {
                     siteName: provider.site.name,
                     itemID: actionCategory.id,
                     title: actionCategory.name,
-                    remarks: "打开配置功能",
+                    remarks: L10n.string("configuration.action.open", fallback: "Open Configuration Action"),
                     route: .actionCategory(categoryID: actionCategory.id)
                 )
             )
@@ -6478,9 +6622,9 @@ final class AppState: ObservableObject {
                 homeLoadErrorMessage = nil
                 return false
             }
-            homeLoadErrorMessage = error.localizedDescription
+            homeLoadErrorMessage = localizedRuntimeErrorMessage(error)
             if reportErrors {
-                show(error, title: "功能内容加载失败")
+                show(error, title: L10n.string("configuration.action.load.failed", fallback: "Action Content Failed to Load"))
             }
             return false
         }
@@ -6625,10 +6769,10 @@ final class AppState: ObservableObject {
                 ownsSession: true
             )
             homeLoadErrorMessage = shouldPresent
-                ? error.localizedDescription
+                ? localizedRuntimeErrorMessage(error)
                 : nil
             if reportErrors && shouldPresent {
-                show(error, title: "站点加载失败")
+                show(error, title: L10n.string("provider.load.failed", fallback: "Provider Failed to Load"))
             }
             return false
         }
@@ -6690,8 +6834,8 @@ final class AppState: ObservableObject {
         }
         guard let provider = providers[summary.siteKey] else {
             show(
-                AppError.site("来源 \(summary.siteKey) 在当前配置中不可用，记录仍会保留"),
-                title: "来源不可用"
+                AppError.site(L10n.string("provider.unavailable.history-preserved", fallback: "Provider %@ is unavailable in the current configuration. The record will be preserved.", summary.siteKey)),
+                title: L10n.string("provider.unavailable.title", fallback: "Provider Unavailable")
             )
             return
         }
@@ -6749,7 +6893,7 @@ final class AppState: ObservableObject {
                 presentedError = UserFacingError(
                     title: summary.title,
                     message: Self.siteActionMessage(result)
-                        ?? "站点返回了未关联到当前请求的配置操作，请返回后重试。"
+                        ?? L10n.string("configuration.action.mismatched", fallback: "The provider returned a configuration action unrelated to the current request. Go back and try again.")
                 )
             }
         } catch let authorization as NodeWebAuthorizationRequired {
@@ -6760,8 +6904,8 @@ final class AppState: ObservableObject {
             ) else {
                 detailHomeSearchReturnSnapshot = nil
                 show(
-                    AppError.site("该详情所属配置已经发生变化"),
-                    title: "详情加载失败"
+                    AppError.site(L10n.string("detail.configuration-changed", fallback: "The configuration associated with these details has changed")),
+                    title: L10n.string("detail.load.failed", fallback: "Details Failed to Load")
                 )
                 return
             }
@@ -6790,7 +6934,7 @@ final class AppState: ObservableObject {
             guard detailLoadSessionID == sessionID else { return }
             pendingDetailSummary = nil
             detailHomeSearchReturnSnapshot = nil
-            show(error, title: "详情加载失败")
+            show(error, title: L10n.string("detail.load.failed", fallback: "Details Failed to Load"))
         }
     }
 
@@ -6818,7 +6962,7 @@ final class AppState: ObservableObject {
     func performHomeAction(_ item: SiteActionItem) async {
         guard let provider = providers[item.siteKey] else {
             show(
-                AppError.site("该功能所属站点当前不可用"),
+                AppError.site(L10n.string("configuration.action.provider-unavailable", fallback: "The provider for this action is currently unavailable")),
                 title: item.title
             )
             return
@@ -6887,12 +7031,12 @@ final class AppState: ObservableObject {
                    configurationInteractionCoordinator.owns(interactionID) {
                     failConfigurationInteraction(
                         interactionID,
-                        message: "站点把配置入口返回成了影视详情，操作未执行。"
+                        message: L10n.string("configuration.action.returned-detail", fallback: "The provider returned media details instead of a configuration screen. The action was not performed.")
                     )
                 } else {
                     presentedError = UserFacingError(
                         title: item.title,
-                        message: "该入口是功能操作，未作为影视详情打开。"
+                        message: L10n.string("configuration.action.not-detail", fallback: "This entry is a configuration action and was not opened as media details.")
                     )
                 }
             case .action(let result):
@@ -6911,7 +7055,7 @@ final class AppState: ObservableObject {
                     )
                     completeConfigurationInteraction(
                         interactionID,
-                        status: "配置操作已完成"
+                        status: L10n.string("configuration.action.completed", fallback: "Configuration Action Complete")
                     )
                     if cloudAuthorizationPrompt?.interactionID
                         == interactionID {
@@ -6946,7 +7090,7 @@ final class AppState: ObservableObject {
         } catch let authorization as NodeWebAuthorizationRequired {
             guard let identity = activeSourceIdentity(for: item.siteKey) else {
                 show(
-                    AppError.site("该功能所属配置已经发生变化"),
+                    AppError.site(L10n.string("configuration.action.configuration-changed", fallback: "The configuration associated with this action has changed")),
                     title: item.title
                 )
                 return
@@ -7005,10 +7149,10 @@ final class AppState: ObservableObject {
                configurationInteractionCoordinator.owns(interactionID) {
                 failConfigurationInteraction(
                     interactionID,
-                    message: error.localizedDescription
+                    message: localizedRuntimeErrorMessage(error)
                 )
             } else {
-                show(error, title: "\(item.title)失败")
+                show(error, title: L10n.string("common.action.failed", fallback: "%@ Failed", item.title))
             }
         }
     }
@@ -7161,7 +7305,7 @@ final class AppState: ObservableObject {
     var homeSearchBackTitle: String {
         if searchFolderPath.isEmpty {
             if discoverySearchReturnSnapshot?.folderPath.isEmpty == false {
-                return "返回片单"
+                return L10n.string("navigation.back-list", fallback: "Back to List")
             }
             return L10n.string(
                 "search.return-section",
@@ -7178,10 +7322,10 @@ final class AppState: ObservableObject {
     var homeSearchBackHelp: String {
         if searchFolderPath.isEmpty {
             if isSearching {
-                return "停止搜索并保留当前结果"
+                return L10n.string("navigation.stop-search-preserve", fallback: "Stop Search and Keep Current Results")
             }
             if discoverySearchReturnSnapshot?.folderPath.isEmpty == false {
-                return "返回进入搜索前的片单目录"
+                return L10n.string("navigation.back-pre-search-list", fallback: "Return to the list open before search")
             }
             return L10n.string(
                 "search.close-and-return-section",
@@ -7379,7 +7523,7 @@ final class AppState: ObservableObject {
                 )
                 completeConfigurationInteraction(
                     interactionID,
-                    status: "配置操作已完成"
+                    status: L10n.string("configuration.action.completed", fallback: "Configuration Action Complete")
                 )
                 if cloudAuthorizationPrompt?.interactionID == interactionID {
                     retireCompletedConfigurationInteraction(
@@ -7401,7 +7545,7 @@ final class AppState: ObservableObject {
                 for: provider.site.key
             ) else {
                 show(
-                    AppError.site("该功能所属配置已经发生变化"),
+                    AppError.site(L10n.string("configuration.action.configuration-changed", fallback: "The configuration associated with this action has changed")),
                     title: title
                 )
                 return
@@ -7464,10 +7608,10 @@ final class AppState: ObservableObject {
                configurationInteractionCoordinator.owns(interactionID) {
                 failConfigurationInteraction(
                     interactionID,
-                    message: error.localizedDescription
+                    message: localizedRuntimeErrorMessage(error)
                 )
             } else {
-                show(error, title: "\(title)失败")
+                show(error, title: L10n.string("common.action.failed", fallback: "%@ Failed", title))
             }
         }
     }
@@ -7502,7 +7646,7 @@ final class AppState: ObservableObject {
     ) -> UUID? {
         guard let identity = activeSourceIdentity(for: siteKey) else {
             show(
-                AppError.site("该配置操作所属配置已经发生变化"),
+                AppError.site(L10n.string("configuration.action.configuration-changed", fallback: "The configuration associated with this action has changed")),
                 title: title
             )
             return nil
@@ -7560,8 +7704,8 @@ final class AppState: ObservableObject {
                 for: operation
             ),
             status: phase == .invoking
-                ? "正在执行配置操作…"
-                : "正在等待站点创建下一步操作界面…",
+                ? L10n.string("configuration.action.executing", fallback: "Performing configuration action…")
+                : L10n.string("configuration.action.waiting-interface", fallback: "Waiting for the provider to open the next action screen…"),
             allowsRetry: false,
             allowsCompletionConfirmation: false
         )
@@ -7646,7 +7790,7 @@ final class AppState: ObservableObject {
 
     private func completeConfigurationInteraction(
         _ interactionID: UUID,
-        status: String = "配置操作已完成"
+        status: String = L10n.string("configuration.action.completed", fallback: "Configuration Action Complete")
     ) {
         transitionConfigurationInteraction(
             interactionID,
@@ -7710,7 +7854,7 @@ final class AppState: ObservableObject {
                 }
                 self.failConfigurationInteraction(
                     handle.id,
-                    message: error.localizedDescription
+                    message: self.localizedRuntimeErrorMessage(error)
                 )
             }
         }
@@ -7735,7 +7879,7 @@ final class AppState: ObservableObject {
             failConfigurationInteraction(
                 expectedInteractionID,
                 message: terminal.error?.nonEmpty
-                    ?? "站点没有完成该配置操作，请重试。"
+                    ?? L10n.string("configuration.action.not-completed", fallback: "The provider did not complete this configuration action. Try again.")
             )
         case .cancelled:
             clearCloudAuthorization(
@@ -7747,7 +7891,7 @@ final class AppState: ObservableObject {
             transitionConfigurationInteraction(
                 expectedInteractionID,
                 to: .processing,
-                status: "站点仍在处理该配置操作…"
+                status: L10n.string("configuration.action.processing", fallback: "The provider is still processing this configuration action…")
             )
         }
     }
@@ -7832,7 +7976,7 @@ final class AppState: ObservableObject {
                 transitionConfigurationInteraction(
                     context.operationID,
                     to: .processing,
-                    status: "站点已返回结果，正在完成当前配置操作…"
+                    status: L10n.string("configuration.action.finishing", fallback: "The provider returned a result. Finishing the current configuration action…")
                 )
                 return true
             }
@@ -7843,7 +7987,7 @@ final class AppState: ObservableObject {
                 failConfigurationInteraction(
                     context.operationID,
                     message: message?.nonEmpty
-                        ?? "站点没有完成该配置操作，请重试。"
+                        ?? L10n.string("configuration.action.not-completed", fallback: "The provider did not complete this configuration action. Try again.")
                 )
             case .terminalCancelled:
                 clearCloudAuthorization(
@@ -7915,10 +8059,10 @@ final class AppState: ObservableObject {
         let status: String
         if isPlaybackAuthorization {
             status = authorization.completionMode == .profileRevision
-                ? "等待配置保存；保存后只会自动验证当前影片一次。"
-                : "等待与当前播放请求匹配的授权完成信号。"
+                ? L10n.string("cloud.authorization.waiting-save", fallback: "Waiting for the configuration to be saved. The current title will be verified automatically only once.")
+                : L10n.string("cloud.authorization.waiting-request", fallback: "Waiting for authorization confirmation that matches the current playback request.")
         } else {
-            status = "配置页会保持打开；保存后可手动应用并重试原操作。"
+            status = L10n.string("cloud.configuration.keep-open", fallback: "The configuration page will remain open. After saving, apply it manually and try the original action again.")
         }
         nodeWebPresentation = NodeWebPresentation(
             id: UUID(),
@@ -7927,7 +8071,8 @@ final class AppState: ObservableObject {
             sourceIdentity: pending.sourceIdentity,
             runtimeWebsiteLocation: websiteLocation,
             url: currentWebsiteURL,
-            title: authorization.title.nonEmpty ?? "网盘配置中心",
+            title: authorization.title.nonEmpty
+                ?? L10n.string("cloud.configuration-center", fallback: "Cloud Configuration Center"),
             message: authorization.message,
             provider: authorization.provider,
             preferredProviderID: authorization.preferredProviderID,
@@ -7944,7 +8089,7 @@ final class AppState: ObservableObject {
                 ? .needsManualRetry
                 : .waiting,
             status: isPlaybackAuthorization && !allowsAutomaticRetry
-                ? "本次播放已经自动验证过一次；为避免重复转存，请确认后手动重试。"
+                ? L10n.string("cloud.authorization.already-verified", fallback: "This playback request was already verified automatically once. To avoid duplicate transfers, confirm the status and retry manually.")
                 : status,
             allowsAutomaticRetry: allowsAutomaticRetry,
             hasAttemptedProfileRevisionVerification: false,
@@ -7978,7 +8123,7 @@ final class AppState: ObservableObject {
                 guard self.nodeWebPresentation?.allowsAutomaticRetry == true else {
                     var presentation = self.nodeWebPresentation
                     presentation?.lifecycleState = .needsManualRetry
-                    presentation?.status = "已收到授权完成信号；为避免重复执行网盘操作，请手动重试。"
+                    presentation?.status = L10n.string("cloud.authorization.signal-received", fallback: "Authorization confirmation received. To avoid repeating the cloud operation, retry manually.")
                     self.nodeWebPresentation = presentation
                     return
                 }
@@ -8025,7 +8170,7 @@ final class AppState: ObservableObject {
         if automatically, let requestID = pending.playbackRequestID {
             guard requestID != nodeAuthorizationAutoRetryRequestID else {
                 presentation.lifecycleState = .needsManualRetry
-                presentation.status = "自动续播已执行过一次，请确认授权状态后手动重试。"
+                presentation.status = L10n.string("cloud.authorization.auto-resume-used", fallback: "Automatic resume has already run once. Confirm authorization, then retry manually.")
                 presentation.allowsAutomaticRetry = false
                 nodeWebPresentation = presentation
                 return
@@ -8034,8 +8179,8 @@ final class AppState: ObservableObject {
         }
         presentation.lifecycleState = .verifying
         presentation.status = automatically
-            ? "已检测到授权完成，正在恢复当前播放…"
-            : "正在刷新授权状态并重新解析当前内容…"
+            ? L10n.string("cloud.authorization.resuming", fallback: "Authorization complete. Resuming playback…")
+            : L10n.string("cloud.authorization.refreshing", fallback: "Refreshing authorization and resolving the current content again…")
         nodeWebPresentation = presentation
         if activeConfigurationUsesNodeRuntime && !configurationAlreadyRefreshed {
             // Configuration/login pages can add dynamic AList mounts or alter
@@ -8178,7 +8323,7 @@ final class AppState: ObservableObject {
             }
             presentNodeConfiguration(authorization, pending: pending)
             if var replacement = nodeWebPresentation {
-                replacement.status = "授权验证尚未通过，配置页将保持打开，请完成授权后再试。"
+                replacement.status = L10n.string("cloud.authorization.not-verified", fallback: "Authorization could not be verified. The configuration page will remain open; finish authorization and try again.")
                 nodeWebPresentation = replacement
             }
         } catch is CancellationError {
@@ -8191,7 +8336,7 @@ final class AppState: ObservableObject {
             }
             nodeAuthorizationCompletionTask = nil
             current.lifecycleState = .needsManualRetry
-            current.status = "授权验证未通过：\(LogRedactor.text(error.localizedDescription))"
+            current.status = L10n.string("cloud.authorization.verification-failed", fallback: "Authorization verification failed: %@", LogRedactor.text(error.localizedDescription))
             current.allowsAutomaticRetry = false
             nodeWebPresentation = current
         }
@@ -8335,7 +8480,7 @@ final class AppState: ObservableObject {
         lastCloudAuthorizationSurfaceCaptureAt = nil
         cloudAuthorizationContext = nil
         if markPendingPlaybackCancelled, hadPendingPlayback {
-            let message = "已取消网盘授权"
+            let message = L10n.string("cloud.authorization.cancelled", fallback: "Cloud Authorization Cancelled")
             playbackResolutionState = .failed
             playbackFailureSummary = message
             playerSnapshot.status = .failed(message)
@@ -8379,7 +8524,9 @@ final class AppState: ObservableObject {
     private var cloudInteractionLabel: String {
         let kind = cloudAuthorizationPrompt?.interactionKind
             ?? cloudAuthorizationContext?.operation.interactionKind
-        return kind == .authorization ? "网盘授权" : "配置操作"
+        return kind == .authorization
+            ? L10n.string("cloud.authorization.title", fallback: "Cloud Authorization")
+            : L10n.string("cloud.configuration-action.title", fallback: "Configuration Action")
     }
 
     func cancelCloudAuthorization() async {
@@ -8457,7 +8604,7 @@ final class AppState: ObservableObject {
             }
             failConfigurationInteraction(
                 context.operationID,
-                message: error.localizedDescription
+                message: localizedRuntimeErrorMessage(error)
             )
         }
     }
@@ -8473,7 +8620,7 @@ final class AppState: ObservableObject {
             return
         }
         prompt.lifecyclePhase = .submitting
-        prompt.status = "正在确认操作结果并刷新配置…"
+        prompt.status = L10n.string("cloud.configuration.confirming", fallback: "Confirming the result and refreshing configuration…")
         cloudAuthorizationPrompt = prompt
         _ = configurationInteractionCoordinator.transition(
             context.operationID,
@@ -8514,7 +8661,7 @@ final class AppState: ObservableObject {
             }
             failConfigurationInteraction(
                 context.operationID,
-                message: error.localizedDescription
+                message: localizedRuntimeErrorMessage(error)
             )
         }
     }
@@ -8548,7 +8695,10 @@ final class AppState: ObservableObject {
             await performHomeAction(item)
         case .siteAction(let action, let title, let tag):
             guard let provider = providers[siteKey] else {
-                show(AppError.site("该功能所属站点当前不可用"), title: title)
+                show(
+                    AppError.site(L10n.string("configuration.action.provider-unavailable", fallback: "The provider for this action is currently unavailable")),
+                    title: title
+                )
                 return
             }
             await performSiteAction(
@@ -8575,7 +8725,7 @@ final class AppState: ObservableObject {
             if let activeID = cloudAuthorizationContext?.operationID {
                 failConfigurationInteraction(
                     activeID,
-                    message: "站点返回的配置请求标识不一致，请重试。"
+                    message: L10n.string("configuration.action.request-mismatch", fallback: "The provider returned a mismatched configuration request identifier. Try again.")
                 )
             }
             return
@@ -8594,7 +8744,7 @@ final class AppState: ObservableObject {
                 handle?.cancel()
                 failConfigurationInteraction(
                     interactionID,
-                    message: "配置界面来源与当前操作不匹配，请重试。"
+                    message: L10n.string("configuration.action.source-mismatch", fallback: "The configuration interface does not match the current action. Try again.")
                 )
                 return
             }
@@ -8612,12 +8762,12 @@ final class AppState: ObservableObject {
             transitionConfigurationInteraction(
                 interactionID,
                 to: .presenting,
-                status: "正在等待站点创建下一步操作界面…"
+                status: L10n.string("configuration.action.waiting-interface", fallback: "Waiting for the provider to open the next action screen…")
             )
         } else {
             await supersedeConfigurationInteractionIfNeeded()
             guard beginConfigurationInteraction(
-                title: "配置操作",
+                title: L10n.string("cloud.configuration-action.title", fallback: "Configuration Action"),
                 siteKey: siteKey,
                 operation: operation,
                 semantic: operation.initialSemantic,
@@ -8635,7 +8785,7 @@ final class AppState: ObservableObject {
             handle?.cancel()
             failConfigurationInteraction(
                 interactionID,
-                message: "站点返回的配置界面不属于当前操作，请重试。"
+                message: L10n.string("configuration.action.interface-mismatch", fallback: "The configuration interface returned by the provider does not belong to the current action. Try again.")
             )
             return
         }
@@ -8694,17 +8844,19 @@ final class AppState: ObservableObject {
         let status: String
         if lifecyclePhase == .presenting {
             status = context.operation.pendingPlayback == nil
-                ? "请在 Android 原生界面中完成操作，完成后点击“完成并刷新”。"
-                : "请在 Android 原生界面中完成操作"
+                ? L10n.string("cloud.android.complete-and-refresh", fallback: "Complete the action in the native Android interface, then select Finish and Refresh.")
+                : L10n.string("cloud.android.complete", fallback: "Complete the action in the native Android interface")
         } else {
-            status = "正在等待站点创建 Android 操作界面…"
+            status = L10n.string("cloud.android.waiting", fallback: "Waiting for the provider to create the Android action interface…")
         }
         let updated = CloudAuthorizationPrompt(
             id: previous?.id ?? UUID(),
             interactionID: operationID,
             requestGeneration: context.requestGeneration,
             title: configurationInteractionCoordinator.current?.request.title
-                ?? (interactionKind == .authorization ? "网盘授权" : "配置操作"),
+                ?? (interactionKind == .authorization
+                    ? L10n.string("cloud.authorization.title", fallback: "Cloud Authorization")
+                    : L10n.string("cloud.configuration-action.title", fallback: "Configuration Action")),
             interactionKind: interactionKind,
             semantic: semantic,
             transport: .native,
@@ -9042,7 +9194,7 @@ final class AppState: ObservableObject {
                             context: context
                           ) else {
                         throw AppError.spider(
-                            "配置状态已被另一个操作替换"
+                            L10n.string("configuration.action.replaced", fallback: "Another action replaced the configuration state")
                         )
                     }
                     bridgeFailureCount = 0
@@ -9082,8 +9234,8 @@ final class AppState: ObservableObject {
                             ? .presenting
                             : .processing
                         prompt.status = state.workerReturned == true
-                            ? "站点方法已返回；确认 Android 操作完成后，请点击“完成并刷新”。"
-                            : "Android 操作界面暂时不可见，正在等待站点处理…"
+                            ? L10n.string("cloud.android.method-returned", fallback: "The provider method returned. After confirming the Android action is complete, select Finish and Refresh.")
+                            : L10n.string("cloud.android.interface-waiting", fallback: "The Android action interface is temporarily hidden while the provider processes the request…")
                         prompt.allowsCompletionConfirmation =
                             context.operation.pendingPlayback == nil
                                 && context.hasObservedPrompt
@@ -9102,7 +9254,7 @@ final class AppState: ObservableObject {
                         )
                         self.failConfigurationInteraction(
                             context.operationID,
-                            message: "本机配置桥连续无法响应，请重试该操作。"
+                            message: L10n.string("configuration.bridge.unresponsive", fallback: "The local configuration bridge repeatedly failed to respond. Try the action again.")
                         )
                         return
                     }
@@ -9129,7 +9281,7 @@ final class AppState: ObservableObject {
             // permission to issue playerContent again under a second request.
             failConfigurationInteraction(
                 context.operationID,
-                message: "授权流程已结束，但原播放请求没有返回媒体，请重试播放。"
+                message: L10n.string("cloud.authorization.no-media", fallback: "Authorization finished, but the original playback request returned no media. Try playback again.")
             )
             return
         }
@@ -9141,7 +9293,7 @@ final class AppState: ObservableObject {
                 as? AndroidDexSpiderSiteProvider else {
                 failConfigurationInteraction(
                     context.operationID,
-                    message: "播放结果所属 provider 已发生变化，请重试。"
+                    message: L10n.string("player.provider-changed", fallback: "The provider associated with the playback result changed. Try again.")
                 )
                 return
             }
@@ -9159,7 +9311,7 @@ final class AppState: ObservableObject {
             } catch {
                 failConfigurationInteraction(
                     context.operationID,
-                    message: error.localizedDescription
+                    message: localizedRuntimeErrorMessage(error)
                 )
                 return
             }
@@ -9185,7 +9337,8 @@ final class AppState: ObservableObject {
             publishSiteActionStatus(
                 providerResult.flatMap(Self.siteActionMessage),
                 title: configurationInteractionCoordinator.current?
-                    .request.title ?? "配置操作",
+                    .request.title
+                    ?? L10n.string("cloud.configuration-action.title", fallback: "Configuration Action"),
                 generation: actionStatusGeneration
             )
         }
@@ -9197,15 +9350,15 @@ final class AppState: ObservableObject {
         }()
         let completionStatus: String
         if isPlaybackOperation {
-            completionStatus = "授权成功，正在继续播放…"
+            completionStatus = L10n.string("cloud.authorization.playback-resuming", fallback: "Authorization successful. Resuming playback…")
         } else {
             switch completionSemantic {
             case .order:
-                completionStatus = "排序已更新"
+                completionStatus = L10n.string("configuration.action.sort-updated", fallback: "Sort Order Updated")
             case .toggle:
-                completionStatus = "设置已更新"
+                completionStatus = L10n.string("configuration.action.settings-updated", fallback: "Settings Updated")
             default:
-                completionStatus = "配置操作已完成"
+                completionStatus = L10n.string("configuration.action.completed", fallback: "Configuration Action Complete")
             }
         }
         completeConfigurationInteraction(
@@ -9443,7 +9596,7 @@ final class AppState: ObservableObject {
         let preparationID = historyPlaybackPreparationID
         guard isCurrentHistoryPreparation(preparationID) else { return }
         failHistoryPlayback(
-            "没有选择要恢复的线路和分集",
+            L10n.string("history.restore.no-selection", fallback: "No stream or episode was selected for restore"),
             preparationID: preparationID
         )
     }
@@ -9458,7 +9611,7 @@ final class AppState: ObservableObject {
         _ item: HistoryRecord,
         preparationID: UUID
     ) async {
-        var recoveryFailure = "缺少稳定网盘文件标识"
+        var recoveryFailure = L10n.string("history.restore.missing-stable-id", fallback: "Stable cloud file identifier is missing")
         defer {
             if historyPlaybackPreparationID == preparationID {
                 historyPlaybackLoadingID = nil
@@ -9480,20 +9633,20 @@ final class AppState: ObservableObject {
                   isCurrentHistoryPreparation(preparationID) else { return }
             guard activeConfigurationRecord?.id == configurationID else {
                 failHistoryPlayback(
-                    "无法切换到这条历史记录所属的点播配置",
+                    L10n.string("history.restore.switch-configuration.failed", fallback: "Unable to switch to the video configuration associated with this history item"),
                     preparationID: preparationID
                 )
                 return
             }
         case .unavailable:
             failHistoryPlayback(
-                "这条历史记录所属的点播配置已被删除，无法安全恢复原来源",
+                L10n.string("history.restore.configuration-deleted", fallback: "The video configuration for this history item was deleted, so its original provider cannot be restored safely"),
                 preparationID: preparationID
             )
             return
         case .legacy:
             failHistoryPlayback(
-                "这是一条没有配置身份的旧版历史记录，无法安全判断原来源",
+                L10n.string("history.restore.legacy-no-identity", fallback: "This legacy history item has no configuration identity, so its original provider cannot be determined safely"),
                 preparationID: preparationID
             )
             return
@@ -9503,7 +9656,7 @@ final class AppState: ObservableObject {
         guard let owningConfigurationID = item.configurationID
             ?? activeConfigurationRecord?.id else {
             failHistoryPlayback(
-                "无法确定这条历史记录所属的点播配置",
+                L10n.string("history.restore.configuration-unknown", fallback: "Unable to determine the video configuration associated with this history item"),
                 preparationID: preparationID
             )
             return
@@ -9527,7 +9680,7 @@ final class AppState: ObservableObject {
             }
             guard isCurrentHistoryPreparation(preparationID) else { return }
             failHistoryPlayback(
-                "来源 \(siteName) 在当前配置中不可用，无法恢复播放",
+                L10n.string("history.restore.provider-unavailable", fallback: "Provider %@ is unavailable in the current configuration, so playback cannot be restored", siteName),
                 preparationID: preparationID
             )
             return
@@ -9581,7 +9734,7 @@ final class AppState: ObservableObject {
             // CatPaw history is navigation-first, so an opaque row identity
             // continues directly to title recovery instead of issuing a
             // guaranteed-invalid detail call.
-            recoveryFailure = "旧详情身份仅可用于历史去重"
+            recoveryFailure = L10n.string("history.restore.legacy-dedup-only", fallback: "The legacy detail identity can only be used to deduplicate history")
         } else {
             do {
                 let detail = try await Self.historyPlaybackDetail(
@@ -9629,12 +9782,12 @@ final class AppState: ObservableObject {
                 // display name or a renamed route. Do not claim that the
                 // episode was removed while the durable history reference can
                 // still rebuild a valid playback URL below.
-                recoveryFailure = "最新详情中未找到原线路或原分集"
+                recoveryFailure = L10n.string("history.restore.stream-missing", fallback: "The original stream or episode was not found in the latest details")
             } catch {
                 // Search/cloud providers often expose session-scoped video
                 // IDs. Continue with the durable episode reference or cached
                 // media instead of surfacing a low-level empty-JSON error.
-                recoveryFailure = "旧详情 ID 已失效"
+                recoveryFailure = L10n.string("history.restore.detail-id-expired", fallback: "The legacy detail ID is no longer valid")
             }
         }
 
@@ -9724,21 +9877,21 @@ final class AppState: ObservableObject {
                 return
             }
             if candidates.count > 1 {
-                recoveryFailure = "找到多个同名结果，但没有唯一匹配原线路和分集"
+                recoveryFailure = L10n.string("history.restore.ambiguous", fallback: "Multiple results with the same title were found, but none uniquely matches the original stream and episode")
             } else if candidates.isEmpty {
-                recoveryFailure += "，重新搜索也没有找到同名内容"
+                recoveryFailure += L10n.string("history.restore.search-no-title.suffix", fallback: "; a new search did not find the same title")
             } else {
-                recoveryFailure = "已找到同名内容，但未匹配到原线路或原分集"
+                recoveryFailure = L10n.string("history.restore.title-found-stream-missing", fallback: "Content with the same title was found, but the original stream or episode did not match")
             }
         } catch {
             // A search retry is best effort. Present one actionable history
             // message below instead of a second provider decoding error.
-            recoveryFailure += "；重新搜索失败"
+            recoveryFailure += L10n.string("history.restore.search-failed.suffix", fallback: "; the new search failed")
         }
 
         guard isCurrentHistoryPreparation(preparationID) else { return }
         failHistoryPlayback(
-            "\(recoveryFailure)，请重新选择。",
+            L10n.string("history.restore.reselect", fallback: "%@. Choose again.", recoveryFailure),
             preparationID: preparationID
         )
     }
@@ -9772,9 +9925,9 @@ final class AppState: ObservableObject {
         case .detail(let detail):
             return detail
         case .action:
-            throw AppError.spider("CatPaw 历史记录返回了设置操作，而不是影视详情")
+            throw AppError.spider(L10n.string("history.restore.catpaw-action", fallback: "CatPaw history returned a settings action instead of media details"))
         case .search:
-            throw AppError.contentUnavailable("CatPaw 历史记录没有返回可播放详情")
+            throw AppError.contentUnavailable(L10n.string("history.restore.catpaw-no-details", fallback: "CatPaw history did not return playable details"))
         }
     }
 
@@ -9797,7 +9950,7 @@ final class AppState: ObservableObject {
             ).inserted
         }
         playbackResolutionState = .restoringHistory
-        playbackFailureSummary = "找到多个可能的原线路或分集，请选择一次；成功后会自动修复这条历史记录。"
+        playbackFailureSummary = L10n.string("history.restore.choose-candidate", fallback: "Multiple possible original streams or episodes were found. Choose one; this history item will be repaired automatically after playback succeeds.")
         playerSnapshot.status = .loading
         playerPresentedError = nil
     }
@@ -10080,8 +10233,8 @@ final class AppState: ObservableObject {
            searchSiteScope.mode == .custom,
            selectedKeys.isEmpty {
             show(
-                AppError.configuration("当前自定义搜索范围没有可用站点，请重新选择。"),
-                title: "搜索范围不可用"
+                AppError.configuration(L10n.string("search.scope.no-available-providers", fallback: "The current custom search scope has no available providers. Choose again.")),
+                title: L10n.string("search.scope.unavailable", fallback: "Search Scope Unavailable")
             )
             isSearching = false
             searchTask = nil
@@ -10471,8 +10624,8 @@ final class AppState: ObservableObject {
         guard let environment,
               let configurationID = activeConfigurationRecord?.id else {
             show(
-                AppError.configuration("请先导入并启用一个点播配置。"),
-                title: "无法保存搜索范围"
+                AppError.configuration(L10n.string("configuration.import-enable-first", fallback: "Import and enable a video provider configuration first.")),
+                title: L10n.string("search.scope.save.failed", fallback: "Unable to Save Search Scope")
             )
             return false
         }
@@ -10482,8 +10635,8 @@ final class AppState: ObservableObject {
         )
         if scope.mode == .custom, effectiveKeys.isEmpty {
             show(
-                AppError.configuration("自定义搜索范围至少需要一个当前可用站点。"),
-                title: "无法保存搜索范围"
+                AppError.configuration(L10n.string("search.scope.minimum-one", fallback: "A custom search scope requires at least one currently available provider.")),
+                title: L10n.string("search.scope.save.failed", fallback: "Unable to Save Search Scope")
             )
             return false
         }
@@ -10502,7 +10655,7 @@ final class AppState: ObservableObject {
             searchSiteScope = scope
             return true
         } catch {
-            show(error, title: "无法保存搜索范围")
+            show(error, title: L10n.string("search.scope.save.failed", fallback: "Unable to Save Search Scope"))
             return false
         }
     }
@@ -10568,10 +10721,10 @@ final class AppState: ObservableObject {
         switch searchSiteScope.mode {
         case .all:
             return selected == total
-                ? "范围：全部 \(total)"
-                : "范围：已启用 \(selected)/\(total)"
+                ? L10n.string("search.scope.summary.all", fallback: "Scope: All %d", total)
+                : L10n.string("search.scope.summary.enabled", fallback: "Scope: %d/%d Enabled", selected, total)
         case .custom:
-            return "范围：已选 \(selected)/\(total)"
+            return L10n.string("search.scope.summary.selected", fallback: "Scope: %d/%d Selected", selected, total)
         }
     }
 
@@ -10582,8 +10735,7 @@ final class AppState: ObservableObject {
               ) else {
             return nil
         }
-        return "当前 CatPaw 资源未提供可验证的默认配置，"
-            + "依赖账号或挂载的动态站点可能不会出现。"
+        return L10n.string("configuration.catpaw.no-default", fallback: "The current CatPaw resource does not provide a verifiable default configuration. Dynamic providers that depend on accounts or mounts might not appear.")
     }
 
     var visibleSearchClusters: [SearchResultCluster] {
@@ -10619,7 +10771,7 @@ final class AppState: ObservableObject {
             }
             favorites = try await environment.database.favorites()
         } catch {
-            show(error, title: "收藏操作失败")
+            show(error, title: L10n.string("favorites.action.failed", fallback: "Favorites Action Failed"))
         }
     }
 
@@ -10634,7 +10786,7 @@ final class AppState: ObservableObject {
             }
             favorites = try await environment.database.favorites()
         } catch {
-            show(error, title: "删除收藏失败")
+            show(error, title: L10n.string("favorites.delete.failed", fallback: "Favorite Deletion Failed"))
         }
     }
 
@@ -10644,7 +10796,7 @@ final class AppState: ObservableObject {
             _ = try await environment.database.deleteAllFavorites()
             favorites = try await environment.database.favorites()
         } catch {
-            show(error, title: "清空收藏失败")
+            show(error, title: L10n.string("favorites.clear.failed", fallback: "Unable to Clear Favorites"))
         }
     }
 
@@ -10684,8 +10836,8 @@ final class AppState: ObservableObject {
             current: activeConfigurationID
         ) else {
             show(
-                AppError.playback("播放所属配置已经切换，请切回原配置后重试"),
-                title: "播放已停止",
+                AppError.playback(L10n.string("player.configuration-switched", fallback: "The playback configuration changed. Switch back to the original configuration and try again.")),
+                title: L10n.string("player.stopped", fallback: "Playback Stopped"),
                 target: .player
             )
             return
@@ -10805,7 +10957,7 @@ final class AppState: ObservableObject {
             sourceName: source.name,
             episodeName: episode.name,
             parserName: nil,
-            redactedURL: "<正在获取播放地址>",
+            redactedURL: L10n.string("player.url.resolving", fallback: "<resolving playback URL>"),
             number: 1
         )
         playbackFailureSummary = nil
@@ -10855,7 +11007,7 @@ final class AppState: ObservableObject {
         } catch {
             PlayerStartupTraceStore.shared.cancel(requestID: sessionID)
             guard playbackSessionID == sessionID else { return }
-            show(error, title: "播放器初始化失败", target: .player)
+            show(error, title: L10n.string("player.initialization.failed", fallback: "Player Initialization Failed"), target: .player)
             return
         }
         guard playbackSessionID == sessionID else { return }
@@ -10871,7 +11023,7 @@ final class AppState: ObservableObject {
         var unresolvedTransferReceipts: [UUID: TransferReceipt] = [:]
         do {
             guard detail.playSources.contains(where: { $0.id == source.id }) else {
-                throw AppError.playback("当前线路不在详情数据中")
+                throw AppError.playback(L10n.string("player.stream.not-in-details", fallback: "The current stream is not present in the detail data"))
             }
             let httpClient = configuredHTTPClient(environment: environment)
             let resolver = PlaybackResolver(
@@ -11045,8 +11197,9 @@ final class AppState: ObservableObject {
                         )
                         return
                     } catch {
-                        failures.append("重新获取播放详情失败：\(error.localizedDescription)")
-                        playbackFailureSummary = error.localizedDescription
+                        let message = localizedRuntimeErrorMessage(error)
+                        failures.append(L10n.string("player.details.refresh.failed", fallback: "Failed to refresh playback details: %@", message))
+                        playbackFailureSummary = message
                         continue
                     }
                 }
@@ -11056,7 +11209,7 @@ final class AppState: ObservableObject {
                     sourceName: candidateSource.name,
                     episodeName: candidateEpisode.name,
                     parserName: nil,
-                    redactedURL: "<正在获取播放地址>",
+                    redactedURL: L10n.string("player.url.resolving", fallback: "<resolving playback URL>"),
                     number: completedAttempts + 1
                 )
                 playbackResolutionState = completedAttempts == 0
@@ -11125,7 +11278,7 @@ final class AppState: ObservableObject {
                         for: candidateDetail.summary.siteKey
                     ) else {
                         playbackResolutionState = .failed
-                        playbackFailureSummary = "播放所属配置已经发生变化"
+                        playbackFailureSummary = L10n.string("player.configuration-changed", fallback: "The playback configuration changed")
                         return
                     }
                     presentNodeConfiguration(
@@ -11183,10 +11336,16 @@ final class AppState: ObservableObject {
                     return
                 } catch {
                     guard playbackSessionID == sessionID else { return }
+                    let message = localizedRuntimeErrorMessage(error)
                     failures.append(
-                        "\(candidateSource.name)：\(error.localizedDescription)"
+                        L10n.string(
+                            "player.stream.failure-detail",
+                            fallback: "%1$@: %2$@",
+                            candidateSource.name,
+                            message
+                        )
                     )
-                    playbackFailureSummary = error.localizedDescription
+                    playbackFailureSummary = message
                     continue
                 }
 
@@ -11206,8 +11365,8 @@ final class AppState: ObservableObject {
                         )
                         unresolvedTransferReceipts[receipt.receiptID] = nil
                     }
-                    failures.append("\(candidateSource.name)：重新解析仍返回相同地址和请求上下文")
-                    playbackFailureSummary = "重新解析仍返回相同地址和请求上下文"
+                    failures.append(L10n.string("player.resolve.same-result.source", fallback: "%@: resolving again returned the same URL and request context", candidateSource.name))
+                    playbackFailureSummary = L10n.string("player.resolve.same-result", fallback: "Resolving again returned the same URL and request context")
                     continue
                 }
                 let currentMediaFingerprint = result.mediaSession?
@@ -11406,7 +11565,7 @@ final class AppState: ObservableObject {
             }
             unresolvedTransferReceipts.removeAll()
             guard playbackSessionID == sessionID else { return }
-            let message = error.localizedDescription
+            let message = localizedRuntimeErrorMessage(error)
             playbackResolutionState = .failed
             playbackFailureSummary = message
             playerSnapshot.status = .failed(message)
@@ -11510,7 +11669,7 @@ final class AppState: ObservableObject {
         provider: SiteProvider?
     ) async {
         guard playbackSessionID == requestID else { return }
-        let message = LogRedactor.text(error.localizedDescription)
+        let message = localizedRuntimeErrorMessage(error)
         if let nodeProvider = provider as? NodeHTTPSpiderSiteProvider,
            let playback = pendingPlayback,
            playback.requestID == requestID,
@@ -11526,9 +11685,8 @@ final class AppState: ObservableObject {
                         challengeID: UUID(),
                         requestID: nil,
                         websiteURL: nodeProvider.configurationWebsiteURL,
-                        title: "打开\(cloudProvider.displayName)授权配置",
-                        message: "播放地址获取失败，但没有收到明确的账号失效信号。"
-                            + "如果尚未授权，可打开配置页；保存后将只验证当前影片一次。",
+                        title: L10n.string("cloud.authorization.open-provider", fallback: "Open %@ Authorization Settings", cloudProvider.displayName),
+                        message: L10n.string("cloud.authorization.no-explicit-expiry", fallback: "The playback URL could not be retrieved, but no explicit account-expiration signal was received. If authorization has not been completed, open the configuration page. After saving, only the current title will be verified once."),
                         provider: cloudProvider.displayName,
                         profileRevision: nodeProvider.site.extra[
                             "okNodeProfileRevision"
@@ -11575,9 +11733,9 @@ final class AppState: ObservableObject {
         // NodeWebAuthorizationRequired is handled explicitly before this helper.
         if upstreamHTTPStatusCode == 401 || upstreamHTTPStatusCode == 403 {
             let refreshStatus = refreshPerformed
-                ? "已完成一次同资源刷新；"
+                ? L10n.string("player.media-refresh-completed.prefix", fallback: "The same resource was refreshed once; ")
                 : ""
-            return "媒体请求被拒绝，网盘授权或临时播放地址可能已失效。\(refreshStatus)请重新授权后再试。"
+            return L10n.string("player.media-request-denied", fallback: "The media request was denied. Cloud authorization or the temporary playback URL may have expired. %@Authorize again and retry.", refreshStatus)
         }
         return message
     }
@@ -11585,7 +11743,7 @@ final class AppState: ObservableObject {
     static func consolidatedPlaybackFailureMessage(
         _ failures: [String]
     ) -> String {
-        let proxyFailure = "Android 内部媒体代理未正确转发"
+        let proxyFailure = L10n.string("player.android-proxy.failed", fallback: "The internal Android media proxy did not forward the request correctly")
         let normalized = failures.compactMap { failure -> String? in
             let value = failure.trimmingCharacters(in: .whitespacesAndNewlines)
             return value.isEmpty ? nil : value
@@ -11595,8 +11753,10 @@ final class AppState: ObservableObject {
         }
         var seen = Set<String>()
         let unique = normalized.filter { seen.insert($0).inserted }
-        return unique.suffix(4).joined(separator: "；")
-            .nonEmpty ?? "所有线路都无法返回可播放媒体"
+        return unique.suffix(4).joined(
+            separator: L10n.string("common.list-separator", fallback: "; ")
+        )
+            .nonEmpty ?? L10n.string("player.all-streams.failed", fallback: "No available stream returned playable media")
     }
 
     static func playbackRequestSignature(
@@ -11689,7 +11849,7 @@ final class AppState: ObservableObject {
         } catch is CancellationError {
             return false
         } catch {
-            show(error, title: "直播源加载失败")
+            show(error, title: L10n.string("live.source.load.failed", fallback: "Live TV Source Failed to Load"))
             return false
         }
     }
@@ -11803,7 +11963,7 @@ final class AppState: ObservableObject {
             loadedLivePlaylists[source.id] = playlist
             startLiveSourceBackgroundWork(for: source, playlist: playlist)
         } catch {
-            show(error, title: "直播源加载失败")
+            show(error, title: L10n.string("live.source.load.failed", fallback: "Live TV Source Failed to Load"))
         }
     }
 
@@ -11816,8 +11976,8 @@ final class AppState: ObservableObject {
               let value = existing.sourceValue,
               let url = URL(string: value) else {
             show(
-                AppError.live("只有 URL 直播源可以直接刷新"),
-                title: "无法刷新"
+                AppError.live(L10n.string("live.refresh.remote-only", fallback: "Only URL Live TV sources can be refreshed directly")),
+                title: L10n.string("common.refresh.failed", fallback: "Unable to Refresh")
             )
             return
         }
@@ -11842,7 +12002,7 @@ final class AppState: ObservableObject {
             epgFailures[id] = nil
             startLiveSourceBackgroundWork(for: updated, playlist: loaded.playlist)
         } catch {
-            show(error, title: "直播源刷新失败")
+            show(error, title: L10n.string("live.refresh.failed", fallback: "Live TV Source Refresh Failed"))
         }
     }
 
@@ -11876,7 +12036,7 @@ final class AppState: ObservableObject {
                 }
             }
         } catch {
-            show(error, title: "删除直播源失败")
+            show(error, title: L10n.string("live.delete-source.failed", fallback: "Live TV Source Deletion Failed"))
         }
     }
 
@@ -11995,7 +12155,7 @@ final class AppState: ObservableObject {
                 )
             } catch {
                 self.liveSourceValidationStatuses[sourceID] = .failed(
-                    error.localizedDescription
+                    self.localizedRuntimeErrorMessage(error)
                 )
             }
             self.liveSourceValidationTasks[sourceID] = nil
@@ -12197,7 +12357,7 @@ final class AppState: ObservableObject {
                 hasExhaustedLivePlayback = false
                 if skippedCount > 0 || isAutomaticRecovery {
                     showLivePlaybackNotice(
-                        "已自动跳过失效线路，正在播放 \(candidate.channel.name)"
+                        L10n.string("live.skipped-invalid-stream", fallback: "Skipped an invalid stream and started playing %@", candidate.channel.name)
                     )
                 }
                 return
@@ -12241,7 +12401,7 @@ final class AppState: ObservableObject {
         hasExhaustedLivePlayback = true
         livePlaybackNoticeTask?.cancel()
         livePlaybackNoticeTask = nil
-        livePlaybackNotice = "当前直播源暂时没有可播放的频道"
+        livePlaybackNotice = L10n.string("live.no-playable-channels", fallback: "The current Live TV source has no playable channels")
     }
 
     private func showLivePlaybackNotice(_ message: String) {
@@ -12297,7 +12457,7 @@ final class AppState: ObservableObject {
             favoriteLiveChannelIDs = previousFavoriteIDs
             try? await persistDeletedLiveChannels()
             try? await persistFavoriteLiveChannels()
-            show(error, title: "无法删除直播频道")
+            show(error, title: L10n.string("live.delete-channel.failed", fallback: "Unable to Delete Live TV Channel"))
         }
     }
 
@@ -12314,7 +12474,7 @@ final class AppState: ObservableObject {
             try await persistDeletedLiveChannels()
         } catch {
             deletedLiveChannelIDs.insert(identifier)
-            show(error, title: "无法恢复直播频道")
+            show(error, title: L10n.string("live.restore-channel.failed", fallback: "Unable to Restore Live TV Channel"))
         }
     }
 
@@ -12329,7 +12489,7 @@ final class AppState: ObservableObject {
             try await persistDeletedLiveChannels()
         } catch {
             deletedLiveChannelIDs = previousDeletedIDs
-            show(error, title: "无法恢复直播频道")
+            show(error, title: L10n.string("live.restore-channel.failed", fallback: "Unable to Restore Live TV Channel"))
         }
     }
 
@@ -12344,7 +12504,7 @@ final class AppState: ObservableObject {
         do {
             try await persistFavoriteLiveChannels()
         } catch {
-            show(error, title: "无法保存直播收藏")
+            show(error, title: L10n.string("live.favorite.save.failed", fallback: "Unable to Save Live TV Favorite"))
         }
     }
 
@@ -12356,7 +12516,7 @@ final class AppState: ObservableObject {
                 ofItemAtPath: url.path
             )
         } catch {
-            throw AppError.filesystem("无法导出配置：\(error.localizedDescription)")
+            throw AppError.filesystem(L10n.string("configuration.export.failed-message", fallback: "Unable to export configuration: %@", error.localizedDescription))
         }
     }
 
@@ -12364,7 +12524,7 @@ final class AppState: ObservableObject {
         to url: URL
     ) async throws -> PortableBackupPreview {
         guard let environment, let configuration = activeConfigurationRecord else {
-            throw AppError.configuration("请先导入并启用一个点播配置")
+            throw AppError.configuration(L10n.string("configuration.import-enable-first", fallback: "Import and enable a video provider configuration first."))
         }
         let allHistory = try await environment.database.history()
         let history = allHistory.filter {
@@ -12372,10 +12532,10 @@ final class AppState: ObservableObject {
         }
         let appVersion = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String ?? "未知"
+        ) as? String ?? L10n.string("common.unknown", fallback: "Unknown")
         let appBuild = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleVersion"
-        ) as? String ?? "未知"
+        ) as? String ?? L10n.string("common.unknown", fallback: "Unknown")
         let createdAt = Date()
         let data = try await Task.detached(priority: .userInitiated) {
             try PortableBackupCodec.encode(
@@ -12421,7 +12581,7 @@ final class AppState: ObservableObject {
         from url: URL
     ) async throws -> PortableBackupImportSummary {
         guard let environment else {
-            throw AppError.configuration("应用环境尚未初始化")
+            throw AppError.configuration(L10n.string("app.environment.not-initialized", fallback: "The app environment has not been initialized"))
         }
         let data = try readPortableBackupData(from: url)
         let decoded = try await Task.detached(priority: .userInitiated) {
@@ -12448,7 +12608,7 @@ final class AppState: ObservableObject {
         configurations = result.configurations
         activeConfigurationRecord = result.configuration
         activeNodeRuntimeEndpoint = nil
-        nodeRuntimeUnavailableReason = "Node Runtime 将在使用配置时准备"
+        nodeRuntimeUnavailableReason = L10n.string("node.runtime.prepares-on-demand", fallback: "Node Runtime will be prepared when the configuration is used")
         try loadActiveConfigurationContent()
         if let sourceURL = activeNodeRuntimeSourceURL {
             scheduleNodeConfigurationPreparation(
@@ -12483,10 +12643,10 @@ final class AppState: ObservableObject {
         }
         let appVersion = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String ?? "未知"
+        ) as? String ?? L10n.string("common.unknown", fallback: "Unknown")
         let appBuild = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleVersion"
-        ) as? String ?? "未知"
+        ) as? String ?? L10n.string("common.unknown", fallback: "Unknown")
         let data = try await Task.detached(priority: .utility) {
             try PortableBackupCodec.encode(
                 configuration: configuration,
@@ -12516,7 +12676,7 @@ final class AppState: ObservableObject {
             throw error
         } catch {
             throw AppError.filesystem(
-                "无法创建导入前安全备份：\(error.localizedDescription)"
+                L10n.string("backup.safety-create.failed", fallback: "Unable to create a safety backup before import: %@", error.localizedDescription)
             )
         }
     }
@@ -12567,7 +12727,11 @@ final class AppState: ObservableObject {
             throw error
         } catch {
             throw AppError.filesystem(
-                "无法读取备份文件：\(error.localizedDescription)"
+                L10n.string(
+                    "backup.read.failed",
+                    fallback: "Unable to read the backup file: %@",
+                    error.localizedDescription
+                )
             )
         }
     }
@@ -12584,7 +12748,11 @@ final class AppState: ObservableObject {
             )
         } catch {
             throw AppError.filesystem(
-                "无法写入备份文件：\(error.localizedDescription)"
+                L10n.string(
+                    "backup.write.failed",
+                    fallback: "Unable to write the backup file: %@",
+                    error.localizedDescription
+                )
             )
         }
     }
@@ -12598,7 +12766,7 @@ final class AppState: ObservableObject {
             )
             incognitoMode = enabled
         } catch {
-            show(error, title: "无法保存无痕设置")
+            show(error, title: L10n.string("settings.privacy.save.failed", fallback: "Unable to Save Private Mode Setting"))
         }
     }
 
@@ -12613,7 +12781,7 @@ final class AppState: ObservableObject {
             historyRetentionDays = bounded
             try await reloadUserData()
         } catch {
-            show(error, title: "无法保存历史设置")
+            show(error, title: L10n.string("settings.history.save.failed", fallback: "Unable to Save History Setting"))
         }
     }
 
@@ -12626,7 +12794,7 @@ final class AppState: ObservableObject {
             )
             appTheme = theme
         } catch {
-            show(error, title: "无法保存主题设置")
+            show(error, title: L10n.string("settings.theme.save.failed", fallback: "Unable to Save Theme Setting"))
         }
     }
 
@@ -12643,7 +12811,7 @@ final class AppState: ObservableObject {
             if autoPlayNextEpisode == enabled {
                 autoPlayNextEpisode = previousValue
             }
-            show(error, title: "无法保存连续播放设置")
+            show(error, title: L10n.string("settings.autoplay.save.failed", fallback: "Unable to Save Auto-Play Setting"))
         }
     }
 
@@ -12652,7 +12820,7 @@ final class AppState: ObservableObject {
         do {
             try await repository.clear()
         } catch {
-            show(error, title: "清理海报缓存失败")
+            show(error, title: L10n.string("settings.poster-cache.clear.failed", fallback: "Unable to Clear Poster Cache"))
         }
     }
 
@@ -12672,7 +12840,7 @@ final class AppState: ObservableObject {
             historyPlaybackSessionCache.remove(recordIDs)
             try await reloadHistory()
         } catch {
-            show(error, title: "清理历史失败")
+            show(error, title: L10n.string("history.clear.failed", fallback: "Unable to Clear History"))
         }
     }
 
@@ -12690,7 +12858,7 @@ final class AppState: ObservableObject {
             historyPlaybackSessionCache.remove(ids)
             try await reloadHistory()
         } catch {
-            show(error, title: "删除历史失败")
+            show(error, title: L10n.string("history.delete.failed", fallback: "Unable to Delete History"))
         }
     }
 
@@ -12756,7 +12924,13 @@ final class AppState: ObservableObject {
                 ofItemAtPath: url.path
             )
         } catch {
-            throw AppError.filesystem("无法导出诊断：\(error.localizedDescription)")
+            throw AppError.filesystem(
+                L10n.string(
+                    "diagnostics.export.failed",
+                    fallback: "Unable to export diagnostics: %@",
+                    error.localizedDescription
+                )
+            )
         }
     }
 
@@ -12889,7 +13063,7 @@ final class AppState: ObservableObject {
         do {
             try await environment?.player.play()
         } catch {
-            show(error, title: "唤醒后恢复播放失败", target: .player)
+            show(error, title: L10n.string("player.wake-resume.failed", fallback: "Unable to Resume After Wake"), target: .player)
         }
     }
 
@@ -13007,7 +13181,7 @@ final class AppState: ObservableObject {
             if playerSnapshot.status == optimisticStatus {
                 playerSnapshot.status = previousStatus
             }
-            show(error, title: "播放控制失败", target: .player)
+            show(error, title: L10n.string("player.control.failed", fallback: "Playback Control Failed"), target: .player)
         }
     }
 
@@ -13030,8 +13204,8 @@ final class AppState: ObservableObject {
             duration: playerSnapshot.duration
         ) else {
             show(
-                AppError.playback("跳转位置无效"),
-                title: "跳转失败",
+                AppError.playback(L10n.string("player.seek.invalid-position", fallback: "The seek position is invalid.")),
+                title: L10n.string("player.seek.failed", fallback: "Unable to Seek"),
                 target: .player
             )
             return
@@ -13075,10 +13249,12 @@ final class AppState: ObservableObject {
             playerSnapshot.seekTarget = nil
             show(
                 AppError.playback(
-                    "播放器在 10 秒内没有完成跳转，已返回原播放位置。"
-                        + "当前网络或线路响应较慢，请稍后重试或切换清晰度。"
+                    L10n.string(
+                        "player.seek.timeout.message",
+                        fallback: "The player did not finish seeking within 10 seconds and returned to the previous position. The network or source may be slow; try again later or switch quality."
+                    )
                 ),
-                title: "跳转超时",
+                title: L10n.string("player.seek.timeout.title", fallback: "Seek Timed Out"),
                 target: .player
             )
         } catch is CancellationError {
@@ -13094,7 +13270,7 @@ final class AppState: ObservableObject {
                 playerSnapshot.isSeeking = false
                 playerSnapshot.seekTarget = nil
             }
-            show(error, title: "跳转失败", target: .player)
+            show(error, title: L10n.string("player.seek.failed", fallback: "Unable to Seek"), target: .player)
         }
     }
 
@@ -13108,7 +13284,7 @@ final class AppState: ObservableObject {
             if playerSnapshot.volume == clampedVolume {
                 playerSnapshot.volume = previousVolume
             }
-            show(error, title: "音量设置失败", target: .player)
+            show(error, title: L10n.string("player.volume.failed", fallback: "Unable to Set Volume"), target: .player)
         }
     }
 
@@ -13126,7 +13302,7 @@ final class AppState: ObservableObject {
             if playerSnapshot.isMuted == targetMuted {
                 playerSnapshot.isMuted = previousMuted
             }
-            show(error, title: "静音设置失败", target: .player)
+            show(error, title: L10n.string("player.mute.failed", fallback: "Unable to Change Mute Setting"), target: .player)
         }
     }
 
@@ -13139,7 +13315,7 @@ final class AppState: ObservableObject {
             if playerSnapshot.speed == speed {
                 playerSnapshot.speed = previousSpeed
             }
-            show(error, title: "倍速设置失败", target: .player)
+            show(error, title: L10n.string("player.speed.failed", fallback: "Unable to Change Playback Speed"), target: .player)
         }
     }
 
@@ -13245,7 +13421,7 @@ final class AppState: ObservableObject {
             }
             guard let resolvedMedia else {
                 throw AppError.playback(
-                    failureMessage ?? "该清晰度没有返回可播放地址"
+                    failureMessage ?? L10n.string("player.quality.no-playable-url", fallback: "This quality did not return a playable URL.")
                 )
             }
             guard playbackQualitySwitchSessionID == switchSessionID,
@@ -13323,20 +13499,26 @@ final class AppState: ObservableObject {
                 }
             }
             if let restoreError {
+                let switchMessage = localizedRuntimeErrorMessage(error)
+                let restoreMessage = localizedRuntimeErrorMessage(restoreError)
                 playbackResolutionState = .failed
-                playbackFailureSummary = restoreError.localizedDescription
+                playbackFailureSummary = restoreMessage
                 show(
                     AppError.playback(
-                        "\(error.localizedDescription)；恢复原清晰度也失败："
-                            + restoreError.localizedDescription
+                        L10n.string(
+                            "player.quality.switch-and-restore.failed",
+                            fallback: "%1$@ Restoring the previous quality also failed: %2$@",
+                            switchMessage,
+                            restoreMessage
+                        )
                     ),
-                    title: "清晰度切换失败",
+                    title: L10n.string("player.quality.switch.failed", fallback: "Unable to Switch Quality"),
                     target: .player
                 )
             } else {
                 playbackResolutionState = .playing
                 playbackFailureSummary = nil
-                show(error, title: "清晰度切换失败", target: .player)
+                show(error, title: L10n.string("player.quality.switch.failed", fallback: "Unable to Switch Quality"), target: .player)
             }
         }
     }
@@ -13360,7 +13542,7 @@ final class AppState: ObservableObject {
                 )
             }
         } catch {
-            show(error, title: "轨道切换失败", target: .player)
+            show(error, title: L10n.string("player.track.switch.failed", fallback: "Unable to Switch Track"), target: .player)
         }
     }
 
@@ -13370,8 +13552,8 @@ final class AppState: ObservableObject {
         }
         guard !subtitleTracks.isEmpty else {
             show(
-                AppError.playback("当前视频没有可用字幕"),
-                title: "字幕设置失败",
+                AppError.playback(L10n.string("player.subtitle.none", fallback: "No subtitles are available for this video.")),
+                title: L10n.string("player.subtitle.setting.failed", fallback: "Unable to Change Subtitle Setting"),
                 target: .player
             )
             return
@@ -13420,7 +13602,7 @@ final class AppState: ObservableObject {
                 )
             }
         } catch {
-            show(error, title: "字幕设置失败", target: .player)
+            show(error, title: L10n.string("player.subtitle.setting.failed", fallback: "Unable to Change Subtitle Setting"), target: .player)
         }
     }
 
@@ -13430,7 +13612,7 @@ final class AppState: ObservableObject {
             try await environment?.player.setSubtitleDelay(value)
             playerSubtitleDelay = value
         } catch {
-            show(error, title: "字幕延迟设置失败", target: .player)
+            show(error, title: L10n.string("player.subtitle.delay.failed", fallback: "Unable to Change Subtitle Delay"), target: .player)
         }
     }
 
@@ -13440,7 +13622,7 @@ final class AppState: ObservableObject {
             try await environment?.player.setSubtitleScale(value)
             playerSubtitleScale = value
         } catch {
-            show(error, title: "字幕大小设置失败", target: .player)
+            show(error, title: L10n.string("player.subtitle.size.failed", fallback: "Unable to Change Subtitle Size"), target: .player)
         }
     }
 
@@ -13450,7 +13632,7 @@ final class AppState: ObservableObject {
             try await environment?.player.setSubtitlePosition(value)
             playerSubtitlePosition = value
         } catch {
-            show(error, title: "字幕位置设置失败", target: .player)
+            show(error, title: L10n.string("player.subtitle.position.failed", fallback: "Unable to Change Subtitle Position"), target: .player)
         }
     }
 
@@ -13460,7 +13642,7 @@ final class AppState: ObservableObject {
             try await environment?.player.setSubtitleBorderSize(value)
             playerSubtitleBorderSize = value
         } catch {
-            show(error, title: "字幕描边设置失败", target: .player)
+            show(error, title: L10n.string("player.subtitle.outline.failed", fallback: "Unable to Change Subtitle Outline"), target: .player)
         }
     }
 
@@ -13475,7 +13657,7 @@ final class AppState: ObservableObject {
             playerSubtitlePosition = 100
             playerSubtitleBorderSize = 3
         } catch {
-            show(error, title: "字幕设置重置失败", target: .player)
+            show(error, title: L10n.string("player.subtitle.reset.failed", fallback: "Unable to Reset Subtitle Settings"), target: .player)
         }
     }
 
@@ -13485,7 +13667,7 @@ final class AppState: ObservableObject {
             try await environment?.player.setAudioDelay(value)
             playerAudioDelay = value
         } catch {
-            show(error, title: "音频延迟设置失败", target: .player)
+            show(error, title: L10n.string("player.audio.delay.failed", fallback: "Unable to Change Audio Delay"), target: .player)
         }
     }
 
@@ -13494,7 +13676,7 @@ final class AppState: ObservableObject {
             try await environment?.player.setAspectRatio(ratio)
             playerAspectRatio = ratio
         } catch {
-            show(error, title: "画面比例设置失败", target: .player)
+            show(error, title: L10n.string("player.aspect-ratio.failed", fallback: "Unable to Change Aspect Ratio"), target: .player)
         }
     }
 
@@ -13504,7 +13686,7 @@ final class AppState: ObservableObject {
             try await environment?.player.setHardwareDecoding(enabled: value)
             playerHardwareDecoding = value
         } catch {
-            show(error, title: "硬件解码设置失败", target: .player)
+            show(error, title: L10n.string("player.hardware-decoding.failed", fallback: "Unable to Change Hardware Decoding"), target: .player)
         }
     }
 
@@ -13515,7 +13697,7 @@ final class AppState: ObservableObject {
             prefersPlayerSubtitlesEnabled = true
             await persistPlayerSubtitlePreference(enabled: true, track: nil)
         } catch {
-            show(error, title: "字幕加载失败", target: .player)
+            show(error, title: L10n.string("player.subtitle.load.failed", fallback: "Unable to Load Subtitles"), target: .player)
         }
     }
 
@@ -13523,7 +13705,7 @@ final class AppState: ObservableObject {
         do {
             try await environment?.player.screenshot(to: url)
         } catch {
-            show(error, title: "截图失败", target: .player)
+            show(error, title: L10n.string("player.screenshot.failed", fallback: "Unable to Save Screenshot"), target: .player)
         }
     }
 
@@ -13558,7 +13740,7 @@ final class AppState: ObservableObject {
     }
 
     func reportPlayerRenderError(_ error: Error) {
-        show(error, title: "视频渲染失败", target: .player)
+        show(error, title: L10n.string("player.render.failed", fallback: "Video Rendering Failed"), target: .player)
     }
 
     var visibleSites: [SiteConfiguration] {
@@ -13616,7 +13798,7 @@ final class AppState: ObservableObject {
         #elseif arch(x86_64)
         return "x86_64"
         #else
-        return "未知架构"
+        return L10n.string("system.architecture.unknown", fallback: "Unknown Architecture")
         #endif
     }
 
@@ -13632,7 +13814,9 @@ final class AppState: ObservableObject {
 
     func refreshAndroidRuntimeStatus() async {
         guard let environment else {
-            androidRuntimeStatus = .unavailable("应用运行环境未完成初始化")
+            androidRuntimeStatus = .unavailable(
+                L10n.string("android.runtime.environment-uninitialized", fallback: "The application environment has not finished initializing.")
+            )
             return
         }
         androidRuntimeModeSnapshot = await environment
@@ -13647,7 +13831,7 @@ final class AppState: ObservableObject {
             try await environment.androidRuntimeManager.presentInstallOffer()
             isAndroidRuntimeInstallSheetPresented = true
         } catch {
-            show(error, title: "Android 兼容组件暂不可用")
+            show(error, title: L10n.string("android.runtime.component-unavailable", fallback: "Android Compatibility Component Unavailable"))
         }
     }
 
@@ -13704,9 +13888,9 @@ final class AppState: ObservableObject {
         guard let environment, !isAndroidRuntimeBusy else { return }
         while true {
             let panel = NSOpenPanel()
-            panel.title = "选择 Android SDK"
-            panel.message = "请选择包含 platform-tools 和 emulator 的 Android SDK 目录。"
-            panel.prompt = "检查 SDK"
+            panel.title = L10n.string("android.sdk.choose.title", fallback: "Choose Android SDK")
+            panel.message = L10n.string("android.sdk.choose.message", fallback: "Choose an Android SDK folder containing platform-tools and emulator.")
+            panel.prompt = L10n.string("android.sdk.choose.action", fallback: "Check SDK")
             panel.canChooseDirectories = true
             panel.canChooseFiles = false
             panel.allowsMultipleSelection = false
@@ -13727,18 +13911,18 @@ final class AppState: ObservableObject {
                 : .warning
             alert.messageText = validation.canSelectEnvironment
                 ? (validation.canPrepareRuntime
-                    ? "现有 Android SDK 可以使用"
-                    : "现有 Android SDK 需要重建专用环境")
-                : "现有 Android SDK 当前不可用"
+                    ? L10n.string("android.sdk.validation.usable", fallback: "The Existing Android SDK Can Be Used")
+                    : L10n.string("android.sdk.validation.rebuild-needed", fallback: "The Dedicated Environment Must Be Rebuilt"))
+                : L10n.string("android.sdk.validation.unavailable", fallback: "The Existing Android SDK Is Unavailable")
             alert.informativeText = [
-                "位置：\(validation.sdkRoot.path)",
-                "启动能力：\(validation.launchCapability.detail)",
-                "创建/修复能力：\(validation.createRepairCapability.detail)",
+                L10n.string("android.sdk.validation.location", fallback: "Location: %@", validation.sdkRoot.path),
+                L10n.string("android.sdk.validation.launch", fallback: "Launch capability: %@", validation.launchCapability.detail),
+                L10n.string("android.sdk.validation.repair", fallback: "Create/repair capability: %@", validation.createRepairCapability.detail),
                 validation.userFacingSelectionStatus
             ].joined(separator: "\n")
             if validation.canSelectEnvironment {
-                alert.addButton(withTitle: "使用此环境")
-                alert.addButton(withTitle: "取消")
+                alert.addButton(withTitle: L10n.string("android.sdk.use", fallback: "Use This Environment"))
+                alert.addButton(withTitle: L10n.string("common.cancel", fallback: "Cancel"))
                 guard alert.runModal() == .alertFirstButtonReturn else {
                     return
                 }
@@ -13749,12 +13933,12 @@ final class AppState: ObservableObject {
                     androidRuntimeStatus = await environment.androidDexBridge
                         .runtimeStatus()
                 } catch {
-                    show(error, title: "无法切换 Android 运行环境")
+                    show(error, title: L10n.string("android.runtime.switch.failed", fallback: "Unable to Switch Android Runtime"))
                 }
                 return
             }
-            alert.addButton(withTitle: "重新选择…")
-            alert.addButton(withTitle: "取消")
+            alert.addButton(withTitle: L10n.string("android.sdk.choose-again", fallback: "Choose Again…"))
+            alert.addButton(withTitle: L10n.string("common.cancel", fallback: "Cancel"))
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
     }
@@ -13768,7 +13952,7 @@ final class AppState: ObservableObject {
             androidRuntimeStatus = await environment.androidDexBridge
                 .runtimeStatus()
         } catch {
-            show(error, title: "现有 Android SDK 不可用")
+            show(error, title: L10n.string("android.sdk.unavailable", fallback: "Existing Android SDK Unavailable"))
         }
     }
 
@@ -13782,7 +13966,7 @@ final class AppState: ObservableObject {
                 await showManagedRuntimeInstaller()
             }
         } catch {
-            show(error, title: "无法切换 Android 运行环境")
+            show(error, title: L10n.string("android.runtime.switch.failed", fallback: "Unable to Switch Android Runtime"))
         }
     }
 
@@ -13790,7 +13974,7 @@ final class AppState: ObservableObject {
         guard let environment, !isAndroidRuntimeBusy else { return }
         isAndroidRuntimeBusy = true
         androidRuntimeStatus = .starting(
-            "准备启动 Android 兼容模块",
+            L10n.string("android.runtime.start.preparing", fallback: "Preparing to Start Android Compatibility Module"),
             progress: 0
         )
         let progressTask = monitorAndroidRuntimeProgress(
@@ -13807,7 +13991,7 @@ final class AppState: ObservableObject {
         } catch {
             androidRuntimeStatus = await environment.androidDexBridge
                 .runtimeStatus()
-            show(error, title: "Android 兼容模块启动失败")
+            show(error, title: L10n.string("android.runtime.start.failed", fallback: "Unable to Start Android Compatibility Module"))
         }
     }
 
@@ -13823,7 +14007,7 @@ final class AppState: ObservableObject {
         guard let environment, !isAndroidRuntimeBusy else { return }
         isAndroidRuntimeBusy = true
         androidRuntimeStatus = .starting(
-            "准备重建端口映射并重新安装 Bridge",
+            L10n.string("android.runtime.repair.preparing", fallback: "Preparing to Rebuild Port Mapping and Reinstall Bridge"),
             progress: 0
         )
         let progressTask = monitorAndroidRuntimeProgress(
@@ -13840,7 +14024,7 @@ final class AppState: ObservableObject {
         } catch {
             androidRuntimeStatus = await environment.androidDexBridge
                 .runtimeStatus()
-            show(error, title: "Android 兼容模块修复失败")
+            show(error, title: L10n.string("android.runtime.repair.failed", fallback: "Unable to Repair Android Compatibility Module"))
         }
     }
 
@@ -13848,19 +14032,19 @@ final class AppState: ObservableObject {
         guard let environment, !isAndroidRuntimeBusy else { return }
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "修复 Android Runtime？"
+        alert.messageText = L10n.string("android.runtime.rebuild.title", fallback: "Repair Android Runtime?")
         alert.informativeText =
-            "当前 OKVideoMac 专用 Android Runtime 会先移到可恢复备份，"
-            + "再使用已选 Android SDK 中现有的 system image 重建。\n\n"
-            + "Android Runtime 内部状态会重置，部分网盘可能需要重新登录或授权。"
-            + "\nOKVideoMac 的普通设置、收藏和历史不受影响。"
-        alert.addButton(withTitle: "备份并重建")
-        alert.addButton(withTitle: "取消")
+            L10n.string(
+                "android.runtime.rebuild.message",
+                fallback: "The current OKVideoMac Android Runtime will be moved to a recoverable backup, then rebuilt using an existing system image from the selected Android SDK.\n\nThe runtime's internal state will be reset, and some cloud drives may require you to sign in or authorize again. OKVideoMac settings, favorites, and history will not be affected."
+            )
+        alert.addButton(withTitle: L10n.string("android.runtime.rebuild.action", fallback: "Back Up and Rebuild"))
+        alert.addButton(withTitle: L10n.string("common.cancel", fallback: "Cancel"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         isAndroidRuntimeBusy = true
         androidRuntimeStatus = .starting(
-            "正在备份并重建 OKVideoMac 专用 Android Runtime",
+            L10n.string("android.runtime.rebuild.progress", fallback: "Backing Up and Rebuilding the OKVideoMac Android Runtime"),
             progress: 0
         )
         let progressTask = monitorAndroidRuntimeProgress(
@@ -13878,7 +14062,7 @@ final class AppState: ObservableObject {
         } catch {
             androidRuntimeStatus = await environment.androidDexBridge
                 .runtimeStatus()
-            show(error, title: "Android Runtime 重建失败")
+            show(error, title: L10n.string("android.runtime.rebuild.failed", fallback: "Unable to Rebuild Android Runtime"))
         }
     }
 
@@ -13899,14 +14083,15 @@ final class AppState: ObservableObject {
 
     var playerStatusDescription: String {
         switch playerSnapshot.status {
-        case .idle: return "空闲"
-        case .loading: return "载入中"
-        case .playing: return "播放中"
-        case .paused: return "已暂停"
-        case .buffering: return "缓冲中"
-        case .ended: return "已结束"
-        case .stopped: return "已停止"
-        case .failed(let message): return "失败：\(LogRedactor.text(message))"
+        case .idle: return L10n.string("player.status.idle", fallback: "Idle")
+        case .loading: return L10n.string("player.status.loading", fallback: "Loading")
+        case .playing: return L10n.string("player.status.playing", fallback: "Playing")
+        case .paused: return L10n.string("player.status.paused", fallback: "Paused")
+        case .buffering: return L10n.string("player.status.buffering", fallback: "Buffering")
+        case .ended: return L10n.string("player.status.ended", fallback: "Ended")
+        case .stopped: return L10n.string("player.status.stopped", fallback: "Stopped")
+        case .failed(let message):
+            return L10n.string("player.status.failed", fallback: "Failed: %@", LogRedactor.text(message))
         }
     }
 
@@ -13919,7 +14104,8 @@ final class AppState: ObservableObject {
     }
 
     var playerRuntimeDescription: String {
-        environment?.player.runtimeDescription ?? "libmpv 不可用"
+        environment?.player.runtimeDescription
+            ?? L10n.string("player.runtime.unavailable", fallback: "libmpv unavailable")
     }
 
     var currentPlaybackTitle: String {
@@ -13966,7 +14152,9 @@ final class AppState: ObservableObject {
     }
 
     var livePlaybackDisplayTitle: String {
-        guard let channel = livePlaybackChannel else { return "直播" }
+        guard let channel = livePlaybackChannel else {
+            return L10n.string("live.title", fallback: "Live TV")
+        }
         guard let number = channel.number?.trimmingCharacters(
             in: .whitespacesAndNewlines
         ), !number.isEmpty,
@@ -13998,30 +14186,38 @@ final class AppState: ObservableObject {
 
     var playbackStageDescription: String {
         if case .failed = playerSnapshot.status {
-            return "播放失败"
+            return L10n.string("player.stage.failed", fallback: "Playback Failed")
         }
         if playerSnapshot.isSeeking && playerSnapshot.isPausedForCache {
-            return cacheActivityDescription(prefix: "正在跳转并缓冲")
+            return cacheActivityDescription(
+                prefix: L10n.string("player.stage.seeking-buffering", fallback: "Seeking and Buffering")
+            )
         }
         if playerSnapshot.isPausedForCache {
-            return cacheActivityDescription(prefix: "正在缓冲")
+            return cacheActivityDescription(
+                prefix: L10n.string("player.stage.buffering", fallback: "Buffering")
+            )
         }
         if playerSnapshot.isSeeking {
             guard let target = playerSnapshot.seekTarget else {
-                return "正在跳转"
+                return L10n.string("player.stage.seeking", fallback: "Seeking")
             }
-            return "正在跳转到 \(Self.playbackTimeDescription(target))"
+            return L10n.string(
+                "player.stage.seeking-to",
+                fallback: "Seeking to %@",
+                Self.playbackTimeDescription(target)
+            )
         }
         switch playbackResolutionState {
         case .idle: return playerStatusDescription
-        case .restoringHistory: return "正在恢复历史记录"
-        case .resolving: return "正在获取或解析播放地址"
-        case .validating: return "正在验证媒体线路"
-        case .loading: return "播放器正在连接媒体"
+        case .restoringHistory: return L10n.string("player.stage.restoring-history", fallback: "Restoring History")
+        case .resolving: return L10n.string("player.stage.resolving", fallback: "Resolving Playback URL")
+        case .validating: return L10n.string("player.stage.validating", fallback: "Validating Media Source")
+        case .loading: return L10n.string("player.stage.connecting", fallback: "Connecting to Media")
         case .playing: return playerStatusDescription
-        case .retrying: return "当前线路失败，正在自动换线"
-        case .exhausted: return "所有可用线路均已尝试"
-        case .failed: return "播放准备失败"
+        case .retrying: return L10n.string("player.stage.retrying", fallback: "Source Failed; Trying Another")
+        case .exhausted: return L10n.string("player.stage.exhausted", fallback: "All Available Sources Were Tried")
+        case .failed: return L10n.string("player.stage.prepare-failed", fallback: "Playback Preparation Failed")
         }
     }
 
@@ -14050,16 +14246,16 @@ final class AppState: ObservableObject {
         guard bytes > 0 else {
             switch playerSnapshot.status {
             case .loading, .buffering:
-                return "当前速度 0 KB/s"
+                return L10n.string("player.network.zero", fallback: "Current speed: 0 KB/s")
             default:
-                return "等待媒体数据"
+                return L10n.string("player.network.waiting", fallback: "Waiting for media data")
             }
         }
         let value = ByteCountFormatter.string(
             fromByteCount: bytes,
             countStyle: .file
         )
-        return "当前速度 \(value)/s"
+        return L10n.string("player.network.speed", fallback: "Current speed: %@/s", value)
     }
 
     var hasPreviousEpisode: Bool {
@@ -14212,7 +14408,11 @@ final class AppState: ObservableObject {
         guard let provider = providers[summary.siteKey] else {
             updateSearchFolder(id: id) { page in
                 page.isLoading = false
-                page.errorMessage = "来源 \(summary.siteName) 在当前配置中不可用"
+                page.errorMessage = L10n.string(
+                    "provider.current-configuration.unavailable",
+                    fallback: "%@ is unavailable in the current configuration.",
+                    summary.siteName
+                )
             }
             return
         }
@@ -14240,7 +14440,7 @@ final class AppState: ObservableObject {
         } catch {
             updateSearchFolder(id: id) { page in
                 page.isLoading = false
-                page.errorMessage = error.localizedDescription
+                page.errorMessage = localizedRuntimeErrorMessage(error)
             }
         }
     }
@@ -14297,10 +14497,10 @@ final class AppState: ObservableObject {
 
     func historyConfigurationName(for record: HistoryRecord) -> String {
         guard let configurationID = record.configurationID else {
-            return "旧版记录"
+            return L10n.string("history.legacy-record", fallback: "Legacy Record")
         }
         return configurations.first(where: { $0.id == configurationID })?.name
-            ?? "原配置已删除"
+            ?? L10n.string("history.original-configuration-deleted", fallback: "Original Configuration Deleted")
     }
 
     func historySiteName(for record: HistoryRecord) -> String {
@@ -14835,11 +15035,13 @@ final class AppState: ObservableObject {
         episodeURL: String
     ) -> (detail: VideoDetail, source: PlaySource, episode: PlayEpisode) {
         let episode = PlayEpisode(
-            name: record.episodeName?.nonEmpty ?? "历史分集",
+            name: record.episodeName?.nonEmpty
+                ?? L10n.string("history.episode.fallback", fallback: "History Episode"),
             url: episodeURL
         )
         let source = PlaySource(
-            name: record.sourceName?.nonEmpty ?? "历史线路",
+            name: record.sourceName?.nonEmpty
+                ?? L10n.string("history.source.fallback", fallback: "History Source"),
             episodes: [episode]
         )
         let detail = VideoDetail(
@@ -15052,7 +15254,9 @@ final class AppState: ObservableObject {
         _ source: ConfigurationSource
     ) async throws -> LoadedConfiguration {
         guard let environment else {
-            throw AppError.configuration("应用环境尚未初始化")
+            throw AppError.configuration(
+                L10n.string("app.environment.uninitialized", fallback: "The application environment has not been initialized.")
+            )
         }
         if case .remote(let url) = source,
            NodeBundleRuntimeService.supports(url) {
@@ -15067,7 +15271,10 @@ final class AppState: ObservableObject {
                 return loaded
             } catch {
                 activeNodeRuntimeEndpoint = nil
-                nodeRuntimeUnavailableReason = error.localizedDescription
+                nodeRuntimeUnavailableReason = L10n.string(
+                    "node.runtime.failed.user-facing",
+                    fallback: "Node Runtime is unavailable. Export diagnostics for details."
+                )
                 throw error
             }
         }
@@ -15079,7 +15286,9 @@ final class AppState: ObservableObject {
         configurationID: UUID
     ) async throws -> ImportedConfigurationPayload {
         guard let environment else {
-            throw AppError.configuration("应用环境尚未初始化")
+            throw AppError.configuration(
+                L10n.string("app.environment.uninitialized", fallback: "The application environment has not been initialized.")
+            )
         }
         if case .remote(let url) = source,
            NodeBundleRuntimeService.supports(url) {
@@ -15183,7 +15392,7 @@ final class AppState: ObservableObject {
                 ) {
                     presentation.hasAttemptedProfileRevisionVerification = true
                     presentation.lifecycleState = .saved
-                    presentation.status = "配置已保存，正在执行旧版 Spider 的一次性授权验证。"
+                    presentation.status = L10n.string("node.authorization.saved-verifying-legacy", fallback: "Configuration saved. Running one-time authorization verification for the legacy Spider.")
                     self.nodeWebPresentation = presentation
                     await self.completeNodeConfigurationAndRetry(
                         automatically: true,
@@ -15193,11 +15402,11 @@ final class AppState: ObservableObject {
                     presentation.lifecycleState = .saved
                     if isPlayback,
                        presentation.completionMode == .explicitSignal {
-                        presentation.status = "配置已保存，仍在等待当前请求的明确授权完成信号。"
+                        presentation.status = L10n.string("node.authorization.saved-waiting-signal", fallback: "Configuration saved. Waiting for an explicit authorization-complete signal from the current request.")
                     } else if isPlayback {
-                        presentation.status = "配置已保存；自动验证已执行过一次，请手动重试。"
+                        presentation.status = L10n.string("node.authorization.saved-manual-retry", fallback: "Configuration saved. Automatic verification already ran once; retry manually.")
                     } else {
-                        presentation.status = "配置已保存，窗口将保持打开。"
+                        presentation.status = L10n.string("node.authorization.saved-window-open", fallback: "Configuration saved. This window will remain open.")
                     }
                     self.nodeWebPresentation = presentation
                 }
@@ -15228,16 +15437,24 @@ final class AppState: ObservableObject {
             }
         case .starting:
             activeNodeRuntimeEndpoint = nil
-            nodeRuntimeUnavailableReason = "Node Runtime 正在启动"
+            nodeRuntimeUnavailableReason = L10n.string("node.runtime.starting", fallback: "Node Runtime is starting")
         case .restarting(let attempt, let reason):
             activeNodeRuntimeEndpoint = nil
-            nodeRuntimeUnavailableReason = "Node Runtime 正在第 \(attempt) 次恢复：\(reason)"
-        case .failed(let reason):
+            nodeRuntimeUnavailableReason = L10n.string(
+                "node.runtime.restarting",
+                fallback: "Node Runtime restart attempt %1$lld: %2$@",
+                attempt,
+                reason
+            )
+        case .failed:
             activeNodeRuntimeEndpoint = nil
-            nodeRuntimeUnavailableReason = reason
+            nodeRuntimeUnavailableReason = L10n.string(
+                "node.runtime.failed.user-facing",
+                fallback: "Node Runtime is unavailable. Export diagnostics for details."
+            )
         case .stopped:
             activeNodeRuntimeEndpoint = nil
-            nodeRuntimeUnavailableReason = "Node Runtime 已停止"
+            nodeRuntimeUnavailableReason = L10n.string("node.runtime.stopped", fallback: "Node Runtime has stopped")
         }
     }
 
@@ -15251,7 +15468,7 @@ final class AppState: ObservableObject {
         presentation.url = updatedURL
         presentation.revision &+= 1
         if presentation.lifecycleState != .verifying {
-            presentation.status = "CatPaw Runtime 已恢复，配置页已连接到新端口。"
+            presentation.status = L10n.string("node.runtime.recovered-new-port", fallback: "CatPaw Runtime recovered. The configuration page is connected to the new port.")
         }
         nodeWebPresentation = presentation
     }
@@ -15348,7 +15565,7 @@ final class AppState: ObservableObject {
         } catch {
             guard activeConfigurationRecord?.id == configurationID else { return }
             searchSiteScope = SearchSiteScope(mode: .custom)
-            show(error, title: "无法读取搜索范围")
+            show(error, title: L10n.string("search.scope.read.failed", fallback: "Unable to Read Search Scope"))
             return
         }
         guard activeConfigurationRecord?.id == configurationID else { return }
@@ -15365,8 +15582,8 @@ final class AppState: ObservableObject {
         ) else {
             searchSiteScope = SearchSiteScope(mode: .custom)
             show(
-                AppError.database("已保存的搜索范围格式无效，请重新选择站点"),
-                title: "搜索范围未自动扩大"
+                AppError.database(L10n.string("search.scope.invalid", fallback: "The saved search scope is invalid. Select sites again.")),
+                title: L10n.string("search.scope.expand.failed", fallback: "Search Scope Was Not Expanded")
             )
             return
         }
@@ -16150,9 +16367,10 @@ final class AppState: ObservableObject {
         } catch {
             loadedEPGGuides[source.id] = nil
             loadedEPGScheduleIndexes[source.id] = nil
-            epgFailures[source.id] = error.localizedDescription
+            let message = localizedRuntimeErrorMessage(error)
+            epgFailures[source.id] = message
             liveSourceEPGStatuses[source.id] = .failed(
-                error.localizedDescription
+                message
             )
         }
     }
@@ -16507,7 +16725,7 @@ final class AppState: ObservableObject {
         } else {
             show(
                 AppError.playback(message),
-                title: "播放器错误",
+                title: L10n.string("player.error.title", fallback: "Player Error"),
                 target: .player
             )
         }
@@ -16598,7 +16816,7 @@ final class AppState: ObservableObject {
                 activeRequestID: activePlayerRequestID
             ) else { return }
             playerSubtitlesEnabled = false
-            show(error, title: "恢复字幕设置失败", target: .player)
+            show(error, title: L10n.string("player.subtitle.restore.failed", fallback: "Unable to Restore Subtitle Settings"), target: .player)
         }
     }
 
@@ -16619,7 +16837,7 @@ final class AppState: ObservableObject {
                 )
             }
         } catch {
-            show(error, title: "无法保存字幕设置", target: .player)
+            show(error, title: L10n.string("player.subtitle.save.failed", fallback: "Unable to Save Subtitle Settings"), target: .player)
         }
     }
 
@@ -16689,7 +16907,7 @@ final class AppState: ObservableObject {
         }
         show(
             AppError.playback(message),
-            title: "播放器错误",
+            title: L10n.string("player.error.title", fallback: "Player Error"),
             target: .player
         )
     }
@@ -16705,7 +16923,9 @@ final class AppState: ObservableObject {
         sessionID: UUID
     ) async throws {
         guard let environment else {
-            throw AppError.playback("播放器环境不可用")
+            throw AppError.playback(
+                L10n.string("player.environment.unavailable", fallback: "The player environment is unavailable.")
+            )
         }
         guard playbackSessionID == sessionID else {
             throw CancellationError()
@@ -17125,7 +17345,9 @@ final class AppState: ObservableObject {
         requestID: UUID
     ) async throws {
         guard let environment else {
-            throw AppError.playback("应用环境尚未初始化")
+            throw AppError.playback(
+                L10n.string("app.environment.uninitialized", fallback: "The application environment has not been initialized.")
+            )
         }
         try await environment.player.load(
             media,
@@ -17190,6 +17412,10 @@ final class AppState: ObservableObject {
         )
     }
 
+    private func localizedRuntimeErrorMessage(_ error: Error) -> String {
+        RuntimeUserFacingMessageMapper.message(for: error)
+    }
+
     private func show(
         _ error: Error,
         title: String,
@@ -17228,6 +17454,13 @@ final class AppState: ObservableObject {
             return UserFacingError(
                 title: presentation.title,
                 message: presentation.message,
+                target: target
+            )
+        }
+        if let message = CommonUserFacingErrorMapper.message(for: error) {
+            return UserFacingError(
+                title: title,
+                message: message,
                 target: target
             )
         }

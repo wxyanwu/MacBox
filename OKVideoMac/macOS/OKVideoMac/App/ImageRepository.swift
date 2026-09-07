@@ -455,7 +455,9 @@ final class ImageRepository: Sendable {
         }
 
         guard let image else {
-            throw AppError.decoding("海报不是有效图片")
+            throw AppError.decoding(
+                L10n.string("poster.invalid-image", fallback: "The poster is not a valid image.")
+            )
         }
         if loaded.origin == .network {
             try await dataRepository.persistValidatedData(loaded.data, for: url)
@@ -466,7 +468,9 @@ final class ImageRepository: Sendable {
     @MainActor
     private func cachedImageAfterLoad(for url: URL) throws -> NSImage {
         guard let image = cachedImage(for: url) else {
-            throw AppError.decoding("海报不是有效图片")
+            throw AppError.decoding(
+                L10n.string("poster.invalid-image", fallback: "The poster is not a valid image.")
+            )
         }
         return image
     }

@@ -105,7 +105,8 @@ struct SearchView: View {
     }
 
     private var toolbarTitle: String {
-        state.currentSearchFolder?.folder.title ?? "搜索结果"
+        state.currentSearchFolder?.folder.title
+            ?? L10n.string("search.results.title", fallback: "Search Results")
     }
 
     @ViewBuilder
@@ -116,8 +117,8 @@ struct SearchView: View {
             Image(systemName: "line.3.horizontal.decrease.circle")
         }
         .primaryToolbarIconControl()
-        .help("选择本次搜索使用的站点")
-        .accessibilityLabel("搜索范围：\(state.searchScopeSummary)")
+        .help(L10n.string("search.scope.choose", fallback: "Choose providers for this search"))
+        .accessibilityLabel(L10n.string("search.scope.value", fallback: "Search scope: %@", state.searchScopeSummary))
         .popover(isPresented: $showingSearchScope, arrowEdge: .bottom) {
             SearchScopePopover()
                 .environmentObject(state)
@@ -127,10 +128,10 @@ struct SearchView: View {
     private func searchMergeControl(
         layout: SearchToolbarLayout
     ) -> some View {
-        Picker("重复影片", selection: $mergesDuplicateTitles) {
-            Text("合并重复")
+        Picker(L10n.string("search.duplicates.label", fallback: "Duplicate Titles"), selection: $mergesDuplicateTitles) {
+            Text(L10n.string("search.duplicates.merge", fallback: "Merge Duplicates"))
                 .tag(true)
-            Text("分别显示")
+            Text(L10n.string("search.duplicates.separate", fallback: "Show Separately"))
                 .tag(false)
         }
         .labelsHidden()
@@ -142,12 +143,14 @@ struct SearchView: View {
         )
         .help(
             mergesDuplicateTitles
-                ? "将片名和年份相同的跨站结果合并为一张卡片"
-                : "按来源分别显示搜索结果"
+                ? L10n.string("search.duplicates.merge.help", fallback: "Combine results with the same title and year into one card")
+                : L10n.string("search.duplicates.separate.help", fallback: "Show a separate result for each provider")
         )
-        .accessibilityLabel("重复影片显示方式")
+        .accessibilityLabel(L10n.string("search.duplicates.accessibility", fallback: "Duplicate Title Display"))
         .accessibilityValue(
-            mergesDuplicateTitles ? "合并重复影片" : "按来源分别显示"
+            mergesDuplicateTitles
+                ? L10n.string("search.duplicates.merge", fallback: "Merge Duplicates")
+                : L10n.string("search.duplicates.separate", fallback: "Show Separately")
         )
     }
 
@@ -155,7 +158,7 @@ struct SearchView: View {
     private func searchSortControl(
         layout: SearchToolbarLayout
     ) -> some View {
-        Picker("排序", selection: $sortOrder) {
+        Picker(L10n.string("common.sort", fallback: "Sort"), selection: $sortOrder) {
             ForEach(SearchResultSortOrder.allCases) { option in
                 Text(option.toolbarTitle).tag(option)
             }
@@ -167,7 +170,7 @@ struct SearchView: View {
             width: layout.sortWidth,
             height: PrimaryToolbarMetrics.itemHeight
         )
-        .help("排序：\(sortOrder.title)")
+        .help(L10n.string("search.sort.help", fallback: "Sort: %@", sortOrder.title))
     }
 
     private var searchResults: some View {
@@ -231,37 +234,42 @@ struct SearchView: View {
 
     private var emptyStateTitle: String {
         if state.activeSearchKeyword.isEmpty {
-            return "搜索影视内容"
+            return L10n.string("search.empty.start.title", fallback: "Search Movies and Shows")
         }
-        return state.isSearching ? "正在搜索" : "暂无结果"
+        return state.isSearching
+            ? L10n.string("search.searching.title", fallback: "Searching")
+            : L10n.string("search.empty.no-results.title", fallback: "No Results")
     }
 
     private var emptyStateMessage: String {
         if state.activeSearchKeyword.isEmpty {
-            return "输入关键词后将并发搜索当前范围内已启用的站点。"
+            return L10n.string("search.empty.start.message", fallback: "Enter a title to search the enabled providers in the current scope.")
         }
         if state.isSearching {
-            return "首批已完成 \(state.searchFirstPageCompletedSiteCount)/"
-                + "\(state.searchTotalSiteCount) 个站点；站点处理已结束 "
-                + "\(state.searchCompletedSiteCount)/"
-                + "\(state.searchTotalSiteCount)，结果会增量显示。"
+            return L10n.string(
+                "search.progress.message",
+                fallback: "First pages: %d/%d providers. Finished: %d/%d. Results appear as they arrive.",
+                state.searchFirstPageCompletedSiteCount,
+                state.searchTotalSiteCount,
+                state.searchCompletedSiteCount,
+                state.searchTotalSiteCount
+            )
         }
         return state.searchFailures.isEmpty
             ? emptyCompletionMessage
-            : "\(state.searchFailures.count) 个站点搜索失败，"
-                + "其余站点没有返回结果。"
+            : L10n.string("search.failures.no-results", fallback: "%d providers failed; the remaining providers returned no results.", state.searchFailures.count)
     }
 
     private var emptyCompletionMessage: String {
         switch state.searchTermination {
         case .deadlineReached:
-            return "首轮搜索已完成；后台补页已到达时间上限。"
+            return L10n.string("search.completion.deadline", fallback: "The initial search finished; background pagination reached its time limit.")
         case .cancelled:
-            return "搜索已停止。"
+            return L10n.string("search.completion.cancelled", fallback: "Search stopped.")
         case .supersededByNewSearch:
-            return "本次搜索已被新搜索替代。"
+            return L10n.string("search.completion.superseded", fallback: "A newer search replaced this search.")
         default:
-            return "当前搜索范围内没有站点返回匹配内容。"
+            return L10n.string("search.completion.empty", fallback: "No providers in the current scope returned matching content.")
         }
     }
 }
@@ -427,7 +435,7 @@ private struct SearchSourceNavigation: View {
             Item(
                 id: Self.allResultsID,
                 key: nil,
-                title: "全部结果",
+                title: L10n.string("search.filters.all-results", fallback: "All Results"),
                 count: totalCount
             )
         ] + options.map {
@@ -493,7 +501,7 @@ private struct SearchSourceNavigation: View {
                         .menuIndicator(.hidden)
                         .menuStyle(.borderlessButton)
                         .fixedSize()
-                        .help("显示另外 \(partition.hiddenIDs.count) 个结果来源")
+                        .help(L10n.string("search.filters.more-providers", fallback: "Show %d more result providers", partition.hiddenIDs.count))
                     }
                 }
 
@@ -524,8 +532,8 @@ private struct SearchSourceNavigation: View {
                 isSelected: item.id == selectedID
             )
         )
-        .help("\(item.title)，\(item.count) 项")
-        .accessibilityLabel("\(item.title)，\(item.count) 项")
+        .help(L10n.string("search.filters.item-count", fallback: "%@, %d items", item.title, item.count))
+        .accessibilityLabel(L10n.string("search.filters.item-count", fallback: "%@, %d items", item.title, item.count))
     }
 
     private static func measuredWidth(for title: String) -> CGFloat {
@@ -572,14 +580,14 @@ enum SearchToolbarStatusPolicy {
                 || termination == .supersededByNewSearch {
                 return SearchToolbarStatusPresentation(
                     phase: .stopped,
-                    text: "已停止",
-                    accessibilityValue: "搜索已停止"
+                    text: L10n.string("search.status.stopped", fallback: "Stopped"),
+                    accessibilityValue: L10n.string("search.status.stopped-accessibility", fallback: "Search stopped")
                 )
             }
             return SearchToolbarStatusPresentation(
                 phase: .preparing,
-                text: "准备搜索",
-                accessibilityValue: "正在准备搜索"
+                text: L10n.string("search.status.preparing", fallback: "Preparing"),
+                accessibilityValue: L10n.string("search.status.preparing-accessibility", fallback: "Preparing search")
             )
         }
 
@@ -596,35 +604,35 @@ enum SearchToolbarStatusPolicy {
         let text: String
         switch (layout, phase) {
         case (.expanded, .searching):
-            text = "首批 \(firstPageCompleted)/\(total) · 已结束 \(completed)/\(total)"
+            text = L10n.string("search.status.expanded.searching", fallback: "First pages %d/%d · Finished %d/%d", firstPageCompleted, total, completed, total)
         case (.expanded, .completed):
-            text = "✓ 已完成 \(completed)/\(total)"
+            text = L10n.string("search.status.completed", fallback: "✓ Completed %d/%d", completed, total)
         case (.expanded, .stopped):
-            text = "已停止 \(completed)/\(total)"
+            text = L10n.string("search.status.stopped-count", fallback: "Stopped %d/%d", completed, total)
         case (.compact, .searching):
-            text = "已结束 \(completed)/\(total)"
+            text = L10n.string("search.status.finished-count", fallback: "Finished %d/%d", completed, total)
         case (.compact, .completed):
-            text = "✓ 已完成 \(completed)/\(total)"
+            text = L10n.string("search.status.completed", fallback: "✓ Completed %d/%d", completed, total)
         case (.compact, .stopped):
-            text = "已停止 \(completed)/\(total)"
+            text = L10n.string("search.status.stopped-count", fallback: "Stopped %d/%d", completed, total)
         case (.minimal, .stopped):
-            text = "已停止"
+            text = L10n.string("search.status.stopped", fallback: "Stopped")
         case (.minimal, _):
             text = "\(completed)/\(total)"
         case (_, .preparing):
-            text = "准备搜索"
+            text = L10n.string("search.status.preparing", fallback: "Preparing")
         }
 
         let accessibilityValue: String
         switch phase {
         case .preparing:
-            accessibilityValue = "正在准备搜索"
+            accessibilityValue = L10n.string("search.status.preparing-accessibility", fallback: "Preparing search")
         case .searching:
-            accessibilityValue = "首批已完成 \(firstPageCompleted) / \(total) 个站点，站点处理已结束 \(completed) / \(total) 个站点"
+            accessibilityValue = L10n.string("search.status.searching-accessibility", fallback: "First pages completed for %d of %d providers; %d of %d providers finished", firstPageCompleted, total, completed, total)
         case .completed:
-            accessibilityValue = "搜索已完成，共处理 \(completed) / \(total) 个站点"
+            accessibilityValue = L10n.string("search.status.completed-accessibility", fallback: "Search completed; %d of %d providers processed", completed, total)
         case .stopped:
-            accessibilityValue = "搜索已停止，共处理 \(completed) / \(total) 个站点"
+            accessibilityValue = L10n.string("search.status.stopped-count-accessibility", fallback: "Search stopped; %d of %d providers processed", completed, total)
         }
 
         return SearchToolbarStatusPresentation(
@@ -678,8 +686,8 @@ private struct SearchToolbarStatusView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("查看搜索进度详情")
-            .accessibilityLabel("搜索进度")
+            .help(L10n.string("search.status.details.help", fallback: "View search progress details"))
+            .accessibilityLabel(L10n.string("search.status.progress", fallback: "Search Progress"))
             .accessibilityValue(presentation.accessibilityValue)
             .popover(isPresented: $showingDetails, arrowEdge: .bottom) {
                 SearchProgressDetailsPopover(
@@ -704,7 +712,7 @@ private struct SearchToolbarStatusView: View {
             .opacity(isSearching ? 1 : 0)
             .allowsHitTesting(isSearching)
             .accessibilityHidden(!isSearching)
-            .help("停止搜索")
+            .help(L10n.string("search.stop", fallback: "Stop Search"))
         }
         .frame(
             width: layout.statusWidth,
@@ -759,7 +767,7 @@ private struct SearchProgressDetailsPopover: View {
                 Image(systemName: headerSymbol)
                     .foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("搜索状态")
+                    Text(L10n.string("search.status.title", fallback: "Search Status"))
                         .font(.headline)
                     Text(presentation.accessibilityValue)
                         .font(.caption)
@@ -768,7 +776,7 @@ private struct SearchProgressDetailsPopover: View {
                 Spacer(minLength: 0)
             }
 
-            Text("当前已显示 \(resultCount) 条结果")
+            Text(L10n.string("search.status.result-count", fallback: "%d results currently shown", resultCount))
                 .font(.callout)
 
             if let runtimeNotice, !runtimeNotice.isEmpty {
@@ -787,7 +795,7 @@ private struct SearchProgressDetailsPopover: View {
 
             if !orderedOutcomes.isEmpty {
                 Divider()
-                Text("站点详情")
+                Text(L10n.string("search.status.provider-details", fallback: "Provider Details"))
                     .font(.subheadline.weight(.semibold))
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 9) {
@@ -825,9 +833,9 @@ private struct SearchProgressDetailsPopover: View {
     private var retentionSummary: String {
         if maximumRetainedCandidates == .max,
            maximumResultsPerSite == .max {
-            return "完整保留各站结果"
+            return L10n.string("search.retention.complete", fallback: "All provider results are retained")
         }
-        return "已按相关度保留结果；总量上限 \(maximumRetainedCandidates)，每站上限 \(maximumResultsPerSite)"
+        return L10n.string("search.retention.limited", fallback: "Results are retained by relevance: %d total, up to %d per provider", maximumRetainedCandidates, maximumResultsPerSite)
     }
 
     private func detailRow(systemImage: String, text: String) -> some View {
@@ -886,38 +894,38 @@ struct SearchScopeEditorContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Picker("搜索范围", selection: modeSelection) {
-                Text("全部站点").tag(SearchSiteScopeMode.all)
-                Text("自定义").tag(SearchSiteScopeMode.custom)
+            Picker(L10n.string("search.scope.title", fallback: "Search Scope"), selection: modeSelection) {
+                Text(L10n.string("search.scope.all", fallback: "All Providers")).tag(SearchSiteScopeMode.all)
+                Text(L10n.string("search.scope.custom", fallback: "Custom")).tag(SearchSiteScopeMode.custom)
             }
             .pickerStyle(.segmented)
 
             if mode == .custom {
                 HStack(spacing: 8) {
-                    Button("全选") {
+                    Button(L10n.string("common.select-all", fallback: "Select All")) {
                         selectedKeys.formUnion(searchableKeys)
                     }
-                    Button("清空") {
+                    Button(L10n.string("common.clear", fallback: "Clear")) {
                         selectedKeys.subtract(searchableKeys)
                     }
-                    Button("反选") {
+                    Button(L10n.string("common.invert-selection", fallback: "Invert Selection")) {
                         let selected = selectedKeys.intersection(searchableKeys)
                         selectedKeys.subtract(searchableKeys)
                         selectedKeys.formUnion(searchableKeys.subtracting(selected))
                     }
                     Spacer()
-                    Text("已选 \(selectedKeys.intersection(searchableKeys).count) / \(searchableKeys.count)")
+                    Text(L10n.string("search.scope.selected-count", fallback: "%d of %d selected", selectedKeys.intersection(searchableKeys).count, searchableKeys.count))
                         .font(.caption.monospacedDigit())
                         .foregroundColor(.secondary)
                 }
                 .controlSize(.small)
             } else {
-                Text("当前目录中所有可运行站点都会发起搜索，包括源中标记为停用的站点；如需排除请切换到自定义。")
+                Text(L10n.string("search.scope.all.note", fallback: "Every runnable provider in this configuration will be searched, including providers disabled for browsing. Choose Custom to exclude any provider."))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
 
-            TextField("筛选站点名称", text: $filterText)
+            TextField(L10n.string("search.scope.filter", fallback: "Filter provider names"), text: $filterText)
                 .textFieldStyle(.roundedBorder)
 
             Divider()
@@ -961,8 +969,8 @@ struct SearchScopeEditorContent: View {
                     } else if option.isUserDisabled {
                         Text(
                             mode == .all
-                                ? "源中已停用 · 全部模式仍会搜索"
-                                : "源中已停用 · 可为搜索单独启用"
+                                ? L10n.string("search.scope.disabled-all", fallback: "Disabled for browsing · Still searched in All mode")
+                                : L10n.string("search.scope.disabled-custom", fallback: "Disabled for browsing · Can be enabled for search")
                         )
                             .font(.caption2)
                             .foregroundColor(.secondary)
@@ -1015,9 +1023,9 @@ private struct SearchScopePopover: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("搜索范围")
+                Text(L10n.string("search.scope.title", fallback: "Search Scope"))
                     .font(.headline)
-                Text("只会请求这里选中的站点；结果来源筛选不会发起新搜索。")
+                Text(L10n.string("search.scope.sheet.note", fallback: "Only selected providers receive requests. Filtering result providers does not start a new search."))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -1032,14 +1040,18 @@ private struct SearchScopePopover: View {
             Divider()
 
             HStack {
-                Button("取消") { dismiss() }
+                Button(L10n.string(.commonCancel)) { dismiss() }
                 Spacer()
                 if !hasValidSelection {
-                    Text("至少选择一个可用站点")
+                    Text(L10n.string("search.scope.minimum-one", fallback: "A custom search scope requires at least one currently available provider."))
                         .font(.caption)
                         .foregroundColor(.red)
                 }
-                Button(state.isSearching ? "保存并重新搜索" : "保存") {
+                Button(
+                    state.isSearching
+                        ? L10n.string("search.scope.save-and-restart", fallback: "Save and Search Again")
+                        : L10n.string("common.save", fallback: "Save")
+                ) {
                     let shouldRestart = state.isSearching
                     isSaving = true
                     Task {
@@ -1103,21 +1115,21 @@ private struct SearchFolderBrowser: View {
             VStack(spacing: 14) {
                 EmptyStateView(
                     systemImage: "externaldrive.badge.exclamationmark",
-                    title: "网盘目录加载失败",
+                    title: L10n.string("search.folder.failed.title", fallback: "Cloud Folder Failed to Load"),
                     message: errorMessage
                 )
-                Button("重试") {
+                Button(L10n.string("common.retry", fallback: "Try Again")) {
                     state.retryCurrentSearchFolder()
                 }
             }
         } else if page.isLoading, page.items.isEmpty {
-            AppActivityLabel("正在展开网盘目录…")
+            AppActivityLabel(L10n.string("search.folder.loading", fallback: "Opening cloud folder…"))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if page.items.isEmpty {
             EmptyStateView(
                 systemImage: "folder",
-                title: "目录为空",
-                message: "该搜索结果没有返回可浏览的网盘条目。"
+                title: L10n.string("search.folder.empty.title", fallback: "Empty Folder"),
+                message: L10n.string("search.folder.empty.message", fallback: "This search result did not return any browsable cloud items.")
             )
         } else {
             GeometryReader { viewport in
@@ -1180,7 +1192,9 @@ private struct SearchFolderGrid: View {
                                 .lineLimit(1)
                         }
                         Label(
-                            item.isFolder ? "文件夹" : item.siteName,
+                            item.isFolder
+                                ? L10n.string("common.folder", fallback: "Folder")
+                                : item.siteName,
                             systemImage: item.isFolder
                                 ? "folder"
                                 : "play.rectangle"
@@ -1202,12 +1216,12 @@ private extension SearchSiteOutcome {
         switch self {
         case .success(_, let siteName, let resultCount):
             return resultCount == 0
-                ? "\(siteName) · 搜索成功但结果为空"
-                : "\(siteName) · 搜索成功并返回 \(resultCount) 条"
+                ? L10n.string("search.outcome.empty", fallback: "%@ · Search succeeded with no results", siteName)
+                : L10n.string("search.outcome.success", fallback: "%@ · Search succeeded with %d results", siteName, resultCount)
         case .failure(let failure):
             return "\(failure.siteName) · \(failure.categoryTitle)"
         case .cancelled(_, let siteName):
-            return "\(siteName) · 用户取消"
+            return L10n.string("search.outcome.cancelled", fallback: "%@ · Cancelled", siteName)
         }
     }
 
@@ -1220,13 +1234,13 @@ private extension SearchSiteOutcome {
 private extension SearchFailure {
     var categoryTitle: String {
         switch category {
-        case .unsupportedRoute: return "未提供搜索路由"
-        case .configurationRequired: return "需要配置或登录"
-        case .scriptError: return "脚本错误"
-        case .upstreamUnavailable: return "上游不可用"
-        case .timeout: return "搜索超时"
-        case .transport: return "网络连接失败"
-        case .provider: return "站点返回错误"
+        case .unsupportedRoute: return L10n.string("search.failure.unsupported-route", fallback: "No Search Route")
+        case .configurationRequired: return L10n.string("search.failure.configuration", fallback: "Configuration or Sign-In Required")
+        case .scriptError: return L10n.string("search.failure.script", fallback: "Script Error")
+        case .upstreamUnavailable: return L10n.string("search.failure.upstream", fallback: "Upstream Unavailable")
+        case .timeout: return L10n.string("search.failure.timeout", fallback: "Search Timed Out")
+        case .transport: return L10n.string("search.failure.transport", fallback: "Network Connection Failed")
+        case .provider: return L10n.string("search.failure.provider", fallback: "Provider Error")
         }
     }
 }
@@ -1241,19 +1255,19 @@ enum SearchResultSortOrder: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .relevance: return "相关度排序"
-        case .sourceCount: return "来源数量"
-        case .newest: return "年份最新"
-        case .title: return "片名排序"
+        case .relevance: return L10n.string("search.sort.relevance.title", fallback: "Relevance")
+        case .sourceCount: return L10n.string("search.sort.source-count.title", fallback: "Number of Providers")
+        case .newest: return L10n.string("search.sort.newest.title", fallback: "Newest Year")
+        case .title: return L10n.string("search.sort.title.title", fallback: "Title")
         }
     }
 
     var toolbarTitle: String {
         switch self {
-        case .relevance: return "相关度"
-        case .sourceCount: return "来源数"
-        case .newest: return "最新"
-        case .title: return "片名"
+        case .relevance: return L10n.string("search.sort.relevance.toolbar", fallback: "Relevance")
+        case .sourceCount: return L10n.string("search.sort.source-count.toolbar", fallback: "Providers")
+        case .newest: return L10n.string("search.sort.newest.toolbar", fallback: "Newest")
+        case .title: return L10n.string("search.sort.title.toolbar", fallback: "Title")
         }
     }
 }
@@ -1422,13 +1436,13 @@ private struct SearchClusterCell: View {
             .appInteractiveHover(cornerRadius: 10)
             .contextMenu {
                 ForEach(cluster.sources) { source in
-                    Button("从 \(source.siteName) 打开") {
+                    Button(L10n.string("search.source.open-from", fallback: "Open from %@", source.siteName)) {
                         onSelectSource(source)
                     }
                 }
             }
             .accessibilityLabel(
-                "\(cluster.title)，\(cluster.sources.count) 个来源"
+                L10n.string("search.source.accessibility", fallback: "%@, %d providers", cluster.title, cluster.sources.count)
             )
         }
     }
@@ -1456,7 +1470,7 @@ private struct SearchClusterCell: View {
     private func sourceDescription(primary: VideoSummary) -> String {
         cluster.sources.count == 1
             ? primary.siteName
-            : "\(cluster.sources.count) 个来源"
+            : L10n.string("search.source.count", fallback: "%d providers", cluster.sources.count)
     }
 }
 
@@ -1507,12 +1521,12 @@ private struct SearchSourcePicker: View {
             }
 
             VStack(alignment: .leading, spacing: 5) {
-                Text("选择来源")
+                Text(L10n.string("search.source.choose", fallback: "Choose a Provider"))
                     .font(.title3.weight(.semibold))
                 Text(cluster.title)
                     .font(.headline)
                     .lineLimit(2)
-                Text("找到 \(cluster.sources.count) 个来源，请选择一个进入详情")
+                Text(L10n.string("search.source.choose-message", fallback: "%d providers found. Choose one to view details.", cluster.sources.count))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -1527,8 +1541,8 @@ private struct SearchSourcePicker: View {
             }
             .buttonStyle(.plain)
             .appInteractiveHover(cornerRadius: 14)
-            .help("关闭来源选择")
-            .accessibilityLabel("关闭来源选择")
+            .help(L10n.string("search.source.close", fallback: "Close Provider Selection"))
+            .accessibilityLabel(L10n.string("search.source.close", fallback: "Close Provider Selection"))
         }
         .padding(16)
     }
@@ -1558,7 +1572,7 @@ private struct SearchSourcePicker: View {
 
                 Spacer(minLength: 10)
 
-                Text("进入详情")
+                Text(L10n.string("search.source.view-details", fallback: "View Details"))
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Image(systemName: "chevron.right")
@@ -1577,7 +1591,7 @@ private struct SearchSourcePicker: View {
         }
         .buttonStyle(.plain)
         .appInteractiveHover(cornerRadius: 10)
-        .accessibilityLabel("从 \(source.siteName) 打开 \(source.title)")
+        .accessibilityLabel(L10n.string("search.source.open-accessibility", fallback: "Open %@ from %@", source.title, source.siteName))
     }
 
     private var pickerHeight: CGFloat {

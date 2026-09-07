@@ -16,8 +16,8 @@ struct HistoryView: View {
             if state.history.isEmpty {
                 EmptyStateView(
                     systemImage: "clock",
-                    title: "暂无播放历史",
-                    message: "播放成功后会记录进度；历史默认保留 60 天。"
+                    title: L10n.string("history.empty.title", fallback: "No Watch History"),
+                    message: L10n.string("history.empty.message", fallback: "Playback progress appears here after a video starts. History is kept for 60 days by default.")
                 )
             } else {
                 ScrollView {
@@ -37,7 +37,7 @@ struct HistoryView: View {
         }
         .navigationTitle("")
         .toolbar {
-            PrimaryPageToolbarLeadingContent(title: "历史")
+            PrimaryPageToolbarLeadingContent(title: L10n.string(.sectionHistory))
             ToolbarItemGroup(placement: .primaryAction) {
                 if !state.isDetailPagePresented,
                    !state.history.isEmpty {
@@ -49,8 +49,8 @@ struct HistoryView: View {
             deletionTitle,
             isPresented: deletionAlertIsPresented
         ) {
-            Button("取消", role: .cancel) {}
-            Button("删除", role: .destructive) {
+            Button(L10n.string(.commonCancel), role: .cancel) {}
+            Button(L10n.string("common.delete", fallback: "Delete"), role: .destructive) {
                 performDeletion()
             }
         } message: {
@@ -115,7 +115,7 @@ struct HistoryView: View {
                 Button(role: .destructive) {
                     pendingDeletion = .items([item.id])
                 } label: {
-                    Label("删除这条历史", systemImage: "trash")
+                    Label(L10n.string("history.delete-one", fallback: "Delete History Item"), systemImage: "trash")
                 }
             }
 
@@ -129,7 +129,7 @@ struct HistoryView: View {
                 .buttonStyle(.plain)
                 .appInteractiveHover(cornerRadius: 8, destructive: true)
                 .foregroundStyle(.secondary)
-                .help("删除这条历史")
+                .help(L10n.string("history.delete-one", fallback: "Delete History Item"))
                 .padding(.trailing, 14)
             }
         }
@@ -182,8 +182,11 @@ struct HistoryView: View {
             Spacer()
             Text(
                 item.watchedAt.formatted(
-                    date: .abbreviated,
-                    time: .shortened
+                    Date.FormatStyle(
+                        date: .abbreviated,
+                        time: .shortened,
+                        locale: L10n.locale
+                    )
                 )
             )
             .font(.caption)
@@ -229,13 +232,19 @@ struct HistoryView: View {
                 : Set(state.history.map(\.id))
         } label: {
             Label(
-                allItemsSelected ? "取消全选" : "全选",
+                allItemsSelected
+                    ? L10n.string("common.deselect-all", fallback: "Deselect All")
+                    : L10n.string("common.select-all", fallback: "Select All"),
                 systemImage: allItemsSelected
                     ? "checkmark.circle.badge.xmark"
                     : "checkmark.circle"
             )
         }
-        .help(allItemsSelected ? "取消全选" : "全选")
+        .help(
+            allItemsSelected
+                ? L10n.string("common.deselect-all", fallback: "Deselect All")
+                : L10n.string("common.select-all", fallback: "Select All")
+        )
     }
 
     private var deleteSelectedButton: some View {
@@ -244,17 +253,21 @@ struct HistoryView: View {
         } label: {
             Label(
                 selectedIDs.isEmpty
-                    ? "删除所选"
-                    : "删除所选（\(selectedIDs.count)）",
+                    ? L10n.string("common.delete-selected", fallback: "Delete Selected")
+                    : L10n.string("common.delete-selected-count", fallback: "Delete Selected (%d)", selectedIDs.count),
                 systemImage: "trash"
             )
         }
         .disabled(selectedIDs.isEmpty)
-        .help(selectedIDs.isEmpty ? "请先选择历史" : "删除所选历史")
+        .help(
+            selectedIDs.isEmpty
+                ? L10n.string("history.select-first", fallback: "Select history items first")
+                : L10n.string("history.delete-selected", fallback: "Delete Selected History")
+        )
     }
 
     private var finishSelectionButton: some View {
-        Button("完成") {
+        Button(L10n.string("common.done", fallback: "Done")) {
             isSelecting = false
             selectedIDs.removeAll()
         }
@@ -264,18 +277,18 @@ struct HistoryView: View {
         Button {
             isSelecting = true
         } label: {
-            Label("选择", systemImage: "checklist")
+            Label(L10n.string("common.select", fallback: "Select"), systemImage: "checklist")
         }
-        .help("选择历史")
+        .help(L10n.string("history.select", fallback: "Select History"))
     }
 
     private var clearAllButton: some View {
         Button(role: .destructive) {
             pendingDeletion = .all
         } label: {
-            Label("清空历史", systemImage: "trash")
+            Label(L10n.string("history.clear", fallback: "Clear History"), systemImage: "trash")
         }
-        .help("清空历史")
+        .help(L10n.string("history.clear", fallback: "Clear History"))
     }
 
     private var selectionManagementMenu: some View {
@@ -283,10 +296,10 @@ struct HistoryView: View {
             selectAllButton
             deleteSelectedButton
         } label: {
-            Label("选择操作", systemImage: "ellipsis.circle")
+            Label(L10n.string("common.selection-actions", fallback: "Selection Actions"), systemImage: "ellipsis.circle")
                 .labelStyle(.iconOnly)
         }
-        .help("选择操作")
+        .help(L10n.string("common.selection-actions", fallback: "Selection Actions"))
     }
 
     private var normalManagementMenu: some View {
@@ -294,10 +307,10 @@ struct HistoryView: View {
             beginSelectionButton
             clearAllButton
         } label: {
-            Label("管理历史", systemImage: "ellipsis.circle")
+            Label(L10n.string("history.manage", fallback: "Manage History"), systemImage: "ellipsis.circle")
                 .labelStyle(.iconOnly)
         }
-        .help("管理历史")
+        .help(L10n.string("history.manage", fallback: "Manage History"))
     }
 
     private var allItemsSelected: Bool {
@@ -313,17 +326,17 @@ struct HistoryView: View {
 
     private var deletionTitle: String {
         if case .some(.all) = pendingDeletion {
-            return "清空全部历史？"
+            return L10n.string("history.clear.title", fallback: "Clear All History?")
         }
-        return "删除历史记录？"
+        return L10n.string("history.delete.title", fallback: "Delete History?")
     }
 
     private var deletionMessage: String {
         switch pendingDeletion {
         case .some(.all):
-            return "将删除当前点播配置下的全部播放历史，此操作无法撤销。"
+            return L10n.string("history.clear.message", fallback: "All watch history for the current video configuration will be removed. This cannot be undone.")
         case let .some(.items(ids)):
-            return "将删除所选的 \(ids.count) 条播放历史，此操作无法撤销。"
+            return L10n.string("history.delete.message", fallback: "%d selected history items will be removed. This cannot be undone.", ids.count)
         case nil:
             return ""
         }
@@ -424,7 +437,7 @@ private struct HistoryProgressBar: View {
                     )
             }
         }
-        .accessibilityLabel("播放进度")
+        .accessibilityLabel(L10n.string("history.playback-progress", fallback: "Playback Progress"))
         .accessibilityValue("\(Int(min(max(progress, 0), 1) * 100))%")
     }
 }

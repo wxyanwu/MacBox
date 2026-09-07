@@ -107,19 +107,19 @@ enum PortableBackupError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .fileTooLarge:
-            return "备份文件超过允许的大小"
+            return L10n.string("backup.error.too-large", fallback: "The backup file exceeds the allowed size.")
         case .invalidDocument:
-            return "这不是有效的 OKVideoMac 备份文件"
+            return L10n.string("backup.error.invalid-document", fallback: "This is not a valid OKVideoMac backup file.")
         case .unsupportedFormat:
-            return "备份文件格式不受支持"
+            return L10n.string("backup.error.unsupported-format", fallback: "The backup file format is unsupported.")
         case .unsupportedSchema(let version):
-            return "备份格式版本 \(version) 高于当前应用支持的版本"
+            return L10n.string("backup.error.unsupported-schema", fallback: "Backup schema version %lld is newer than this app supports.", version)
         case .checksumMismatch:
-            return "备份文件校验失败，文件可能已损坏或被修改"
+            return L10n.string("backup.error.checksum", fallback: "Backup verification failed. The file may be damaged or modified.")
         case .invalidConfiguration:
-            return "备份中的点播配置不完整或校验失败"
+            return L10n.string("backup.error.invalid-configuration", fallback: "The VOD configuration in the backup is incomplete or failed validation.")
         case .invalidHistory:
-            return "备份中的历史记录不完整或包含不安全字段"
+            return L10n.string("backup.error.invalid-history", fallback: "The history in the backup is incomplete or contains unsafe fields.")
         }
     }
 }

@@ -21,27 +21,27 @@ struct HomeView: View {
     @ViewBuilder
     private var homeContent: some View {
         if !state.hasCompletedStartup && state.activeConfiguration == nil {
-            AppActivityLabel("正在恢复上次内容…")
+            AppActivityLabel(L10n.string("home.restoring-last-content", fallback: "Restoring your last content…"))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if state.activeConfiguration == nil {
             VStack(spacing: 18) {
                 EmptyStateView(
                     systemImage: "doc.badge.plus",
-                    title: "尚未导入配置",
-                    message: "前往“设置 → 点播配置”，通过 URL、粘贴内容或本地文件导入你有权使用的点播配置。"
+                    title: L10n.string("home.no-configuration.title", fallback: "No Video Provider Configuration"),
+                    message: L10n.string("home.no-configuration.message", fallback: "Open Settings → Video Providers to import a configuration you are authorized to use from a URL, pasted content, or a local file.")
                 )
                 Button {
                     state.selectedSettingsPane = .configurations
                     state.selectSection(.settings)
                 } label: {
-                    Label("打开点播配置设置", systemImage: "gearshape")
+                    Label(L10n.string("home.open-provider-settings", fallback: "Open Video Provider Settings"), systemImage: "gearshape")
                 }
             }
         } else if state.visibleSites.isEmpty {
                 EmptyStateView(
                     systemImage: "rectangle.slash",
-                    title: "没有可见站点",
-                    message: "当前配置没有可用站点，或所有站点都被隐藏。"
+                    title: L10n.string("home.no-visible-providers.title", fallback: "No Visible Providers"),
+                    message: L10n.string("home.no-visible-providers.message", fallback: "The current configuration has no available providers, or all providers are hidden.")
                 )
         } else {
             content
@@ -54,8 +54,8 @@ struct HomeView: View {
            state.siteCapability(for: key) == .unsupportedSpider {
             EmptyStateView(
                 systemImage: "shippingbox",
-                title: "该站点暂不可用",
-                message: "当前 Mac 版本暂时无法运行这个站点，请从工具栏选择其他站点。"
+                title: L10n.string("home.provider-unavailable.title", fallback: "Provider Unavailable"),
+                message: L10n.string("home.provider-unavailable.message", fallback: "This provider cannot run on the current Mac version. Choose another provider from the toolbar.")
             )
         } else if let home = state.siteHome {
             if home.recommendations.isEmpty
@@ -63,8 +63,8 @@ struct HomeView: View {
                 && home.actionItems.isEmpty {
                 EmptyStateView(
                     systemImage: "tray",
-                    title: "站点没有返回可播放内容",
-                    message: "可以刷新重试，或检查配置和站点状态。"
+                    title: L10n.string("home.no-playable-content.title", fallback: "No Playable Content"),
+                    message: L10n.string("home.no-playable-content.message", fallback: "Refresh to try again, or check the configuration and provider status.")
                 )
             } else if state.homePresentationNeedsRecovery {
                 homeRecoveryContent
@@ -97,7 +97,7 @@ struct HomeView: View {
                                 }
                             }
                             if !home.actionItems.isEmpty {
-                                Text("功能")
+                                Text(L10n.string("home.actions", fallback: "Actions"))
                                     .font(.title2)
                                     .padding(
                                         .leading,
@@ -140,7 +140,7 @@ struct HomeView: View {
                                     HStack(spacing: 8) {
                                         ProgressView()
                                             .controlSize(.small)
-                                        Text("正在更新…")
+                                        Text(L10n.string("common.updating", fallback: "Updating…"))
                                             .font(.caption)
                                             .foregroundColor(.secondary)
                                     }
@@ -175,13 +175,13 @@ struct HomeView: View {
                                     }
                                 } else if state.isLoading
                                     || state.isRecoveringHome {
-                                    AppActivityLabel("正在加载分类…")
+                                    AppActivityLabel(L10n.string("home.loading-categories", fallback: "Loading categories…"))
                                 } else if let message = state.homeLoadErrorMessage {
                                     categoryRecoveryError(
                                         message: message
                                     )
                                 } else {
-                                    AppActivityLabel("正在加载分类…")
+                                    AppActivityLabel(L10n.string("home.loading-categories", fallback: "Loading categories…"))
                                         .task {
                                             await state.resumeHomeIfNeeded()
                                         }
@@ -215,19 +215,19 @@ struct HomeView: View {
                 }
             }
         } else if state.isHomeLoading || !state.hasCompletedStartup {
-            AppActivityLabel("正在加载站点…")
+            AppActivityLabel(L10n.string("home.loading-provider", fallback: "Loading provider…"))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let message = state.homeLoadErrorMessage {
             EmptyStateView(
                 systemImage: "wifi.exclamationmark",
-                title: "站点暂时不可用",
-                message: "已保留本地配置，可点击右上角刷新重试。\n\(message)"
+                title: L10n.string("home.provider-temporarily-unavailable.title", fallback: "Provider Temporarily Unavailable"),
+                message: L10n.string("home.provider-temporarily-unavailable.message", fallback: "Your local configuration was preserved. Use Refresh in the upper-right corner to try again.\n%@", message)
             )
         } else {
             EmptyStateView(
                 systemImage: "arrow.clockwise",
-                title: "尚未加载",
-                message: "选择站点或点击刷新。"
+                title: L10n.string("home.not-loaded.title", fallback: "Not Loaded"),
+                message: L10n.string("home.not-loaded.message", fallback: "Choose a provider or select Refresh.")
             )
         }
     }
@@ -235,16 +235,16 @@ struct HomeView: View {
     @ViewBuilder
     private var homeRecoveryContent: some View {
         if state.isRecoveringHome || state.isHomeLoading || state.isLoading {
-            AppActivityLabel("正在恢复首页…")
+            AppActivityLabel(L10n.string("home.restoring", fallback: "Restoring Home…"))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let message = state.homeLoadErrorMessage {
             VStack(spacing: 14) {
                 EmptyStateView(
                     systemImage: "arrow.clockwise.circle",
-                    title: "首页状态需要恢复",
+                    title: L10n.string("home.recovery.title", fallback: "Home Needs to Be Restored"),
                     message: message
                 )
-                Button("重试") {
+                Button(L10n.string("common.retry", fallback: "Try Again")) {
                     Task {
                         await state.resumeHomeIfNeeded(reportErrors: true)
                     }
@@ -252,7 +252,7 @@ struct HomeView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            AppActivityLabel("正在恢复首页…")
+            AppActivityLabel(L10n.string("home.restoring", fallback: "Restoring Home…"))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .task {
                     await state.resumeHomeIfNeeded()
@@ -262,11 +262,11 @@ struct HomeView: View {
 
     private func categoryRecoveryError(message: String) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("分类加载失败", systemImage: "exclamationmark.triangle")
+            Label(L10n.string("home.categories.failed", fallback: "Categories Failed to Load"), systemImage: "exclamationmark.triangle")
                 .font(.headline)
             Text(message)
                 .foregroundStyle(.secondary)
-            Button("重试") {
+            Button(L10n.string("common.retry", fallback: "Try Again")) {
                 Task {
                     await state.resumeHomeIfNeeded(reportErrors: true)
                 }
@@ -376,17 +376,17 @@ struct HomeView: View {
                         )
                     } label: {
                         HStack(spacing: 5) {
-                            Text("\(token.filterName)：\(token.optionName)")
+                            Text(L10n.string("home.filter.token", fallback: "%@: %@", token.filterName, token.optionName))
                             Image(systemName: "xmark")
                                 .font(.system(size: 9, weight: .semibold))
                         }
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .help("移除筛选：\(token.filterName)，\(token.optionName)")
+                    .help(L10n.string("home.filter.remove", fallback: "Remove filter: %@, %@", token.filterName, token.optionName))
                 }
 
-                Button("清除筛选") {
+                Button(L10n.string("home.filter.clear", fallback: "Clear Filters")) {
                     let selection =
                         HomeFilterPresentationPolicy.defaultSelection(
                             filters: category.filters
@@ -542,7 +542,7 @@ private struct HomeCategoryNavigation: View {
         let recommendations = showsRecommendations
             ? [Item(
                 id: HomeCategoryNavigationLayoutPolicy.recommendationID,
-                title: "推荐",
+                title: L10n.string("home.recommended", fallback: "Recommended"),
                 categoryID: nil
             )]
             : []
@@ -619,7 +619,7 @@ private struct HomeCategoryNavigation: View {
                         .menuIndicator(.hidden)
                         .menuStyle(.borderlessButton)
                         .fixedSize()
-                        .help("显示另外 \(partition.hiddenIDs.count) 个分类")
+                        .help(L10n.string("home.categories.more", fallback: "Show %d more categories", partition.hiddenIDs.count))
                     }
                 }
 
@@ -881,7 +881,7 @@ private struct AdaptiveFilterPanel: View {
                     selection = defaults
                     onSelectionChanged(defaults)
                 } label: {
-                    Label("重置筛选", systemImage: "arrow.counterclockwise")
+                    Label(L10n.string("home.filter.reset", fallback: "Reset Filters"), systemImage: "arrow.counterclockwise")
                 }
                 .buttonStyle(.borderless)
                 .font(.caption)
@@ -978,14 +978,14 @@ private struct AdaptiveFilterRow: View, Equatable {
                         isOverflowPresented = true
                     } label: {
                         HStack(spacing: 4) {
-                            Text("更多 \(hiddenOptions.count)")
+                            Text(L10n.string("home.filter.more-count", fallback: "%d More", hiddenOptions.count))
                             Image(systemName: "chevron.down")
                                 .font(.system(size: 9, weight: .semibold))
                         }
                     }
                     .buttonStyle(FilterChipButtonStyle(isSelected: false))
-                    .help("显示“\(filter.name)”的其余 \(hiddenOptions.count) 个选项")
-                    .accessibilityLabel("\(filter.name)更多选项，共 \(hiddenOptions.count) 项")
+                    .help(L10n.string("home.filter.more-options.help", fallback: "Show %d more options for “%@”", hiddenOptions.count, filter.name))
+                    .accessibilityLabel(L10n.string("home.filter.more-options.accessibility", fallback: "%@, %d more options", filter.name, hiddenOptions.count))
                     .popover(
                         isPresented: $isOverflowPresented,
                         arrowEdge: .bottom
@@ -1026,8 +1026,8 @@ private struct AdaptiveFilterRow: View, Equatable {
         .buttonStyle(
             FilterChipButtonStyle(isSelected: option.value == selectedValue)
         )
-        .help("\(filter.name)：\(option.name)")
-        .accessibilityLabel("\(filter.name)，\(option.name)")
+        .help(L10n.string("home.filter.option", fallback: "%@: %@", filter.name, option.name))
+        .accessibilityLabel(L10n.string("home.filter.option-accessibility", fallback: "%@, %@", filter.name, option.name))
         .accessibilityAddTraits(
             option.value == selectedValue ? .isSelected : []
         )
@@ -1056,12 +1056,12 @@ private struct FilterOverflowPopover: View {
             Text(filterName)
                 .font(.headline)
             if options.count > 20 {
-                TextField("搜索\(filterName)选项", text: $searchText)
+                TextField(L10n.string("home.filter.search-options", fallback: "Search %@ options", filterName), text: $searchText)
                     .textFieldStyle(.roundedBorder)
             }
             ScrollView {
                 if filteredOptions.isEmpty {
-                    Text("没有匹配选项")
+                    Text(L10n.string("home.filter.no-options", fallback: "No Matching Options"))
                         .foregroundColor(.secondary)
                         .frame(maxWidth: .infinity, minHeight: 80)
                 } else {
@@ -1084,7 +1084,7 @@ private struct FilterOverflowPopover: View {
                                     isSelected: option.value == selectedValue
                                 )
                             )
-                            .accessibilityLabel("\(filterName)，\(option.name)")
+                            .accessibilityLabel(L10n.string("home.filter.option-accessibility", fallback: "%@, %@", filterName, option.name))
                         }
                     }
                 }
@@ -1166,7 +1166,7 @@ struct HomeSiteToolbarItem: View {
         if !state.visibleSites.isEmpty {
             switch layout {
             case .expanded, .compact:
-                Picker("站点", selection: selection) {
+                Picker(L10n.string("common.provider", fallback: "Provider"), selection: selection) {
                     ForEach(state.visibleSites) { site in
                         Text(displayName(for: site))
                             .lineLimit(1)
@@ -1178,7 +1178,7 @@ struct HomeSiteToolbarItem: View {
                 .frame(width: layout.sitePickerWidth)
                 .controlSize(.regular)
                 .help(siteHelp)
-                .accessibilityLabel("选择内容站点")
+                .accessibilityLabel(L10n.string("home.provider.choose", fallback: "Choose Content Provider"))
 
             case .minimal:
                 Menu {
@@ -1198,7 +1198,7 @@ struct HomeSiteToolbarItem: View {
                 }
                 .primaryToolbarMenuControl()
                 .help(siteHelp)
-                .accessibilityLabel("选择内容站点")
+                .accessibilityLabel(L10n.string("home.provider.choose", fallback: "Choose Content Provider"))
             }
         }
     }
@@ -1211,8 +1211,9 @@ struct HomeSiteToolbarItem: View {
     }
 
     private var siteHelp: String {
-        let currentName = state.currentSite.map(displayName(for:)) ?? "未选择"
-        return "当前站点：\(currentName)，共 \(state.visibleSites.count) 个"
+        let currentName = state.currentSite.map(displayName(for:))
+            ?? L10n.string("common.not-selected", fallback: "Not Selected")
+        return L10n.string("home.provider.current", fallback: "Current provider: %@; %d providers available", currentName, state.visibleSites.count)
     }
 
     private func displayName(for site: SiteConfiguration) -> String {
@@ -1289,11 +1290,11 @@ struct HomeFilterToolbarItem: View {
 
     private var filterHelp: String {
         guard category?.filters.isEmpty == false else {
-            return "当前分类没有筛选项"
+            return L10n.string("home.filter.none", fallback: "This category has no filters")
         }
         return activeCount == 0
-            ? "筛选当前分类"
-            : "筛选当前分类，已启用 \(activeCount) 项"
+            ? L10n.string("home.filter.current", fallback: "Filter Current Category")
+            : L10n.string("home.filter.current-active", fallback: "Filter Current Category; %d active", activeCount)
     }
 
     private func scheduleFilterLoad(
@@ -1332,11 +1333,11 @@ private struct HomeFilterPopover: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("筛选")
+                Text(L10n.string("home.filter.title", fallback: "Filters"))
                     .font(.headline)
                 Spacer()
                 if activeCount > 0 {
-                    Button("重置") {
+                    Button(L10n.string("common.reset", fallback: "Reset")) {
                         onSelectionChanged(
                             HomeFilterPresentationPolicy.defaultSelection(
                                 filters: filters
@@ -1405,7 +1406,7 @@ struct HomeConfigurationToolbarItem: View {
         if !state.configurations.isEmpty {
             switch layout {
             case .expanded, .compact:
-                Picker("配置", selection: selection) {
+                Picker(L10n.string("common.configuration", fallback: "Configuration"), selection: selection) {
                     ForEach(state.configurations) { record in
                         Text(record.name)
                             .lineLimit(1)
@@ -1483,13 +1484,13 @@ struct HomeConfigurationToolbarItem: View {
     private var configurationStatusHelp: String {
         switch state.configurationSwitchFeedback {
         case .switching(_, let name):
-            return "正在切换到 \(name)"
+            return L10n.string("home.configuration.switching", fallback: "Switching to %@", name)
         case .success(_, let name):
-            return "已切换到 \(name)"
+            return L10n.string("home.configuration.switched", fallback: "Switched to %@", name)
         case .failure(_, let name, let message):
-            return "切换到 \(name) 失败：\(message)"
+            return L10n.string("home.configuration.failed", fallback: "Could not switch to %@: %@", name, message)
         case .idle:
-            return "切换点播配置"
+            return L10n.string("home.configuration.switch", fallback: "Switch Video Provider Configuration")
         }
     }
 }
@@ -1506,13 +1507,21 @@ struct HomeRefreshToolbarItem: View {
                 ProgressView()
                     .controlSize(.small)
             } else {
-                Label("刷新", systemImage: "arrow.clockwise")
+                Label(L10n.string("common.refresh", fallback: "Refresh"), systemImage: "arrow.clockwise")
             }
         }
         .primaryToolbarIconControl()
         .disabled(state.currentSite == nil || state.isHomeLoading)
-        .help(layout == .minimal ? "刷新当前站点（⌘R，可能收入更多菜单）" : "刷新当前站点（⌘R）")
-        .accessibilityLabel(state.isHomeLoading ? "正在刷新当前站点" : "刷新当前站点")
+        .help(
+            layout == .minimal
+                ? L10n.string("home.refresh.compact.help", fallback: "Refresh the current provider (⌘R; this action may move to More)")
+                : L10n.string("home.refresh.help", fallback: "Refresh the current provider (⌘R)")
+        )
+        .accessibilityLabel(
+            state.isHomeLoading
+                ? L10n.string("home.refreshing", fallback: "Refreshing Current Provider")
+                : L10n.string("home.refresh", fallback: "Refresh Current Provider")
+        )
     }
 }
 
@@ -1528,20 +1537,20 @@ struct SourceSwitchFeedbackView: View {
             case .switching(_, let name):
                 HStack(spacing: 5) {
                     AppActivityIndicator(size: .small)
-                    Text("正在切换到 \(name)…")
+                    Text(L10n.string("home.configuration.switching-ellipsis", fallback: "Switching to %@…", name))
                 }
-                .accessibilityLabel("正在切换到 \(name)")
+                .accessibilityLabel(L10n.string("home.configuration.switching", fallback: "Switching to %@", name))
             case .success(_, let name):
                 if compact {
-                    Label("已切换", systemImage: "checkmark.circle.fill")
+                    Label(L10n.string("home.configuration.switched-short", fallback: "Switched"), systemImage: "checkmark.circle.fill")
                         .foregroundColor(.green)
                         .fixedSize(horizontal: true, vertical: false)
                         .layoutPriority(2)
-                        .help("已切换到 \(name)")
-                        .accessibilityLabel(Text("已切换到 \(name)"))
+                        .help(L10n.string("home.configuration.switched", fallback: "Switched to %@", name))
+                        .accessibilityLabel(Text(L10n.string("home.configuration.switched", fallback: "Switched to %@", name)))
                 } else {
                     Label(
-                        "已切换到 \(name)",
+                        L10n.string("home.configuration.switched", fallback: "Switched to %@", name),
                         systemImage: "checkmark.circle.fill"
                     )
                     .foregroundColor(.green)
@@ -1549,20 +1558,20 @@ struct SourceSwitchFeedbackView: View {
             case .failure(_, let name, let message):
                 if compact {
                     Label(
-                        "切换失败",
+                        L10n.string("home.configuration.failed-short", fallback: "Switch Failed"),
                         systemImage: "exclamationmark.triangle.fill"
                     )
                     .foregroundColor(.red)
                     .fixedSize(horizontal: true, vertical: false)
                     .layoutPriority(2)
-                    .help("切换到 \(name) 失败：\(message)")
+                    .help(L10n.string("home.configuration.failed", fallback: "Could not switch to %@: %@", name, message))
                     .accessibilityLabel(
-                        Text("切换到 \(name) 失败：\(message)")
+                        Text(L10n.string("home.configuration.failed", fallback: "Could not switch to %@: %@", name, message))
                     )
                 } else {
                     VStack(alignment: .leading, spacing: 2) {
                         Label(
-                            "切换 \(name) 失败",
+                            L10n.string("home.configuration.failed-accessibility", fallback: "Failed to switch to %@", name),
                             systemImage: "exclamationmark.triangle.fill"
                         )
                         .foregroundColor(.red)
@@ -1602,7 +1611,7 @@ private struct HomeActionCard: View {
                             .foregroundColor(.secondary)
                             .lineLimit(2)
                     } else {
-                        Text("功能操作")
+                        Text(L10n.string("home.action-menu", fallback: "Provider Actions"))
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -1621,7 +1630,7 @@ private struct HomeActionCard: View {
             )
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("功能：\(item.title)")
+        .accessibilityLabel(L10n.string("home.action-accessibility", fallback: "Action: %@", item.title))
     }
 }
 
@@ -1660,7 +1669,11 @@ private struct HomeCompactItemCard: View {
                             .foregroundColor(.secondary)
                             .lineLimit(2)
                     } else {
-                        Text(summary.isFolder ? "目录" : "内容入口")
+                        Text(
+                            summary.isFolder
+                                ? L10n.string("common.folder", fallback: "Folder")
+                                : L10n.string("home.content-entry", fallback: "Content")
+                        )
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -1689,7 +1702,7 @@ enum HomeSitePresentation {
         capability: SiteCapability?
     ) -> String {
         capability == .unsupportedSpider
-            ? "\(siteName)（暂不可用）"
+            ? L10n.string("home.provider.unavailable-name", fallback: "%@ (Unavailable)", siteName)
             : siteName
     }
 }

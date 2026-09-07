@@ -367,7 +367,7 @@ struct RootView: View {
             Alert(
                 title: Text(error.title),
                 message: Text(error.message),
-                dismissButton: .default(Text("好"))
+                dismissButton: .default(Text(L10n.string(.commonOK)))
             )
         }
         .sheet(isPresented: $state.isAndroidRuntimeInstallSheetPresented) {
@@ -486,7 +486,7 @@ private struct QuickSwitcherView: View {
                 HStack(spacing: 10) {
                     Image(systemName: "command")
                         .foregroundStyle(.secondary)
-                    TextField("切换配置、站点或直播源", text: $query)
+                    TextField(L10n.string("switcher.search.placeholder", fallback: "Switch configurations, providers, or Live TV sources"), text: $query)
                         .textFieldStyle(.plain)
                         .font(.system(size: 17))
                         .focused($searchIsFocused)
@@ -499,7 +499,7 @@ private struct QuickSwitcherView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
                     .keyboardShortcut(.cancelAction)
-                    .help("关闭")
+                    .help(L10n.string("common.close", fallback: "Close"))
                 }
                 .padding(.horizontal, 16)
                 .frame(height: 52)
@@ -509,12 +509,12 @@ private struct QuickSwitcherView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {
                         if !matchingConfigurations.isEmpty {
-                            switcherHeader("点播配置")
+                            switcherHeader(L10n.string("switcher.configurations", fallback: "Video Provider Configurations"))
                             ForEach(matchingConfigurations) { configuration in
                                 switcherRow(
                                     title: configuration.name,
                                     subtitle: configuration.isActive
-                                        ? "当前配置" : nil,
+                                        ? L10n.string("switcher.current-configuration", fallback: "Current Configuration") : nil,
                                     systemImage: "square.stack.3d.up"
                                 ) {
                                     state.dismissQuickSwitcher()
@@ -528,12 +528,12 @@ private struct QuickSwitcherView: View {
                         }
 
                         if !matchingSites.isEmpty {
-                            switcherHeader("点播站点")
+                            switcherHeader(L10n.string("switcher.providers", fallback: "Video Providers"))
                             ForEach(matchingSites, id: \.key) { site in
                                 switcherRow(
                                     title: site.name,
                                     subtitle: site.key == state.selectedSiteKey
-                                        ? "当前站点" : nil,
+                                        ? L10n.string("switcher.current-provider", fallback: "Current Provider") : nil,
                                     systemImage: "play.rectangle"
                                 ) {
                                     state.dismissQuickSwitcher()
@@ -544,11 +544,11 @@ private struct QuickSwitcherView: View {
                         }
 
                         if !matchingLiveSources.isEmpty {
-                            switcherHeader("直播源")
+                            switcherHeader(L10n.string("switcher.live-sources", fallback: "Live TV Sources"))
                             ForEach(matchingLiveSources) { source in
                                 switcherRow(
                                     title: source.name,
-                                    subtitle: "进入直播",
+                                    subtitle: L10n.string("switcher.open-live", fallback: "Open Live TV"),
                                     systemImage: "dot.radiowaves.left.and.right"
                                 ) {
                                     state.dismissQuickSwitcher()
@@ -562,8 +562,8 @@ private struct QuickSwitcherView: View {
                            matchingLiveSources.isEmpty {
                             EmptyStateView(
                                 systemImage: "magnifyingglass",
-                                title: "没有匹配项目",
-                                message: "请尝试输入其他名称。"
+                                title: L10n.string("switcher.empty.title", fallback: "No Matches"),
+                                message: L10n.string("switcher.empty.message", fallback: "Try another name.")
                             )
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 28)
@@ -575,7 +575,7 @@ private struct QuickSwitcherView: View {
 
                 Divider()
                 HStack {
-                    Text("输入名称筛选  ·  Return 打开首项  ·  Esc 关闭")
+                    Text(L10n.string("switcher.footer", fallback: "Type to filter  ·  Return opens the first item  ·  Esc closes"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -680,33 +680,33 @@ private struct ShortcutHelpView: View {
     @EnvironmentObject private var state: AppState
 
     private let sections: [(String, [(String, String)])] = [
-        ("导航", [
-            ("⌘1…⌘5", "点播、直播、收藏、历史、设置"),
-            ("⌘F", "搜索"),
-            ("⌘K", "快速切换配置、站点或直播源"),
-            ("⌘L", "打开点播配置"),
-            ("⌘R", "刷新当前页面"),
-            ("⌘[", "返回"),
-            ("⌘.", "停止当前搜索"),
-            ("Esc", "停止搜索；再按返回进入前的页面")
+        (L10n.string("shortcuts.navigation", fallback: "Navigation"), [
+            ("⌘1…⌘5", L10n.string("shortcuts.navigation.sections", fallback: "Browse, Live TV, Favorites, History, Settings")),
+            ("⌘F", L10n.string("shortcuts.search", fallback: "Search")),
+            ("⌘K", L10n.string("shortcuts.quick-switcher", fallback: "Quickly switch configurations, providers, or Live TV sources")),
+            ("⌘L", L10n.string("shortcuts.open-configurations", fallback: "Open Video Providers")),
+            ("⌘R", L10n.string("shortcuts.refresh", fallback: "Refresh the current page")),
+            ("⌘[", L10n.string("shortcuts.back", fallback: "Back")),
+            ("⌘.", L10n.string("shortcuts.stop-search", fallback: "Stop the current search")),
+            ("Esc", L10n.string("shortcuts.escape-search", fallback: "Stop search; press again to return to the previous page"))
         ]),
-        ("播放器", [
-            ("Space", "播放或暂停"),
-            ("← / →", "快退或快进 10 秒"),
-            ("⇧← / ⇧→", "快退或快进 30 秒"),
-            ("⌥← / ⌥→", "上一集或下一集"),
-            ("↑ / ↓", "上一个或下一个直播频道"),
-            ("M", "静音"),
-            ("− / =", "音量减小或增大"),
-            ("C / A", "字幕开关 / 下一音轨"),
-            ("F", "进入或退出全屏"),
-            ("Esc", "关闭播放面板或退出全屏"),
-            ("⇧, / ⇧.", "降低或提高播放速度"),
-            ("⌘W", "关闭播放器窗口")
+        (L10n.string("shortcuts.player", fallback: "Player"), [
+            ("Space", L10n.string("shortcuts.player.play-pause", fallback: "Play or pause")),
+            ("← / →", L10n.string("shortcuts.player.seek-10", fallback: "Back or forward 10 seconds")),
+            ("⇧← / ⇧→", L10n.string("shortcuts.player.seek-30", fallback: "Back or forward 30 seconds")),
+            ("⌥← / ⌥→", L10n.string("shortcuts.player.episode", fallback: "Previous or next episode")),
+            ("↑ / ↓", L10n.string("shortcuts.player.channel", fallback: "Previous or next Live TV channel")),
+            ("M", L10n.string("shortcuts.player.mute", fallback: "Mute")),
+            ("− / =", L10n.string("shortcuts.player.volume", fallback: "Decrease or increase volume")),
+            ("C / A", L10n.string("shortcuts.player.tracks", fallback: "Toggle subtitles / next audio track")),
+            ("F", L10n.string("shortcuts.player.full-screen", fallback: "Enter or exit full screen")),
+            ("Esc", L10n.string("shortcuts.player.escape", fallback: "Close the player panel or exit full screen")),
+            ("⇧, / ⇧.", L10n.string("shortcuts.player.speed", fallback: "Decrease or increase playback speed")),
+            ("⌘W", L10n.string("shortcuts.player.close-window", fallback: "Close the player window"))
         ]),
-        ("系统", [
-            ("⌘,", "打开设置"),
-            ("⌘/", "显示本快捷键列表")
+        (L10n.string("shortcuts.system", fallback: "System"), [
+            ("⌘,", L10n.string("shortcuts.system.settings", fallback: "Open Settings")),
+            ("⌘/", L10n.string("shortcuts.system.show", fallback: "Show this keyboard shortcut list"))
         ])
     ]
 
@@ -718,7 +718,7 @@ private struct ShortcutHelpView: View {
 
             VStack(spacing: 0) {
                 HStack {
-                    Label("键盘快捷键", systemImage: "keyboard")
+                    Label(L10n.string("shortcuts.title", fallback: "Keyboard Shortcuts"), systemImage: "keyboard")
                         .font(.title3.weight(.semibold))
                     Spacer()
                     Button {
@@ -803,7 +803,7 @@ private struct ConfigurationCategoryView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(presentation.title)
                     .font(.headline)
-                Text("配置中心")
+                Text(L10n.string("configuration.center", fallback: "Configuration Center"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -811,7 +811,7 @@ private struct ConfigurationCategoryView: View {
             Button {
                 refresh()
             } label: {
-                Label("刷新", systemImage: "arrow.clockwise")
+                Label(L10n.string("common.refresh", fallback: "Refresh"), systemImage: "arrow.clockwise")
             }
             .disabled(refreshIsDisabled)
         }
@@ -832,7 +832,7 @@ private struct ConfigurationCategoryView: View {
     private var loadingContent: some View {
         VStack(spacing: 12) {
             ProgressView()
-            Text("正在读取当前配置操作…")
+            Text(L10n.string("configuration.actions.loading", fallback: "Loading configuration actions…"))
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -845,7 +845,7 @@ private struct ConfigurationCategoryView: View {
                 .foregroundStyle(.orange)
             Text(message)
                 .multilineTextAlignment(.center)
-            Button("重试") {
+            Button(L10n.string("common.retry", fallback: "Try Again")) {
                 refresh()
             }
             .buttonStyle(.borderedProminent)
@@ -878,11 +878,11 @@ private struct ConfigurationCategoryView: View {
 
     private var footer: some View {
         HStack {
-            Text("关闭后会回到原来的内容页和浏览位置。")
+            Text(L10n.string("configuration.actions.close-note", fallback: "Closing returns to the previous content page and browsing position."))
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
-            Button("关闭") {
+            Button(L10n.string("common.close", fallback: "Close")) {
                 state.closeConfigurationCategory()
             }
             .keyboardShortcut(.cancelAction)
@@ -984,7 +984,7 @@ struct NodeConfigurationView: View {
           pageState = .loading
           state.refreshNodeConfigurationWebsite()
         } label: {
-          Label("刷新", systemImage: "arrow.clockwise")
+          Label(L10n.string("common.refresh", fallback: "Refresh"), systemImage: "arrow.clockwise")
         }
         .disabled(isVerifying)
       }
@@ -1006,9 +1006,9 @@ struct NodeConfigurationView: View {
         case .loading:
           VStack(spacing: 12) {
             AppActivityIndicator(size: .regular)
-            Text("正在打开配置页…")
+            Text(L10n.string("node.configuration.opening", fallback: "Opening configuration page…"))
               .font(.callout.weight(.semibold))
-            Text("正在连接当前 CatPaw Runtime")
+            Text(L10n.string("node.configuration.connecting", fallback: "Connecting to the current CatPaw Runtime"))
               .font(.caption)
               .foregroundColor(.secondary)
           }
@@ -1022,14 +1022,14 @@ struct NodeConfigurationView: View {
             Image(systemName: "exclamationmark.triangle.fill")
               .font(.system(size: 28, weight: .semibold))
               .foregroundColor(.orange)
-            Text("配置页不可用")
+            Text(L10n.string("node.configuration.unavailable", fallback: "Configuration Page Unavailable"))
               .font(.headline)
             Text(message)
               .font(.caption)
               .foregroundColor(.secondary)
               .multilineTextAlignment(.center)
               .frame(maxWidth: 420)
-            Button("重新加载") {
+            Button(L10n.string("common.reload", fallback: "Reload")) {
               pageState = .loading
               state.refreshNodeConfigurationWebsite()
             }
@@ -1068,7 +1068,7 @@ struct NodeConfigurationView: View {
           }
         }
         Spacer()
-        Button("关闭") {
+        Button(L10n.string("common.close", fallback: "Close")) {
           state.cancelNodeConfiguration()
         }
         .keyboardShortcut(.cancelAction)
@@ -1077,8 +1077,8 @@ struct NodeConfigurationView: View {
         } label: {
           Label(
             isPlayerAuthorization
-              ? "我已授权，立即验证"
-              : "应用配置并重试",
+              ? L10n.string("node.authorization.verify", fallback: "I Authorized — Verify Now")
+              : L10n.string("node.configuration.apply-retry", fallback: "Apply Configuration and Try Again"),
             systemImage: "arrow.right.circle.fill"
           )
         }
@@ -1103,16 +1103,16 @@ struct NodeConfigurationView: View {
     switch presentation.lifecycleState {
     case .waiting:
       return presentation.allowsAutomaticRetry
-        ? "正在等待授权完成信号"
-        : "请确认授权状态后手动验证"
+        ? L10n.string("node.authorization.waiting", fallback: "Waiting for authorization confirmation")
+        : L10n.string("node.authorization.verify-manually", fallback: "Confirm authorization, then verify manually")
     case .saved:
       return isPlayerAuthorization
-        ? "配置已保存，等待授权验证"
-        : "配置已保存"
+        ? L10n.string("node.configuration.saved-awaiting-authorization", fallback: "Configuration saved; waiting to verify authorization")
+        : L10n.string("node.configuration.saved", fallback: "Configuration Saved")
     case .verifying:
-      return "正在验证授权并恢复原请求"
+      return L10n.string("node.authorization.verifying", fallback: "Verifying authorization and resuming the original request")
     case .needsManualRetry:
-      return "需要手动确认"
+      return L10n.string("node.authorization.manual-confirmation", fallback: "Manual Confirmation Required")
     }
   }
 
@@ -1333,9 +1333,13 @@ private struct NodeConfigurationWebView: NSViewRepresentable {
             let urlError = error as? URLError
             if [.cannotConnectToHost, .networkConnectionLost, .cannotFindHost]
                 .contains(urlError?.code) {
-                return "Node 已重启或配置页地址已经失效，请关闭后重新打开配置入口。"
+                return L10n.string("node.configuration.runtime-restarted", fallback: "Node restarted or the configuration page address expired. Close this page and open the configuration action again.")
             }
-            return "配置页加载失败：\(error.localizedDescription)"
+            return L10n.string(
+                "node.configuration.load-failed",
+                fallback: "Configuration page failed to load: %@",
+                RuntimeUserFacingMessageMapper.message(for: error)
+            )
         }
 
         private static func isCancellation(_ error: Error) -> Bool {
@@ -1550,8 +1554,8 @@ struct CloudAuthorizationView: View {
             HStack {
                 Label(
                     isAuthorization
-                        ? "网盘授权"
-                        : "配置操作",
+                        ? L10n.string("cloud.authorization.title", fallback: "Cloud Authorization")
+                        : L10n.string("cloud.configuration-action.title", fallback: "Configuration Action"),
                     systemImage: isAuthorization
                         ? "externaldrive.badge.person.crop"
                         : "slider.horizontal.3"
@@ -1561,7 +1565,7 @@ struct CloudAuthorizationView: View {
                 Button {
                     Task { await state.refreshCloudAuthorization() }
                 } label: {
-                    Label("刷新", systemImage: "arrow.clockwise")
+                    Label(L10n.string("common.refresh", fallback: "Refresh"), systemImage: "arrow.clockwise")
                 }
                 .disabled(isBusy || isTerminal)
             }
@@ -1571,7 +1575,9 @@ struct CloudAuthorizationView: View {
 
             if prompt.lifecyclePhase == .completed {
                 Label(
-                    isAuthorization ? "授权已完成" : "配置操作已完成",
+                    isAuthorization
+                        ? L10n.string("cloud.authorization.completed", fallback: "Authorization Complete")
+                        : L10n.string("cloud.configuration-action.completed", fallback: "Configuration Action Complete"),
                     systemImage: "checkmark.circle.fill"
                 )
                 .font(.headline)
@@ -1580,7 +1586,9 @@ struct CloudAuthorizationView: View {
                 .padding(.vertical, 18)
             } else if prompt.lifecyclePhase == .failed {
                 Label(
-                    isAuthorization ? "授权尚未完成" : "配置操作尚未完成",
+                    isAuthorization
+                        ? L10n.string("cloud.authorization.incomplete", fallback: "Authorization Incomplete")
+                        : L10n.string("cloud.configuration-action.incomplete", fallback: "Configuration Action Incomplete"),
                     systemImage: "exclamationmark.triangle.fill"
                 )
                 .font(.headline)
@@ -1626,7 +1634,7 @@ struct CloudAuthorizationView: View {
                         }
                     }
                     HStack(spacing: 10) {
-                        Text("这是站点原生 Android 界面，可直接点击或拖动。")
+                        Text(L10n.string("cloud.android-surface.note", fallback: "This is the provider's native Android interface. Click or drag to interact."))
                             .font(.caption)
                             .foregroundColor(.secondary)
                         Spacer()
@@ -1634,7 +1642,9 @@ struct CloudAuthorizationView: View {
                             isTextEntryExpanded.toggle()
                         } label: {
                             Label(
-                                isTextEntryExpanded ? "收起输入" : "输入文字",
+                                isTextEntryExpanded
+                                    ? L10n.string("cloud.text-entry.collapse", fallback: "Hide Text Entry")
+                                    : L10n.string("cloud.text-entry.show", fallback: "Enter Text"),
                                 systemImage: "keyboard"
                             )
                         }
@@ -1646,7 +1656,7 @@ struct CloudAuthorizationView: View {
                                 )
                             }
                         } label: {
-                            Label("返回上一层", systemImage: "arrow.uturn.backward")
+                            Label(L10n.string("common.back-one-level", fallback: "Back One Level"), systemImage: "arrow.uturn.backward")
                         }
                         .disabled(isTerminal)
                     }
@@ -1654,12 +1664,12 @@ struct CloudAuthorizationView: View {
                 if isTextEntryExpanded {
                     HStack(spacing: 8) {
                         TextField(
-                            "点击 Android 输入框后，可在这里发送文字",
+                            L10n.string("cloud.text-entry.placeholder", fallback: "Click an Android text field, then send text from here"),
                             text: $state.cloudAuthorizationInput
                         )
                         .textFieldStyle(.roundedBorder)
                         .disabled(isTerminal)
-                        Button("发送文字") {
+                        Button(L10n.string("cloud.text-entry.send", fallback: "Send Text")) {
                             Task {
                                 await state.typeCloudAuthorizationSurfaceText(
                                     frame: surfaceFrame
@@ -1694,7 +1704,7 @@ struct CloudAuthorizationView: View {
                     Button {
                         Task { await state.retryCloudAuthorizationOperation() }
                     } label: {
-                        Label("重试", systemImage: "arrow.clockwise")
+                        Label(L10n.string("common.retry", fallback: "Try Again"), systemImage: "arrow.clockwise")
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(isBusy || prompt.lifecyclePhase == .completed)
@@ -1706,13 +1716,17 @@ struct CloudAuthorizationView: View {
                             await state.confirmCloudAuthorizationCompletion()
                         }
                     } label: {
-                        Label("完成并刷新", systemImage: "checkmark.circle")
+                        Label(L10n.string("cloud.complete-refresh", fallback: "Finish and Refresh"), systemImage: "checkmark.circle")
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(prompt.lifecyclePhase == .submitting)
                 }
                 Spacer()
-                Button(isPlayerAuthorization ? "取消播放" : "关闭") {
+                Button(
+                    isPlayerAuthorization
+                        ? L10n.string("player.cancel-playback", fallback: "Cancel Playback")
+                        : L10n.string("common.close", fallback: "Close")
+                ) {
                     Task { await state.cancelCloudAuthorization() }
                 }
                 .keyboardShortcut(.cancelAction)
@@ -1834,13 +1848,13 @@ struct CloudAuthorizationView: View {
     private var lifecycleStatus: String {
         switch prompt.lifecyclePhase {
         case .invoking:
-            return "正在提交配置命令"
+            return L10n.string("cloud.lifecycle.submitting-command", fallback: "Submitting configuration command")
         case .awaitingInterface:
-            return "正在等待下一步操作界面"
+            return L10n.string("cloud.lifecycle.waiting-interface", fallback: "Waiting for the next action screen")
         case .submitting:
-            return "正在提交当前操作"
+            return L10n.string("cloud.lifecycle.submitting-action", fallback: "Submitting the current action")
         case .processing:
-            return "正在等待站点确认结果"
+            return L10n.string("cloud.lifecycle.waiting-provider", fallback: "Waiting for provider confirmation")
         case .presenting, .completed, .failed, .cancelled:
             return ""
         }
@@ -2038,11 +2052,11 @@ private struct AndroidActionSurfaceView: View {
                     RoundedRectangle(cornerRadius: 11)
                         .stroke(Color.secondary.opacity(0.28), lineWidth: 1)
                 }
-                .accessibilityLabel("站点 Android 配置界面")
-                .accessibilityHint("点击或拖动以操作；下方按钮可返回上一层")
+                .accessibilityLabel(L10n.string("cloud.android-surface.accessibility", fallback: "Provider Android Configuration Interface"))
+                .accessibilityHint(L10n.string("cloud.android-surface.hint", fallback: "Click or drag to interact; use the button below to go back one level"))
             } else {
                 Label(
-                    "Android 配置画面暂时不可用",
+                    L10n.string("cloud.android-surface.unavailable", fallback: "Android configuration screen temporarily unavailable"),
                     systemImage: "rectangle.slash"
                 )
                 .foregroundColor(.secondary)
@@ -2214,7 +2228,7 @@ private struct NativeSidebarSourceList: NSViewRepresentable {
             AppSidebarNativePolicy.configure(outlineView: outlineView)
             outlineView.dataSource = coordinator
             outlineView.delegate = coordinator
-            outlineView.setAccessibilityLabel("边栏")
+            outlineView.setAccessibilityLabel(L10n.string("sidebar.accessibility", fallback: "Sidebar"))
 
             scrollView.translatesAutoresizingMaskIntoConstraints = false
             scrollView.documentView = outlineView
@@ -2506,7 +2520,13 @@ private struct CollapsedSidebarSearchButton: View {
             Label(searchPresentation.accessibilityLabel, systemImage: "magnifyingglass")
                 .labelStyle(.iconOnly)
         }
-        .help("\(searchPresentation.help)（⌘F）")
+        .help(
+            L10n.string(
+                "sidebar.search.shortcut-help",
+                fallback: "%@ (⌘F)",
+                searchPresentation.help
+            )
+        )
         .accessibilityLabel(searchPresentation.accessibilityLabel)
         .disabled(!searchIsEnabled)
         .popover(isPresented: $isPresented, arrowEdge: .top) {
@@ -2874,7 +2894,7 @@ private struct HomeBrowserToolbarContent: ToolbarContent {
     let isInteractionBlocked: Bool
 
     var body: some ToolbarContent {
-        PrimaryPageToolbarLeadingContent(title: "点播")
+        PrimaryPageToolbarLeadingContent(title: L10n.string(.sectionBrowse))
         ToolbarItemGroup(placement: .primaryAction) {
             HomeConfigurationToolbarItem(layout: layout)
                 .frame(height: PrimaryToolbarMetrics.itemHeight)
@@ -2899,7 +2919,7 @@ private struct LiveBrowserToolbarContent: ToolbarContent {
     let isInteractionBlocked: Bool
 
     var body: some ToolbarContent {
-        PrimaryPageToolbarLeadingContent(title: "直播")
+        PrimaryPageToolbarLeadingContent(title: L10n.string(.sectionLiveTV))
         ToolbarItemGroup(placement: .primaryAction) {
             LiveToolbarView(session: session)
                 .frame(height: PrimaryToolbarMetrics.itemHeight)

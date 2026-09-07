@@ -189,7 +189,7 @@ enum MPVTVBoxPlaybackPolicy {
 enum MPVPlaybackErrorPolicy {
     static func userFacingMessage(nativeMessage: String) -> String {
         if nativeMessage == "no audio or video data played" {
-            return "该线路没有返回可播放的音视频数据"
+            return L10n.string("player.error.no-media-data", fallback: "This source returned no playable audio or video data.")
         }
         return nativeMessage
     }
@@ -805,7 +805,7 @@ final class MPVPlayerClient: PlayerClient {
             mode: teardownMode
         )
         guard let created = library.create() else {
-            throw AppError.playback("无法创建 libmpv 客户端")
+            throw AppError.playback(L10n.string("player.runtime.client-create.failed", fallback: "Unable to create the libmpv client."))
         }
         client = created
 
@@ -834,7 +834,7 @@ final class MPVPlayerClient: PlayerClient {
             try setOption("subs-with-matching-audio", value: "yes", client: created)
             try library.checked(
                 library.initialize(created),
-                operation: "初始化 libmpv"
+                operation: L10n.string("player.operation.initialize", fallback: "Initialize libmpv")
             )
             PlayerExperimentLogger.lifecycle(
                 "initialize performance_profile=\(performanceProfile.rawValue)"
@@ -909,7 +909,7 @@ final class MPVPlayerClient: PlayerClient {
             queue.async {
                 guard self.isRunning, let client = self.client else {
                     continuation.resume(
-                        throwing: AppError.playback("libmpv 已关闭")
+                        throwing: AppError.playback(L10n.string("player.runtime.closed", fallback: "libmpv has closed."))
                     )
                     return
                 }
@@ -917,7 +917,7 @@ final class MPVPlayerClient: PlayerClient {
                 if let pending = self.pendingLoad {
                     self.pendingLoad = nil
                     pending.continuation.resume(
-                        throwing: AppError.playback("播放请求已被新的请求替换")
+                        throwing: AppError.playback(L10n.string("player.request.replaced", fallback: "The playback request was replaced by a newer request."))
                     )
                 }
                 let previousRequestID = self.currentRequestID
@@ -1001,7 +1001,7 @@ final class MPVPlayerClient: PlayerClient {
                         return
                     }
                     let error = AppError.playback(
-                        "libmpv 媒体加载超时（\(loadTimeoutSeconds) 秒）"
+                        L10n.string("player.load.timeout", fallback: "libmpv media loading timed out after %lld seconds.", loadTimeoutSeconds)
                     )
                     self.snapshot.status = .failed(error.localizedDescription)
                     self.emitSnapshot()
@@ -1016,7 +1016,7 @@ final class MPVPlayerClient: PlayerClient {
         try await setFlagProperty(
             "pause",
             value: false,
-            operation: "继续播放"
+            operation: L10n.string("player.operation.play", fallback: "Resume playback")
         ) { snapshot in
             snapshot.status = .playing
         }
@@ -1026,7 +1026,7 @@ final class MPVPlayerClient: PlayerClient {
         try await setFlagProperty(
             "pause",
             value: true,
-            operation: "暂停播放"
+            operation: L10n.string("player.operation.pause", fallback: "Pause playback")
         ) { snapshot in
             snapshot.status = .paused
         }
@@ -1087,7 +1087,7 @@ final class MPVPlayerClient: PlayerClient {
                 requested: position,
                 duration: self.snapshot.duration
             ) else {
-                throw AppError.playback("跳转位置无效")
+                throw AppError.playback(L10n.string("player.seek.invalid-position", fallback: "The seek position is invalid."))
             }
             self.snapshot.isSeeking = true
             self.snapshot.seekTarget = target
@@ -1153,7 +1153,7 @@ final class MPVPlayerClient: PlayerClient {
         try await setDoubleProperty(
             "volume",
             value: clampedVolume,
-            operation: "设置音量"
+            operation: L10n.string("player.operation.set-volume", fallback: "Set volume")
         ) { snapshot in
             snapshot.volume = clampedVolume
         }
@@ -1163,7 +1163,7 @@ final class MPVPlayerClient: PlayerClient {
         try await setFlagProperty(
             "mute",
             value: muted,
-            operation: "设置静音"
+            operation: L10n.string("player.operation.set-mute", fallback: "Set mute")
         ) { snapshot in
             snapshot.isMuted = muted
         }
@@ -1171,12 +1171,12 @@ final class MPVPlayerClient: PlayerClient {
 
     func setSpeed(_ speed: Double) async throws {
         guard speed.isFinite, (0.25...4).contains(speed) else {
-            throw AppError.playback("播放速度必须在 0.25x 到 4x 之间")
+            throw AppError.playback(L10n.string("player.speed.invalid", fallback: "Playback speed must be between 0.25x and 4x."))
         }
         try await setDoubleProperty(
             "speed",
             value: speed,
-            operation: "设置倍速"
+            operation: L10n.string("player.operation.set-speed", fallback: "Set playback speed")
         ) { snapshot in
             snapshot.speed = speed
         }
@@ -1192,7 +1192,7 @@ final class MPVPlayerClient: PlayerClient {
         try await setStringProperty(
             property,
             value: id > 0 ? String(id) : "no",
-            operation: "选择媒体轨道"
+            operation: L10n.string("player.operation.select-track", fallback: "Select media track")
         )
     }
 
@@ -1200,7 +1200,7 @@ final class MPVPlayerClient: PlayerClient {
         guard url.isFileURL || ["http", "https"].contains(
             url.scheme?.lowercased() ?? ""
         ) else {
-            throw AppError.playback("字幕只允许用户选择的文件或 HTTP/HTTPS URL")
+            throw AppError.playback(L10n.string("player.subtitle.url.invalid", fallback: "Subtitles must be a user-selected file or an HTTP/HTTPS URL."))
         }
         try await perform { client in
             try self.command(
@@ -1214,40 +1214,40 @@ final class MPVPlayerClient: PlayerClient {
         try await setDoubleProperty(
             "sub-delay",
             value: delay,
-            operation: "设置字幕延迟"
+            operation: L10n.string("player.operation.set-subtitle-delay", fallback: "Set subtitle delay")
         )
     }
 
     func setSubtitleScale(_ scale: Double) async throws {
         guard scale.isFinite, (0.5...3).contains(scale) else {
-            throw AppError.playback("字幕大小必须在 50% 到 300% 之间")
+            throw AppError.playback(L10n.string("player.subtitle.scale.invalid", fallback: "Subtitle size must be between 50% and 300%."))
         }
         try await setDoubleProperty(
             "sub-scale",
             value: scale,
-            operation: "设置字幕大小"
+            operation: L10n.string("player.operation.set-subtitle-size", fallback: "Set subtitle size")
         )
     }
 
     func setSubtitlePosition(_ position: Double) async throws {
         guard position.isFinite, (0...100).contains(position) else {
-            throw AppError.playback("字幕位置必须在 0 到 100 之间")
+            throw AppError.playback(L10n.string("player.subtitle.position.invalid", fallback: "Subtitle position must be between 0 and 100."))
         }
         try await setDoubleProperty(
             "sub-pos",
             value: position,
-            operation: "设置字幕位置"
+            operation: L10n.string("player.operation.set-subtitle-position", fallback: "Set subtitle position")
         )
     }
 
     func setSubtitleBorderSize(_ size: Double) async throws {
         guard size.isFinite, (0...10).contains(size) else {
-            throw AppError.playback("字幕描边必须在 0 到 10 之间")
+            throw AppError.playback(L10n.string("player.subtitle.outline.invalid", fallback: "Subtitle outline must be between 0 and 10."))
         }
         try await setDoubleProperty(
             "sub-border-size",
             value: size,
-            operation: "设置字幕描边"
+            operation: L10n.string("player.operation.set-subtitle-outline", fallback: "Set subtitle outline")
         )
     }
 
@@ -1255,7 +1255,7 @@ final class MPVPlayerClient: PlayerClient {
         try await setDoubleProperty(
             "audio-delay",
             value: delay,
-            operation: "设置音频延迟"
+            operation: L10n.string("player.operation.set-audio-delay", fallback: "Set audio delay")
         )
     }
 
@@ -1264,7 +1264,7 @@ final class MPVPlayerClient: PlayerClient {
         try await setStringProperty(
             "video-aspect-override",
             value: value?.isEmpty == false ? value! : "-1",
-            operation: "设置画面比例"
+            operation: L10n.string("player.operation.set-aspect-ratio", fallback: "Set aspect ratio")
         )
     }
 
@@ -1272,13 +1272,13 @@ final class MPVPlayerClient: PlayerClient {
         try await setStringProperty(
             "hwdec",
             value: enabled ? "auto-safe" : "no",
-            operation: "设置硬件解码"
+            operation: L10n.string("player.operation.set-hardware-decoding", fallback: "Set hardware decoding")
         )
     }
 
     func screenshot(to url: URL) async throws {
         guard url.isFileURL else {
-            throw AppError.playback("截图目标必须是本地文件")
+            throw AppError.playback(L10n.string("player.screenshot.target.invalid", fallback: "The screenshot destination must be a local file."))
         }
         try await perform { client in
             try self.command(
@@ -1336,7 +1336,7 @@ final class MPVPlayerClient: PlayerClient {
         lifecycleLock.lock()
         defer { lifecycleLock.unlock() }
         guard let client, lifecycleState == .running else {
-            throw AppError.playback("libmpv 已关闭")
+            throw AppError.playback(L10n.string("player.runtime.closed", fallback: "libmpv has closed."))
         }
         var renderContext: OpaquePointer?
         try library.checked(
@@ -1347,10 +1347,10 @@ final class MPVPlayerClient: PlayerClient {
                 renderControlMode.usesAdvancedControl ? 1 : 0,
                 &renderContext
             ),
-            operation: "创建 mpv OpenGL Render Context"
+            operation: L10n.string("player.operation.create-render-context", fallback: "Create mpv OpenGL Render Context")
         )
         guard let renderContext else {
-            throw AppError.playback("mpv 未返回 Render Context")
+            throw AppError.playback(L10n.string("player.runtime.render-context-missing", fallback: "mpv did not return a Render Context."))
         }
         renderContextCount += 1
         PlayerExperimentLogger.lifecycle(
@@ -1389,7 +1389,7 @@ final class MPVPlayerClient: PlayerClient {
                 height,
                 flipY ? 1 : 0
             ),
-            operation: "渲染视频帧"
+            operation: L10n.string("player.operation.render-frame", fallback: "Render video frame")
         )
     }
 
@@ -1412,7 +1412,7 @@ final class MPVPlayerClient: PlayerClient {
     func skipRender(_ renderContext: OpaquePointer) throws {
         try library.checked(
             library.renderSkip(renderContext),
-            operation: "跳过隐藏视频帧"
+            operation: L10n.string("player.operation.skip-frame", fallback: "Skip hidden video frame")
         )
     }
 
@@ -1504,7 +1504,7 @@ final class MPVPlayerClient: PlayerClient {
             queue.async {
                 guard self.isRunning, let client = self.client else {
                     continuation.resume(
-                        throwing: AppError.playback("libmpv 已关闭")
+                        throwing: AppError.playback(L10n.string("player.runtime.closed", fallback: "libmpv has closed."))
                     )
                     return
                 }
@@ -1526,7 +1526,7 @@ final class MPVPlayerClient: PlayerClient {
             try value.withCString { valuePointer in
                 try library.checked(
                     library.setOptionString(client, namePointer, valuePointer),
-                    operation: "设置 mpv 选项 \(name)"
+                    operation: L10n.string("player.operation.set-option", fallback: "Set mpv option %@", name)
                 )
             }
         }
@@ -1611,12 +1611,12 @@ final class MPVPlayerClient: PlayerClient {
     ) throws {
         guard !arguments.isEmpty,
               !arguments.contains(where: { $0.contains("\0") }) else {
-            throw AppError.playback("播放器命令参数无效")
+            throw AppError.playback(L10n.string("player.command.arguments.invalid", fallback: "The player command arguments are invalid."))
         }
         try withMPVCStringArray(arguments) { pointers in
             try library.checked(
                 library.command(client, Int32(arguments.count), pointers),
-                operation: "执行 mpv 命令 \(arguments[0])"
+                operation: L10n.string("player.operation.command", fallback: "Run mpv command %@", arguments[0])
             )
         }
     }
@@ -1627,7 +1627,7 @@ final class MPVPlayerClient: PlayerClient {
         operation: String
     ) async throws {
         guard !value.contains("\0") else {
-            throw AppError.playback("播放器属性包含无效字符")
+            throw AppError.playback(L10n.string("player.property.invalid-character", fallback: "The player property contains an invalid character."))
         }
         try await perform { client in
             try name.withCString { namePointer in
@@ -1697,7 +1697,7 @@ final class MPVPlayerClient: PlayerClient {
             guard !name.contains("\r"), !name.contains("\n"),
                   !value.contains("\r"), !value.contains("\n"),
                   !name.contains("\0"), !value.contains("\0") else {
-                throw AppError.playback("媒体请求 Header 包含非法换行或空字符")
+                throw AppError.playback(L10n.string("player.headers.invalid", fallback: "A media request header contains an invalid line break or null character."))
             }
         }
         let fields = headers.dictionary
@@ -1712,7 +1712,7 @@ final class MPVPlayerClient: PlayerClient {
                         Int32(fields.count),
                         valuePointers
                     ),
-                    operation: "设置媒体请求 Header"
+                    operation: L10n.string("player.operation.set-headers", fallback: "Set media request headers")
                 )
             }
         }
@@ -1721,13 +1721,13 @@ final class MPVPlayerClient: PlayerClient {
             "user-agent",
             value: userAgent,
             client: client,
-            operation: "设置 User-Agent"
+            operation: L10n.string("player.operation.set-user-agent", fallback: "Set User-Agent")
         )
         try setPropertyString(
             "referrer",
             value: headers["Referer"] ?? "",
             client: client,
-            operation: "设置 Referer"
+            operation: L10n.string("player.operation.set-referer", fallback: "Set Referer")
         )
     }
 
@@ -1743,7 +1743,7 @@ final class MPVPlayerClient: PlayerClient {
             "video-aspect-override",
             value: trimmedRatio?.isEmpty == false ? trimmedRatio! : "-1",
             client: client,
-            operation: "设置加载画面比例"
+            operation: L10n.string("player.operation.set-load-aspect", fallback: "Set loading aspect ratio")
         )
         let boundedPanscan = min(max(panscan, 0), 1)
         try "panscan".withCString { namePointer in
@@ -1753,7 +1753,7 @@ final class MPVPlayerClient: PlayerClient {
                     namePointer,
                     boundedPanscan
                 ),
-                operation: "设置加载画面填充"
+                operation: L10n.string("player.operation.set-load-fill", fallback: "Set loading image fill")
             )
         }
     }
@@ -1786,11 +1786,15 @@ final class MPVPlayerClient: PlayerClient {
         guard media.url.isFileURL
                 || supportedNetworkSchemes.contains(scheme ?? "") else {
             throw AppError.playback(
-                "播放器不支持该媒体协议：\(scheme ?? "未知")"
+                L10n.string(
+                    "player.protocol.unsupported",
+                    fallback: "The player does not support this media protocol: %@",
+                    scheme ?? L10n.string("common.unknown", fallback: "Unknown")
+                )
             )
         }
         guard !media.url.absoluteString.contains("\0") else {
-            throw AppError.playback("媒体 URL 包含无效字符")
+            throw AppError.playback(L10n.string("player.url.invalid-character", fallback: "The media URL contains an invalid character."))
         }
     }
 
@@ -1816,7 +1820,7 @@ final class MPVPlayerClient: PlayerClient {
             try name.withCString { pointer in
                 try library.checked(
                     library.observeProperty(client, identifier, pointer, format),
-                    operation: "观察 mpv 属性 \(name)"
+                    operation: L10n.string("player.operation.observe-property", fallback: "Observe mpv property %@", name)
                 )
             }
         }
@@ -1892,7 +1896,7 @@ final class MPVPlayerClient: PlayerClient {
             try? "pause".withCString { namePointer in
                 try library.checked(
                     library.setPropertyFlag(client, namePointer, 0),
-                    operation: "开始播放新媒体"
+                    operation: L10n.string("player.operation.start-new-media", fallback: "Start new media")
                 )
             }
             snapshot.status = .playing
@@ -1931,7 +1935,7 @@ final class MPVPlayerClient: PlayerClient {
                 try "no".withCString { valuePointer in
                     try library.checked(
                         library.setPropertyString(client, namePointer, valuePointer),
-                        operation: "按用户设置关闭字幕"
+                        operation: L10n.string("player.operation.disable-subtitles", fallback: "Disable subtitles using the user setting")
                     )
                 }
             }
@@ -1960,7 +1964,7 @@ final class MPVPlayerClient: PlayerClient {
                 guard event.endFileReason != 2 else { return }
                 let nativeMessage = event.error < 0
                     ? library.errorString(for: event.error)
-                    : "libmpv 在媒体载入完成前结束"
+                    : L10n.string("player.error.ended-before-load", fallback: "libmpv ended before media loading completed.")
                 if currentMediaTransportProfile == .tvBox,
                    tvBoxFormatFallbackAvailable,
                    let currentMedia,
@@ -2086,8 +2090,8 @@ final class MPVPlayerClient: PlayerClient {
                 let message = postSeekEndGuard.isProtecting(
                     requestGeneration: requestGeneration
                 )
-                    ? "媒体在跳转过程中意外结束，请重试或切换线路"
-                    : "媒体在播放进度结束前提前断开，请重试或切换线路"
+                    ? L10n.string("player.error.ended-during-seek", fallback: "The media ended unexpectedly while seeking. Try again or switch sources.")
+                    : L10n.string("player.error.ended-prematurely", fallback: "The media disconnected before playback finished. Try again or switch sources.")
                 PlayerExperimentLogger.failure(
                     "phase=premature_end_file"
                         + " reason=\(event.endFileReason)"
@@ -2134,7 +2138,7 @@ final class MPVPlayerClient: PlayerClient {
         case NativeEvent.queueOverflow:
             continuation.yield(
                 .error(
-                    "libmpv 事件队列溢出",
+                    L10n.string("player.error.event-queue-overflow", fallback: "The libmpv event queue overflowed."),
                     requestID: currentRequestID
                 )
             )
@@ -2348,8 +2352,8 @@ final class MPVPlayerClient: PlayerClient {
             emitEndedIfNeeded(origin: .userSeekBoundary)
         case .premature:
             let message = protectsUserSeek
-                ? "媒体在跳转过程中意外结束，请重试或切换线路"
-                : "媒体在播放进度结束前提前断开，请重试或切换线路"
+                ? L10n.string("player.error.ended-during-seek", fallback: "The media ended unexpectedly while seeking. Try again or switch sources.")
+                : L10n.string("player.error.ended-prematurely", fallback: "The media disconnected before playback finished. Try again or switch sources.")
             emitPrematureEndIfNeeded(message: message)
         case .stopped, .failed, .ignored:
             break
@@ -2578,7 +2582,7 @@ final class PlayerLifecycleController {
             startForwardingEvents(from: player)
         } catch {
             let unavailable = UnavailablePlayerClient(
-                reason: "libmpv 不可用：\(LogRedactor.text(error.localizedDescription))"
+                reason: L10n.string("player.runtime.unavailable-reason", fallback: "libmpv unavailable: %@", LogRedactor.text(error.localizedDescription))
             )
             currentClient = unavailable
             startForwardingEvents(from: unavailable)
@@ -2595,7 +2599,8 @@ final class PlayerLifecycleController {
     }
 
     var runtimeDescription: String {
-        renderPlayer?.runtimeDescription ?? "libmpv 不可用"
+        renderPlayer?.runtimeDescription
+            ?? L10n.string("player.runtime.unavailable", fallback: "libmpv unavailable")
     }
 
     @discardableResult
@@ -2609,7 +2614,7 @@ final class PlayerLifecycleController {
             await teardownTask.value
         }
         guard !isShuttingDown else {
-            throw AppError.playback("播放器正在关闭")
+            throw AppError.playback(L10n.string("player.shutting-down", fallback: "The player is shutting down."))
         }
         if let player = renderPlayer {
             PlayerStartupTraceStore.shared.markClientReady(
@@ -2847,7 +2852,7 @@ final class PlayerLifecycleController {
 
     private func requireClient() throws -> PlayerClient {
         guard let currentClient else {
-            throw AppError.playback("播放器尚未创建")
+            throw AppError.playback(L10n.string("player.not-created", fallback: "The player has not been created."))
         }
         return currentClient
     }

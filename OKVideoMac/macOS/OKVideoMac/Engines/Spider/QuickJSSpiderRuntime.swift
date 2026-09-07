@@ -91,8 +91,9 @@ private final class QuickJSLibrary {
 
     init(url: URL) throws {
         guard let handle = dlopen(url.path, RTLD_NOW | RTLD_LOCAL) else {
-            let message = dlerror().map { String(cString: $0) } ?? "未知错误"
-            throw AppError.spider("无法载入 QuickJS：\(message)")
+            let message = dlerror().map { String(cString: $0) }
+                ?? L10n.string("common.unknown-error", fallback: "Unknown error")
+            throw AppError.spider(L10n.string("quickjs.load.failed", fallback: "Unable to load QuickJS: %@", message))
         }
         self.handle = handle
         do {
@@ -122,7 +123,7 @@ private final class QuickJSLibrary {
         handle: UnsafeMutableRawPointer
     ) throws -> T {
         guard let pointer = dlsym(handle, name) else {
-            throw AppError.spider("QuickJS 桥缺少符号 \(name)")
+            throw AppError.spider(L10n.string("quickjs.symbol.missing", fallback: "The QuickJS bridge is missing symbol %@.", name))
         }
         return unsafeBitCast(pointer, to: T.self)
     }
@@ -170,7 +171,7 @@ private final class QuickJSHostBox {
             options: [.sortedKeys, .withoutEscapingSlashes]
         )
         guard let value = String(data: data, encoding: .utf8) else {
-            throw AppError.spider("无法编码 Spider 网络响应")
+            throw AppError.spider(L10n.string("quickjs.response.encode.failed", fallback: "Unable to encode the Spider network response."))
         }
         return value
     }
@@ -196,14 +197,14 @@ private final class QuickJSHostBox {
                 )
                 guard (200..<300).contains(response.statusCode) else {
                     throw AppError.spider(
-                        "模块 \(moduleName) 返回 HTTP \(response.statusCode)"
+                        L10n.string("quickjs.module.http-status", fallback: "Module %1$@ returned HTTP %2$lld.", moduleName, response.statusCode)
                     )
                 }
                 guard response.body.count <= 5 * 1_024 * 1_024 else {
-                    throw AppError.spider("Spider 模块超过 5 MiB")
+                    throw AppError.spider(L10n.string("quickjs.module.too-large", fallback: "The Spider module exceeds 5 MiB."))
                 }
                 guard let source = String(data: response.body, encoding: .utf8) else {
-                    throw AppError.spider("Spider 模块不是 UTF-8：\(moduleName)")
+                    throw AppError.spider(L10n.string("quickjs.module.not-utf8", fallback: "The Spider module is not UTF-8: %@", moduleName))
                 }
                 lock.lock()
                 moduleCache[moduleName] = source
@@ -213,7 +214,7 @@ private final class QuickJSHostBox {
                 lastError = error
             }
         }
-        throw lastError ?? AppError.spider("无法加载 Spider 模块：\(moduleName)")
+        throw lastError ?? AppError.spider(L10n.string("quickjs.module.load.failed", fallback: "Unable to load Spider module: %@", moduleName))
     }
 
     private func send(_ request: SpiderNetworkRequest) throws -> SpiderNetworkResponse {
@@ -227,7 +228,7 @@ private final class QuickJSHostBox {
                 lastError = error
             }
         }
-        throw lastError ?? AppError.spider("Spider 网络请求失败")
+        throw lastError ?? AppError.spider(L10n.string("quickjs.network.failed", fallback: "The Spider network request failed."))
     }
 
     private func sendOnce(
@@ -244,7 +245,7 @@ private final class QuickJSHostBox {
             semaphore.signal()
         }
         guard semaphore.wait(timeout: .now() + 22) == .success else {
-            throw AppError.spider("Spider 网络桥超时")
+            throw AppError.spider(L10n.string("quickjs.network.timeout", fallback: "The Spider network bridge timed out."))
         }
         return try result.get().get()
     }
@@ -257,7 +258,7 @@ private final class QuickJSHostBox {
             let relativePath = String(moduleName.dropFirst("assets://".count))
             guard !relativePath.contains(".."),
                   relativePath.hasPrefix("js/lib/") else {
-                throw AppError.spider("禁止访问 Spider 资源：\(moduleName)")
+                throw AppError.spider(L10n.string("quickjs.resource.denied", fallback: "Access to Spider resource %@ is denied.", moduleName))
             }
             let upstream = "https://raw.githubusercontent.com/FongMi/TV/"
                 + Self.upstreamCommit
@@ -274,7 +275,7 @@ private final class QuickJSHostBox {
             return values
         }
         guard let url = SpiderHTTPURL.parse(moduleName) else {
-            throw AppError.spider("Spider 模块只允许 HTTP/HTTPS：\(moduleName)")
+            throw AppError.spider(L10n.string("quickjs.module.scheme.invalid", fallback: "Spider modules must use HTTP/HTTPS: %@", moduleName))
         }
         return [url]
     }
@@ -290,7 +291,7 @@ private final class QuickJSHostBox {
 
     private func decodeRequest(_ json: String) throws -> SpiderNetworkRequest {
         guard let data = json.data(using: .utf8) else {
-            throw AppError.spider("Spider 网络请求不是 UTF-8")
+            throw AppError.spider(L10n.string("quickjs.request.not-utf8", fallback: "The Spider network request is not UTF-8."))
         }
         let value = try JSONSerialization.jsonObject(with: data)
         let rawURL: String
@@ -322,11 +323,11 @@ private final class QuickJSHostBox {
                 )
             }
         } else {
-            throw AppError.spider("Spider request 参数必须是 URL 字符串或对象")
+            throw AppError.spider(L10n.string("quickjs.request.invalid", fallback: "Spider request parameters must be a URL string or object."))
         }
 
         guard let url = SpiderHTTPURL.parse(rawURL) else {
-            throw AppError.spider("Spider 网络桥只允许 HTTP/HTTPS")
+            throw AppError.spider(L10n.string("quickjs.request.scheme.invalid", fallback: "The Spider network bridge only allows HTTP/HTTPS."))
         }
         return SpiderNetworkRequest(
             url: url,
@@ -351,7 +352,7 @@ private final class LockedSpiderResponse {
         lock.lock()
         defer { lock.unlock() }
         guard let value else {
-            throw AppError.spider("Spider 网络桥没有返回结果")
+            throw AppError.spider(L10n.string("quickjs.network.no-result", fallback: "The Spider network bridge returned no result."))
         }
         return value
     }
@@ -362,7 +363,7 @@ private let quickJSRequestCallback: NativeRequestCallback = {
     rawJSON,
     errorOut in
     guard let opaque, let rawJSON else {
-        errorOut?.pointee = mallocCString("Spider 网络回调参数缺失")
+        errorOut?.pointee = mallocCString(L10n.string("quickjs.callback.request-missing", fallback: "Spider network callback parameters are missing."))
         return nil
     }
     let box = Unmanaged<QuickJSHostBox>.fromOpaque(opaque).takeUnretainedValue()
@@ -379,7 +380,7 @@ private let quickJSModuleCallback: NativeModuleCallback = {
     rawModuleName,
     errorOut in
     guard let opaque, let rawModuleName else {
-        errorOut?.pointee = mallocCString("Spider 模块回调参数缺失")
+        errorOut?.pointee = mallocCString(L10n.string("quickjs.callback.module-missing", fallback: "Spider module callback parameters are missing."))
         return nil
     }
     let box = Unmanaged<QuickJSHostBox>.fromOpaque(opaque).takeUnretainedValue()
@@ -453,7 +454,8 @@ final actor QuickJSSpiderRuntime: SpiderRuntime {
             &errorPointer
         ) else {
             throw AppError.spider(
-                library.takeString(errorPointer) ?? "无法创建 QuickJS Runtime"
+                library.takeString(errorPointer)
+                    ?? L10n.string("quickjs.runtime.create.failed", fallback: "Unable to create the QuickJS Runtime.")
             )
         }
         runtime = created
@@ -474,18 +476,19 @@ final actor QuickJSSpiderRuntime: SpiderRuntime {
             library.destroy(created)
             runtime = nil
             throw AppError.spider(
-                library.takeString(errorPointer) ?? "QuickJS 脚本载入失败"
+                library.takeString(errorPointer)
+                    ?? L10n.string("quickjs.script.load.failed", fallback: "The QuickJS script failed to load.")
             )
         }
     }
 
     func invoke(_ invocation: SpiderInvocation) async throws -> JSONValue {
         guard let runtime else {
-            throw AppError.spider("QuickJS Runtime 尚未载入脚本")
+            throw AppError.spider(L10n.string("quickjs.runtime.script-not-loaded", fallback: "The QuickJS Runtime has not loaded a script."))
         }
         let arguments = try JSONEncoder().encode(invocation.arguments)
         guard let argumentsJSON = String(data: arguments, encoding: .utf8) else {
-            throw AppError.spider("无法编码 Spider 调用参数")
+            throw AppError.spider(L10n.string("quickjs.arguments.encode.failed", fallback: "Unable to encode Spider invocation arguments."))
         }
 
         var errorPointer: UnsafeMutablePointer<CChar>?
@@ -502,16 +505,17 @@ final actor QuickJSSpiderRuntime: SpiderRuntime {
         }
         guard let resultText = library.takeString(resultPointer) else {
             throw AppError.spider(
-                library.takeString(errorPointer) ?? "QuickJS 方法调用失败"
+                library.takeString(errorPointer)
+                    ?? L10n.string("quickjs.invoke.failed", fallback: "The QuickJS method call failed.")
             )
         }
         guard let data = resultText.data(using: .utf8) else {
-            throw AppError.spider("QuickJS 返回值不是 UTF-8")
+            throw AppError.spider(L10n.string("quickjs.result.not-utf8", fallback: "The QuickJS result is not UTF-8."))
         }
         do {
             return try JSONDecoder().decode(JSONValue.self, from: data)
         } catch {
-            throw AppError.spider("QuickJS 返回值不是 JSON：\(error.localizedDescription)")
+            throw AppError.spider(L10n.string("quickjs.result.not-json", fallback: "The QuickJS result is not JSON: %@", error.localizedDescription))
         }
     }
 
@@ -528,11 +532,11 @@ struct QuickJSSpiderRuntimeFactory: SpiderRuntimeFactory {
 
     init(bundle: Bundle = .main) throws {
         guard let frameworks = bundle.privateFrameworksURL else {
-            throw AppError.spider("应用包没有 Frameworks 目录")
+            throw AppError.spider(L10n.string("quickjs.frameworks.missing", fallback: "The app bundle has no Frameworks folder."))
         }
         let candidate = frameworks.appendingPathComponent("libOKQuickJS.dylib")
         guard FileManager.default.fileExists(atPath: candidate.path) else {
-            throw AppError.spider("应用包缺少 libOKQuickJS.dylib")
+            throw AppError.spider(L10n.string("quickjs.library.missing", fallback: "The app bundle is missing libOKQuickJS.dylib."))
         }
         libraryURL = candidate
     }

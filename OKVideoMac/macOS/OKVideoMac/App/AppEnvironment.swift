@@ -216,9 +216,11 @@ enum ApplicationInstancePolicy {
         let location = conflictingApplication?.bundleURL?.path
             ?? "PID \(conflictPID)"
         throw AppError.database(
-            "检测到另一个 OKVideoMac 实例正在运行（\(location)）。"
-                + "为保护同一数据库，本实例没有打开数据库。"
-                + "请关闭旧版本或重复副本后重试。"
+            L10n.string(
+                "app.instance.conflict",
+                fallback: "Another OKVideoMac instance is running (%@). This instance did not open the shared database to protect your data. Close the older version or duplicate copy, then try again.",
+                location
+            )
         )
     }
 }
@@ -240,7 +242,7 @@ final class ApplicationInstanceLease {
         )
         guard descriptor >= 0 else {
             throw Self.filesystemError(
-                prefix: "无法创建应用实例锁",
+                prefix: L10n.string("app.instance.lock-create.failed", fallback: "Unable to create the application instance lock"),
                 code: errno
             )
         }
@@ -249,12 +251,14 @@ final class ApplicationInstanceLease {
             Darwin.close(descriptor)
             if code == EWOULDBLOCK {
                 throw AppError.database(
-                    "另一个 OKVideoMac 实例正在使用应用数据库。"
-                        + "为保护数据，本实例没有打开数据库。"
+                    L10n.string(
+                        "app.instance.database-in-use",
+                        fallback: "Another OKVideoMac instance is using the application database. This instance did not open it to protect your data."
+                    )
                 )
             }
             throw Self.filesystemError(
-                prefix: "无法锁定应用数据库",
+                prefix: L10n.string("app.instance.database-lock.failed", fallback: "Unable to lock the application database"),
                 code: code
             )
         }
@@ -278,6 +282,10 @@ final class ApplicationInstanceLease {
         code: Int32
     ) -> AppError {
         let message = String(cString: strerror(code))
-        return .filesystem("\(prefix)：\(message)")
+        return .filesystem(
+            prefix
+                + L10n.string("common.detail-separator", fallback: ": ")
+                + message
+        )
     }
 }

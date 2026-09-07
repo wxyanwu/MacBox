@@ -75,14 +75,14 @@ struct LiveView: View {
         VStack(spacing: 18) {
             EmptyStateView(
                 systemImage: "dot.radiowaves.left.and.right",
-                title: "尚未添加直播源",
-                message: "点击下方按钮，通过 URL、粘贴内容或本地文件添加 M3U、M3U8、TXT 或 JSON 直播源。"
+                title: L10n.string("live.no-sources.title", fallback: "No Live TV Sources"),
+                message: L10n.string("live.no-sources.message", fallback: "Use the button below to add an M3U, M3U8, TXT, or JSON source from a URL, pasted content, or a local file.")
             )
             Button {
                 state.selectedSettingsPane = .liveSources
                 state.selectSection(.settings)
             } label: {
-                Label("打开直播源设置", systemImage: "gearshape")
+                Label(L10n.string("live.open-settings", fallback: "Open Live TV Source Settings"), systemImage: "gearshape")
             }
         }
     }
@@ -97,13 +97,13 @@ struct LiveView: View {
                 sourceName: source.name
             )
         } else if state.isLoading {
-            AppActivityLabel("正在加载直播源…")
+            AppActivityLabel(L10n.string("live.loading-source", fallback: "Loading Live TV source…"))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             EmptyStateView(
                 systemImage: "list.bullet.rectangle",
-                title: "请选择直播源",
-                message: "请从上方来源菜单切换直播源。"
+                title: L10n.string("live.choose-source.title", fallback: "Choose a Live TV Source"),
+                message: L10n.string("live.choose-source.message", fallback: "Choose a source from the menu above.")
             )
         }
     }
@@ -135,11 +135,11 @@ struct LiveView: View {
                                 ? "star"
                                 : "magnifyingglass",
                             title: session.showsFavoritesOnly
-                                ? "还没有收藏频道"
-                                : "没有匹配的频道",
+                                ? L10n.string("live.empty.favorites.title", fallback: "No Favorite Channels")
+                                : L10n.string("live.empty.filtered.title", fallback: "No Matching Channels"),
                             message: session.showsFavoritesOnly
-                                ? "点击频道卡片右上角的星标即可收藏。"
-                                : "请更换分组或搜索关键词。"
+                                ? L10n.string("live.empty.favorites.message", fallback: "Use the star on a channel card to add it to Favorites.")
+                                : L10n.string("live.empty.filtered.message", fallback: "Choose another group or search term.")
                         )
                         .frame(
                             maxWidth: .infinity,
@@ -179,7 +179,7 @@ struct LiveView: View {
 
                         if hiddenCount > 0 {
                             Label(
-                                "\(hiddenCount) 个受保护分组已隐藏",
+                                L10n.string("live.protected-groups.hidden", fallback: "%d protected groups hidden", hiddenCount),
                                 systemImage: "lock"
                             )
                             .font(.caption)
@@ -202,20 +202,20 @@ struct LiveView: View {
             switch epgStatus {
             case .loading:
                 backgroundStatusLabel(
-                    "正在后台下载并整理节目单…",
+                    L10n.string("live.epg.loading", fallback: "Downloading and preparing the program guide in the background…"),
                     systemImage: "clock.arrow.circlepath",
                     color: .secondary,
                     showsProgress: true
                 )
             case .ready:
                 backgroundStatusLabel(
-                    "节目单已就绪",
+                    L10n.string("live.epg.ready", fallback: "Program guide ready"),
                     systemImage: "checkmark.circle",
                     color: .green
                 )
             case .failed(let message):
                 backgroundStatusLabel(
-                    "EPG 暂不可用：\(message)",
+                    L10n.string("live.epg.failed", fallback: "EPG unavailable: %@", message),
                     systemImage: "exclamationmark.triangle",
                     color: .orange
                 )
@@ -226,7 +226,7 @@ struct LiveView: View {
             switch validation {
             case .checking(let completed, let total):
                 backgroundStatusLabel(
-                    "正在后台检测频道 \(completed)/\(total)",
+                    L10n.string("live.health-check.progress", fallback: "Checking channels in the background: %d/%d", completed, total),
                     systemImage: "waveform.path.ecg",
                     color: .secondary,
                     showsProgress: true
@@ -234,8 +234,8 @@ struct LiveView: View {
             case .completed(let removed, let total):
                 backgroundStatusLabel(
                     removed == 0
-                        ? "已检测 \(total) 个频道，未发现明确失效项"
-                        : "已检测 \(total) 个频道，清理 \(removed) 个失效项（可恢复）",
+                        ? L10n.string("live.health-check.clean", fallback: "Checked %d channels; no confirmed failures found", total)
+                        : L10n.string("live.health-check.removed", fallback: "Checked %d channels; removed %d recoverable failures", total, removed),
                     systemImage: removed == 0
                         ? "checkmark.circle"
                         : "trash.slash",
@@ -243,7 +243,7 @@ struct LiveView: View {
                 )
             case .failed(let message):
                 backgroundStatusLabel(
-                    "后台频道检测未完成：\(message)",
+                    L10n.string("live.health-check.failed", fallback: "Background channel check did not finish: %@", message),
                     systemImage: "exclamationmark.triangle",
                     color: .orange
                 )
@@ -360,7 +360,7 @@ struct LiveToolbarView: View {
                 )
             } else if state.isLoading {
                 AppActivityIndicator(size: .small)
-                    .help("正在加载直播源")
+                    .help(L10n.string("live.loading-source", fallback: "Loading Live TV source…"))
             }
         }
     }
@@ -459,7 +459,7 @@ struct LiveToolbarView: View {
         .frame(maxWidth: compact ? 132 : 220)
         .controlSize(.regular)
         .disabled(state.liveSources.count < 2)
-        .help("当前直播源：\(sourceName)，共 \(channelCount) 个频道")
+        .help(L10n.string("live.current-source", fallback: "Current source: %@; %d channels", sourceName, channelCount))
     }
 
     private func groupMenu(_ groups: [LiveGroup], compact: Bool) -> some View {
@@ -468,7 +468,7 @@ struct LiveToolbarView: View {
                 session.selectedGroupName = nil
             } label: {
                 menuLabel(
-                    "全部频道",
+                    L10n.string("live.all-channels", fallback: "All Channels"),
                     selected: session.selectedGroupName == nil
                 )
             }
@@ -478,7 +478,12 @@ struct LiveToolbarView: View {
                     session.selectedGroupName = group.name
                 } label: {
                     menuLabel(
-                        "\(group.name)（\(group.channels.count)）",
+                        L10n.string(
+                            "live.group-count",
+                            fallback: "%1$@ (%2$lld)",
+                            group.name,
+                            group.channels.count
+                        ),
                         selected: session.selectedGroupName == group.name
                     )
                 }
@@ -486,15 +491,15 @@ struct LiveToolbarView: View {
         } label: {
             Label(
                 compact
-                    ? (session.selectedGroupName ?? "全部")
-                    : (session.selectedGroupName ?? "全部频道"),
+                    ? (session.selectedGroupName ?? L10n.string("common.all", fallback: "All"))
+                    : (session.selectedGroupName ?? L10n.string("live.all-channels", fallback: "All Channels")),
                 systemImage: "rectangle.3.group"
             )
             .lineLimit(1)
         }
         .frame(maxWidth: compact ? 108 : 180)
         .controlSize(.regular)
-        .help("筛选频道分组")
+        .help(L10n.string("live.filter-groups", fallback: "Filter Channel Groups"))
     }
 
     private func condensedMenu(
@@ -519,10 +524,10 @@ struct LiveToolbarView: View {
                 )
             }
         } label: {
-            Label("直播选项", systemImage: "ellipsis.circle")
+            Label(L10n.string("live.options", fallback: "Live TV Options"), systemImage: "ellipsis.circle")
                 .labelStyle(.iconOnly)
         }
-        .help("直播源、分组和频道管理")
+        .help(L10n.string("live.options.help", fallback: "Manage Live TV sources, groups, and channels"))
     }
 
     private var favoritesButton: some View {
@@ -530,11 +535,15 @@ struct LiveToolbarView: View {
             session.showsFavoritesOnly.toggle()
         } label: {
             Label(
-                "仅看收藏",
+                L10n.string("live.favorites-only", fallback: "Favorites Only"),
                 systemImage: session.showsFavoritesOnly ? "star.fill" : "star"
             )
         }
-        .help(session.showsFavoritesOnly ? "显示全部频道" : "仅显示收藏频道")
+        .help(
+            session.showsFavoritesOnly
+                ? L10n.string("live.show-all", fallback: "Show All Channels")
+                : L10n.string("live.show-favorites", fallback: "Show Favorite Channels Only")
+        )
     }
 
     private func deletedChannelsMenu(
@@ -552,7 +561,7 @@ struct LiveToolbarView: View {
                     }
                 } label: {
                     Label(
-                        "恢复 \(channel.name)",
+                        L10n.string("live.restore-channel", fallback: "Restore %@", channel.name),
                         systemImage: "arrow.uturn.backward"
                     )
                 }
@@ -565,30 +574,30 @@ struct LiveToolbarView: View {
                     )
                 }
             } label: {
-                Label("全部恢复", systemImage: "arrow.counterclockwise")
+                Label(L10n.string("live.restore-all", fallback: "Restore All"), systemImage: "arrow.counterclockwise")
             }
         } label: {
             Label(
-                "已删除 \(channels.count)",
+                L10n.string("live.deleted-count", fallback: "%d Deleted", channels.count),
                 systemImage: "trash"
             )
         }
-        .help("查看或恢复已删除的频道")
+        .help(L10n.string("live.deleted.help", fallback: "View or restore deleted channels"))
     }
 
     @ViewBuilder
     private func refreshControl(sourceID: UUID) -> some View {
         if state.isLoading {
             AppActivityIndicator(size: .small)
-                .help("正在刷新直播源")
+                .help(L10n.string("live.refreshing", fallback: "Refreshing Live TV source"))
         } else {
             Button {
                 Task { await state.refreshLiveSource(sourceID) }
             } label: {
-                Label("刷新直播源", systemImage: "arrow.clockwise")
+                Label(L10n.string("live.refresh", fallback: "Refresh Live TV Source"), systemImage: "arrow.clockwise")
             }
             .disabled(selectedSource?.sourceKind != .remote)
-            .help("刷新当前直播源")
+            .help(L10n.string("live.refresh-current", fallback: "Refresh Current Live TV Source"))
         }
     }
 
@@ -688,7 +697,7 @@ private struct LiveChannelCard: View {
                     Image(systemName: "tv")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                        .help("直播频道")
+                        .help(L10n.string("live.channel", fallback: "Live TV Channel"))
                 }
             }
 
@@ -700,7 +709,7 @@ private struct LiveChannelCard: View {
             }
 
             if let nextProgramme {
-                Text("接下来：\(nextProgramme)")
+                Text(L10n.string("live.next-program", fallback: "Next: %@", nextProgramme))
                     .font(.caption2)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
@@ -743,7 +752,9 @@ private struct LiveChannelCard: View {
                 toggleFavorite()
             } label: {
                 Label(
-                    isFavorite ? "取消收藏" : "收藏频道",
+                    isFavorite
+                        ? L10n.string("live.unfavorite", fallback: "Remove from Favorites")
+                        : L10n.string("live.favorite", fallback: "Favorite Channel"),
                     systemImage: isFavorite ? "star.slash" : "star"
                 )
             }
@@ -751,21 +762,21 @@ private struct LiveChannelCard: View {
             Button(role: .destructive) {
                 showsDeleteConfirmation = true
             } label: {
-                Label("删除频道…", systemImage: "trash")
+                Label(L10n.string("live.delete-channel.action", fallback: "Delete Channel…"), systemImage: "trash")
             }
         }
         .confirmationDialog(
-            "删除“\(channel.name)”？",
+            L10n.string("live.delete-channel.title", fallback: "Delete “%@”?", channel.name),
             isPresented: $showsDeleteConfirmation,
             titleVisibility: .visible
         ) {
-            Button("删除频道", role: .destructive) {
+            Button(L10n.string("live.delete-channel.confirm", fallback: "Delete Channel"), role: .destructive) {
                 deleteChannel()
             }
-            Button("取消", role: .cancel) {}
+            Button(L10n.string(.commonCancel), role: .cancel) {}
         } message: {
             Text(
-                "频道只会从本机的“\(sourceName)”中移除，刷新直播源也不会重新出现；之后可以从工具栏的“已删除频道”恢复。"
+                L10n.string("live.delete-channel.message", fallback: "This channel will be removed only from the local “%@” source and will not return after a refresh. You can restore it later from Deleted Channels in the toolbar.", sourceName)
             )
         }
     }
@@ -843,7 +854,11 @@ private struct LiveChannelCard: View {
                 }
         }
         .buttonStyle(.plain)
-        .help(isFavorite ? "取消收藏" : "收藏频道")
+        .help(
+            isFavorite
+                ? L10n.string("live.unfavorite", fallback: "Remove from Favorites")
+                : L10n.string("live.favorite", fallback: "Favorite Channel")
+        )
     }
 
     private var streamMenu: some View {
@@ -856,7 +871,7 @@ private struct LiveChannelCard: View {
                 }
             }
         } label: {
-            Text("\(channel.streams.count) 线")
+            Text(L10n.string("live.stream-count-short", fallback: "%d streams", channel.streams.count))
                 .font(.caption2.weight(.semibold))
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3)
@@ -865,7 +880,7 @@ private struct LiveChannelCard: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("选择播放线路")
+        .help(L10n.string("live.choose-stream", fallback: "Choose Stream"))
     }
 
     private var isFavorite: Bool {
@@ -874,11 +889,12 @@ private struct LiveChannelCard: View {
 
     private var programmeSummary: String? {
         if let current = currentEPGProgramme {
-            return "正在播放：\(current.title)"
+            return L10n.string("live.now-playing", fallback: "Now Playing: %@", current.title)
         }
         guard channel.streams.count > 1 else { return nil }
-        let format = channel.streams.first?.format?.uppercased() ?? "直播"
-        return "\(format) · \(channel.streams.count) 条线路"
+        let format = channel.streams.first?.format?.uppercased()
+            ?? L10n.string("live.format", fallback: "Live")
+        return L10n.string("live.format-stream-count", fallback: "%@ · %d streams", format, channel.streams.count)
     }
 
     private var nextProgramme: String? {
@@ -1022,10 +1038,17 @@ final class LiveChannelLogoURLCache: ObservableObject {
 
 struct LiveSourceImportSheet: View {
     enum Mode: String, CaseIterable, Identifiable {
-        case remote = "URL"
-        case pasted = "粘贴内容"
+        case remote
+        case pasted
 
         var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .remote: return "URL"
+            case .pasted: return L10n.string("live.source.pasted", fallback: "Pasted Content")
+            }
+        }
     }
 
     @EnvironmentObject private var state: AppState
@@ -1040,24 +1063,24 @@ struct LiveSourceImportSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("添加直播源")
+            Text(L10n.string("live.add.title", fallback: "Add Live TV Source"))
                 .font(.title2)
-            Text("直播源独立于点播配置保存，支持 M3U、M3U8、TXT 和 JSON。")
+            Text(L10n.string("live.add.subtitle", fallback: "Live TV sources are stored separately from video provider configurations. M3U, M3U8, TXT, and JSON are supported."))
                 .font(.callout)
                 .foregroundColor(.secondary)
-            Picker("方式", selection: $mode) {
+            Picker(L10n.string("common.method", fallback: "Method"), selection: $mode) {
                 ForEach(Mode.allCases) { mode in
-                    Text(mode.rawValue).tag(mode)
+                    Text(mode.title).tag(mode)
                 }
             }
             .pickerStyle(.segmented)
             .disabled(isSubmitting)
-            TextField("直播源名称（可选）", text: $name)
+            TextField(L10n.string("live.add.name.optional", fallback: "Source Name (Optional)"), text: $name)
                 .disabled(isSubmitting)
             if mode == .remote {
                 TextField("https://example.com/channels.m3u", text: $remoteURL)
                     .disabled(isSubmitting)
-                Text("仅允许 HTTP/HTTPS；响应上限 32 MiB，超时 30 秒。")
+                Text(L10n.string("live.add.remote.note", fallback: "HTTP and HTTPS only. Responses are limited to 32 MiB with a 30-second timeout."))
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else {
@@ -1069,7 +1092,7 @@ struct LiveSourceImportSheet: View {
                             .stroke(Color.secondary.opacity(0.3))
                     )
                     .disabled(isSubmitting)
-                TextField("相对频道地址的基准 URL（可选）", text: $baseURL)
+                TextField(L10n.string("live.add.base-url.optional", fallback: "Relative Channel Base URL (Optional)"), text: $baseURL)
                     .disabled(isSubmitting)
             }
             Spacer()
@@ -1083,7 +1106,7 @@ struct LiveSourceImportSheet: View {
             }
             HStack {
                 Spacer()
-                Button("取消") {
+                Button(L10n.string(.commonCancel)) {
                     submissionTask?.cancel()
                     submissionTask = nil
                     isPresented = false
@@ -1095,10 +1118,10 @@ struct LiveSourceImportSheet: View {
                     if isSubmitting {
                         HStack(spacing: 6) {
                             AppActivityIndicator(size: .small)
-                            Text("添加中")
+                            Text(L10n.string("live.add.adding", fallback: "Adding"))
                         }
                     } else {
-                        Text("添加")
+                        Text(L10n.string("live.add.action", fallback: "Add"))
                     }
                 }
                 .keyboardShortcut(.defaultAction)

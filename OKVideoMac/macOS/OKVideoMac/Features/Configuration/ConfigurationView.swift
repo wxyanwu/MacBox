@@ -92,7 +92,11 @@ struct ConfigurationView: View {
                 standaloneContent
             }
         }
-        .navigationTitle(embedded ? "设置" : "点播配置")
+        .navigationTitle(
+            embedded
+                ? L10n.string(.sectionSettings)
+                : L10n.string("configuration.title", fallback: "Video Providers")
+        )
         .sheet(isPresented: $showingImport) {
             ConfigurationImportSheet(isPresented: $showingImport)
                 .environmentObject(state)
@@ -115,8 +119,8 @@ struct ConfigurationView: View {
                 }
             case .failure(let error):
                 state.presentedError = UserFacingError(
-                    title: "无法选择文件",
-                    message: error.localizedDescription
+                    title: L10n.string("configuration.file-selection.failed", fallback: "Unable to Select File"),
+                    message: RuntimeUserFacingMessageMapper.message(for: error)
                 )
             }
         }
@@ -132,8 +136,8 @@ struct ConfigurationView: View {
                 }
             case .failure(let error):
                 state.presentedError = UserFacingError(
-                    title: "无法选择 CatPaw 配置",
-                    message: error.localizedDescription
+                    title: L10n.string("configuration.catpaw-selection.failed", fallback: "Unable to Select CatPaw Configuration"),
+                    message: RuntimeUserFacingMessageMapper.message(for: error)
                 )
             }
         }
@@ -141,9 +145,9 @@ struct ConfigurationView: View {
             item: $pendingDelete
         ) { record in
             Alert(
-                title: Text("删除“\(record.name)”？"),
-                message: Text("收藏和历史不会随配置删除。"),
-                primaryButton: .destructive(Text("删除")) {
+                title: Text(L10n.string("configuration.delete.title", fallback: "Delete “%@”?", record.name)),
+                message: Text(L10n.string("configuration.delete.message", fallback: "Favorites and history will not be deleted with the configuration.")),
+                primaryButton: .destructive(Text(L10n.string("common.delete", fallback: "Delete"))) {
                     Task { await state.deleteConfiguration(record.id) }
                 },
                 secondaryButton: .cancel()
@@ -157,24 +161,24 @@ struct ConfigurationView: View {
                 Button {
                     showingImport = true
                 } label: {
-                    Label("导入点播配置", systemImage: "plus")
+                    Label(L10n.string("configuration.import", fallback: "Import Video Provider Configuration"), systemImage: "plus")
                 }
                 Button {
                     showingFileImporter = true
                 } label: {
-                    Label("选择点播配置文件", systemImage: "folder")
+                    Label(L10n.string("configuration.choose-file", fallback: "Choose Video Provider Configuration File"), systemImage: "folder")
                 }
                 Button {
                     showingCatPawProfileImporter = true
                 } label: {
-                    Label("导入 CatPaw 配置", systemImage: "person.crop.circle.badge.plus")
+                    Label(L10n.string("configuration.import-catpaw", fallback: "Import CatPaw Configuration"), systemImage: "person.crop.circle.badge.plus")
                 }
                 .disabled(!state.canImportCatPawProfile)
                 Spacer()
                 Button {
                     Task { await state.refreshActiveConfiguration() }
                 } label: {
-                    Label("刷新当前点播配置", systemImage: "arrow.clockwise")
+                    Label(L10n.string("configuration.refresh-current", fallback: "Refresh Current Video Provider Configuration"), systemImage: "arrow.clockwise")
                 }
                 .disabled(state.activeConfigurationRecord?.sourceKind != .remote)
             }
@@ -191,8 +195,8 @@ struct ConfigurationView: View {
             if state.configurations.isEmpty {
                 EmptyStateView(
                     systemImage: "doc.badge.plus",
-                    title: "没有点播配置",
-                    message: "这里仅管理点播配置；直播源请到“设置 → 直播源”单独添加。"
+                    title: L10n.string("configuration.empty.title", fallback: "No Video Provider Configurations"),
+                    message: L10n.string("configuration.empty.message", fallback: "Video provider configurations are managed here. Add Live TV sources separately in Settings → Live TV Sources.")
                 )
             } else {
                 List {
@@ -217,15 +221,15 @@ struct ConfigurationView: View {
         )
         .padding(.bottom, 4)
 
-        SettingsSectionTitle("导入与更新")
+        SettingsSectionTitle(L10n.string("configuration.import-update.section", fallback: "Import & Update"))
         SettingsCard {
             SettingsControlRow(
                 icon: "plus",
                 color: .indigo,
-                title: "导入点播配置",
-                subtitle: "通过 URL 或粘贴内容导入点播配置。"
+                title: L10n.string("configuration.import", fallback: "Import Video Provider Configuration"),
+                subtitle: L10n.string("configuration.import.subtitle", fallback: "Import a video provider configuration from a URL or pasted content.")
             ) {
-                Button("导入…") {
+                Button(L10n.string("configuration.import.action", fallback: "Import…")) {
                     showingImport = true
                 }
             }
@@ -235,10 +239,10 @@ struct ConfigurationView: View {
             SettingsControlRow(
                 icon: "person.crop.circle.badge.plus",
                 color: .orange,
-                title: "导入 CatPaw 配置",
-                subtitle: "选择 test0.db.json；账号与挂载只写入受保护的运行 profile"
+                title: L10n.string("configuration.import-catpaw", fallback: "Import CatPaw Configuration"),
+                subtitle: L10n.string("configuration.import-catpaw.subtitle", fallback: "Choose test0.db.json. Accounts and mounts are written only to the protected runtime profile.")
             ) {
-                Button("选择…") {
+                Button(L10n.string("common.choose", fallback: "Choose…")) {
                     showingCatPawProfileImporter = true
                 }
                 .disabled(!state.canImportCatPawProfile)
@@ -249,10 +253,10 @@ struct ConfigurationView: View {
             SettingsControlRow(
                 icon: "folder.fill",
                 color: .blue,
-                title: "选择配置文件",
-                subtitle: "从本机导入 JSON 或文本配置"
+                title: L10n.string("configuration.choose-file.title", fallback: "Choose a Configuration File"),
+                subtitle: L10n.string("configuration.choose-file.subtitle", fallback: "Import JSON or text configuration from this Mac")
             ) {
-                Button("选择…") {
+                Button(L10n.string("common.choose", fallback: "Choose…")) {
                     showingFileImporter = true
                 }
             }
@@ -262,21 +266,21 @@ struct ConfigurationView: View {
             SettingsControlRow(
                 icon: "arrow.clockwise",
                 color: .teal,
-                title: "刷新当前配置",
-                subtitle: "重新下载并载入当前远程配置"
+                title: L10n.string("configuration.refresh.title", fallback: "Refresh Current Configuration"),
+                subtitle: L10n.string("configuration.refresh.subtitle", fallback: "Download and load the current remote configuration again")
             ) {
-                Button("刷新") {
+                Button(L10n.string("common.refresh", fallback: "Refresh")) {
                     Task { await state.refreshActiveConfiguration() }
                 }
                 .disabled(state.activeConfigurationRecord?.sourceKind != .remote)
             }
         }
 
-        SettingsSectionTitle("已导入配置")
+        SettingsSectionTitle(L10n.string("configuration.imported.section", fallback: "Imported Configurations"))
         SettingsCard {
             if state.configurations.isEmpty {
                 Label(
-                    "还没有点播配置，可先从上方导入。",
+                    L10n.string("configuration.imported.empty", fallback: "No video provider configurations yet. Import one above."),
                     systemImage: "doc.badge.plus"
                 )
                 .foregroundColor(.secondary)
@@ -314,8 +318,8 @@ struct ConfigurationView: View {
             try state.exportData(for: record, to: url)
         } catch {
             state.presentedError = UserFacingError(
-                title: "导出失败",
-                message: error.localizedDescription
+                title: L10n.string("configuration.export.failed", fallback: "Export Failed"),
+                message: RuntimeUserFacingMessageMapper.message(for: error)
             )
         }
     }
@@ -348,20 +352,28 @@ private struct ConfigurationRow: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
-                Text(record.updatedAt.formatted(date: .abbreviated, time: .shortened))
+                Text(
+                    record.updatedAt.formatted(
+                        Date.FormatStyle(
+                            date: .abbreviated,
+                            time: .shortened,
+                            locale: L10n.locale
+                        )
+                    )
+                )
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
             Spacer()
             if record.isActive, cardStyle {
-                Text("当前使用")
+                Text(L10n.string("configuration.active", fallback: "Active"))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
             if !record.isActive {
-                Button("启用", action: activate)
+                Button(L10n.string("configuration.activate", fallback: "Activate"), action: activate)
             }
-            Button("导出", action: export)
+            Button(L10n.string("common.export", fallback: "Export"), action: export)
             Button(role: .destructive, action: delete) {
                 Image(systemName: "trash")
             }
@@ -376,21 +388,29 @@ private struct ConfigurationRow: View {
         case .remote:
             guard let value = record.sourceValue,
                   let url = URL(string: value) else {
-                return "远程 URL"
+                return L10n.string("configuration.source.remote-url", fallback: "Remote URL")
             }
             return LogRedactor.url(url)
-        case .localFile: return record.sourceValue ?? "本地文件"
-        case .pasted: return "粘贴内容"
+        case .localFile: return record.sourceValue ?? L10n.string("configuration.source.local-file", fallback: "Local File")
+        case .pasted: return L10n.string("configuration.source.pasted", fallback: "Pasted Content")
         }
     }
 }
 
 private struct ConfigurationImportSheet: View {
     enum Mode: String, CaseIterable, Identifiable {
-        case remote = "URL"
-        case pasted = "粘贴内容"
+        case remote
+        case pasted
 
         var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .remote: return "URL"
+            case .pasted:
+                return L10n.string("configuration.source.pasted", fallback: "Pasted Content")
+            }
+        }
     }
 
     @EnvironmentObject private var state: AppState
@@ -411,20 +431,20 @@ private struct ConfigurationImportSheet: View {
     var body: some View {
         ZStack {
             VStack(alignment: .leading, spacing: 16) {
-                Text("导入点播配置")
+                Text(L10n.string("configuration.import", fallback: "Import Video Provider Configuration"))
                     .font(.title2)
-                Text("支持 JSON、有限 JSONC、图片或 Base64 包装格式；完成后可选择同步其中的直播列表。")
+                Text(L10n.string("configuration.import.formats", fallback: "Supports JSON, limited JSONC, image, and Base64-wrapped formats. You can sync included Live TV lists after import."))
                     .font(.callout)
                     .foregroundColor(.secondary)
-                Picker("方式", selection: $mode) {
+                Picker(L10n.string("common.method", fallback: "Method"), selection: $mode) {
                     ForEach(Mode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
+                        Text(mode.title).tag(mode)
                     }
                 }
                 .pickerStyle(.segmented)
                 .disabled(isSubmitting)
 
-                TextField("点播配置名称（可选）", text: $name)
+                TextField(L10n.string("configuration.name.optional", fallback: "Configuration Name (Optional)"), text: $name)
                     .disabled(isSubmitting)
                 if mode == .remote {
                     ImportURLTextField(
@@ -433,7 +453,7 @@ private struct ConfigurationImportSheet: View {
                     )
                     .frame(height: 22)
                     .disabled(isSubmitting)
-                    Text("普通配置允许 HTTP/HTTPS。远程 Node bundle 建议 HTTPS；最终为 HTTP 时需在 .js.md5 地址后附 #sha256=<64位哈希>，可再附 &source=<源ID>&version=<版本>。")
+                    Text(L10n.string("configuration.remote.security-note", fallback: "Standard configurations allow HTTP and HTTPS. HTTPS is recommended for remote Node bundles. For an HTTP bundle, append #sha256=<64-character hash> to the .js.md5 URL; &source=<source ID>&version=<version> are optional."))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 } else {
@@ -445,7 +465,7 @@ private struct ConfigurationImportSheet: View {
                                 .stroke(Color.secondary.opacity(0.3))
                         )
                         .disabled(isSubmitting)
-                    TextField("相对资源基准 URL（可选）", text: $baseURL)
+                    TextField(L10n.string("configuration.base-url.optional", fallback: "Relative Resource Base URL (Optional)"), text: $baseURL)
                         .disabled(isSubmitting)
                 }
                 Spacer()
@@ -459,7 +479,7 @@ private struct ConfigurationImportSheet: View {
                 }
                 HStack {
                     Spacer()
-                    Button("取消") {
+                    Button(L10n.string(.commonCancel)) {
                         cancelOrDismiss()
                     }
                     .disabled(isCommitInProgress)
@@ -469,10 +489,10 @@ private struct ConfigurationImportSheet: View {
                         if isSubmitting {
                             HStack(spacing: 6) {
                                 AppActivityIndicator(size: .small)
-                                Text("导入中")
+                                Text(L10n.string("configuration.importing", fallback: "Importing"))
                             }
                         } else {
-                            Text("导入")
+                            Text(L10n.string("configuration.import.action-short", fallback: "Import"))
                         }
                     }
                     .keyboardShortcut(.defaultAction)
@@ -495,7 +515,7 @@ private struct ConfigurationImportSheet: View {
             Alert(
                 title: Text(error.title),
                 message: Text(error.message),
-                dismissButton: .default(Text("好"))
+                dismissButton: .default(Text(L10n.string(.commonOK)))
             )
         }
     }
@@ -604,23 +624,27 @@ private struct ConfigurationImportSheet: View {
         _ summary: ConfigurationImportSummary
     ) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            Label("配置导入成功", systemImage: "checkmark.circle.fill")
+            Label(L10n.string("configuration.import.success", fallback: "Configuration Imported"), systemImage: "checkmark.circle.fill")
                 .font(.title2)
                 .foregroundColor(.green)
             Text(summary.configurationName)
                 .font(.headline)
             Text(
-                "已识别 \(summary.siteCount) 个站点："
-                    + "\(summary.javaDexSiteCount) 个需要 Android Bridge，"
-                    + "\(summary.javaScriptSiteCount) 个使用 JavaScript，"
-                    + "\(summary.otherSiteCount) 个使用其他内置能力。"
+                L10n.string(
+                    "configuration.import.summary",
+                    fallback: "%d providers found: %d require Android Bridge, %d use JavaScript, and %d use other built-in capabilities.",
+                    summary.siteCount,
+                    summary.javaDexSiteCount,
+                    summary.javaScriptSiteCount,
+                    summary.otherSiteCount
+                )
             )
             .fixedSize(horizontal: false, vertical: true)
 
             if summary.androidBridgeUnavailable,
                summary.javaDexSiteCount > 0 {
                 Label(
-                    "Android Bridge 当前不可用，\(summary.javaDexSiteCount) 个 Java/Dex 站点已导入但暂时不能运行。",
+                    L10n.string("configuration.import.android-unavailable", fallback: "Android Bridge is unavailable. %d imported Java/Dex providers cannot run yet.", summary.javaDexSiteCount),
                     systemImage: "exclamationmark.triangle.fill"
                 )
                 .foregroundColor(.orange)
@@ -628,22 +652,28 @@ private struct ConfigurationImportSheet: View {
             }
 
             if summary.liveCount > 0 {
-                Text(
-                    "另外发现 \(summary.liveCount) 个直播配置；"
-                        + "其中 \(summary.synchronizableLiveCount) 个可同步到“直播源”。"
-                        + (summary.unsupportedLiveCount > 0
-                            ? " \(summary.unsupportedLiveCount) 个动态直播插件暂不支持同步。"
-                            : "")
-                )
+                Text(L10n.string(
+                    "configuration.import.live-summary",
+                    fallback: "%d Live TV configurations found; %d can be synced to Live TV Sources.%@",
+                    summary.liveCount,
+                    summary.synchronizableLiveCount,
+                    summary.unsupportedLiveCount > 0
+                        ? L10n.string("configuration.import.live-unsupported", fallback: " %d dynamic Live TV plugins cannot be synced yet.", summary.unsupportedLiveCount)
+                        : ""
+                ))
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             }
 
             if let liveSyncResult {
                 Label(
-                    "直播源同步完成：新增 \(liveSyncResult.importedCount) 个，"
-                        + "跳过 \(liveSyncResult.skippedCount) 个，"
-                        + "失败 \(liveSyncResult.failedCount) 个。",
+                    L10n.string(
+                        "configuration.import.live-sync-summary",
+                        fallback: "Live TV sync finished: %d added, %d skipped, %d failed.",
+                        liveSyncResult.importedCount,
+                        liveSyncResult.skippedCount,
+                        liveSyncResult.failedCount
+                    ),
                     systemImage: liveSyncResult.failedCount == 0
                         ? "checkmark.circle"
                         : "exclamationmark.triangle"
@@ -656,7 +686,7 @@ private struct ConfigurationImportSheet: View {
             Spacer()
             HStack {
                 Spacer()
-                Button("完成") {
+                Button(L10n.string("common.done", fallback: "Done")) {
                     isPresented = false
                 }
                 .disabled(liveSyncTask != nil)
@@ -668,10 +698,10 @@ private struct ConfigurationImportSheet: View {
                         if liveSyncTask != nil {
                             HStack(spacing: 6) {
                                 AppActivityIndicator(size: .small)
-                                Text("正在同步")
+                                Text(L10n.string("configuration.syncing", fallback: "Syncing"))
                             }
                         } else {
-                            Text("同步直播源")
+                            Text(L10n.string("configuration.sync-live", fallback: "Sync Live TV Sources"))
                         }
                     }
                     .buttonStyle(.borderedProminent)

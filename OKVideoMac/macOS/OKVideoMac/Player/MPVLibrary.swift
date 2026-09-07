@@ -145,17 +145,18 @@ final class MPVLibrary {
 
     init(bundle: Bundle = .main) throws {
         guard let frameworksURL = bundle.privateFrameworksURL else {
-            throw AppError.playback("应用包没有 Frameworks 目录")
+            throw AppError.playback(L10n.string("player.runtime.frameworks-missing", fallback: "The app bundle has no Frameworks folder."))
         }
         let bridgeURL = frameworksURL.appendingPathComponent(
             "libOKMPVBridge.dylib"
         )
         guard FileManager.default.fileExists(atPath: bridgeURL.path) else {
-            throw AppError.playback("应用包缺少 libOKMPVBridge.dylib")
+            throw AppError.playback(L10n.string("player.runtime.bridge-missing", fallback: "The app bundle is missing libOKMPVBridge.dylib."))
         }
         guard let handle = dlopen(bridgeURL.path, RTLD_NOW | RTLD_LOCAL) else {
-            let message = dlerror().map { String(cString: $0) } ?? "未知错误"
-            throw AppError.playback("无法载入 libmpv 桥：\(message)")
+            let message = dlerror().map { String(cString: $0) }
+                ?? L10n.string("common.unknown-error", fallback: "Unknown error")
+            throw AppError.playback(L10n.string("player.runtime.bridge-load.failed", fallback: "Unable to load the libmpv bridge: %@", message))
         }
         self.handle = handle
         do {
@@ -233,7 +234,7 @@ final class MPVLibrary {
                 handle: handle
             )
             guard nativeEventSize() == MemoryLayout<NativeMPVEvent>.size else {
-                throw AppError.playback("libmpv 桥事件 ABI 与 Swift 不匹配")
+                throw AppError.playback(L10n.string("player.runtime.abi-mismatch", fallback: "The libmpv bridge event ABI does not match Swift."))
             }
         } catch {
             dlclose(handle)
@@ -256,7 +257,11 @@ final class MPVLibrary {
 
     func checked(_ code: Int32, operation: String) throws {
         guard code >= 0 else {
-            throw AppError.playback("\(operation)：\(errorString(for: code))")
+            throw AppError.playback(
+                operation
+                    + L10n.string("common.detail-separator", fallback: ": ")
+                    + errorString(for: code)
+            )
         }
     }
 
@@ -265,7 +270,7 @@ final class MPVLibrary {
         handle: UnsafeMutableRawPointer
     ) throws -> T {
         guard let pointer = dlsym(handle, name) else {
-            throw AppError.playback("libmpv 桥缺少符号 \(name)")
+            throw AppError.playback(L10n.string("player.runtime.symbol-missing", fallback: "The libmpv bridge is missing symbol %@.", name))
         }
         return unsafeBitCast(pointer, to: T.self)
     }

@@ -27,7 +27,7 @@ final class AppParseExecutor: ParseExecutor {
                 headers: headers
             )
         default:
-            throw AppError.unsupported("解析器 \(parser.name) 的 type \(parser.type) 尚未实现")
+            throw AppError.unsupported(L10n.string("parser.type.unsupported", fallback: "Parser %1$@ uses unsupported type %2$lld.", parser.name, parser.type))
         }
     }
 
@@ -38,7 +38,7 @@ final class AppParseExecutor: ParseExecutor {
     ) async throws -> ParsedMedia {
         guard let pageURL = URL(string: parser.url + inputURL),
               ["http", "https"].contains(pageURL.scheme?.lowercased() ?? "") else {
-            throw AppError.parsing("Web 解析器 \(parser.name) 生成了非法 URL")
+            throw AppError.parsing(L10n.string("parser.url.invalid", fallback: "Web parser %@ generated an invalid URL.", parser.name))
         }
         let sniffer = await MainActor.run { WKWebSniffer() }
         let mergedHeaders = headers.merging(HTTPHeaders(parser.headers))

@@ -5,9 +5,26 @@ import OKVideoPersistence
 import SwiftUI
 import UniformTypeIdentifiers
 
+private enum SettingsL10n {
+    static func string(
+        _ key: String,
+        _ fallback: String,
+        _ arguments: CVarArg...
+    ) -> String {
+        AppLocalizer.shared.string(
+            L10nKey(rawValue: key),
+            fallback: fallback,
+            arguments: arguments
+        )
+    }
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var state: AppState
-    @State private var posterCacheSize = "正在计算…"
+    @State private var posterCacheSize = SettingsL10n.string(
+        "settings.cache.calculating",
+        "Calculating…"
+    )
     @State private var pendingBackupImport: PortableBackupPreview?
     @State private var isBackupBusy = false
     @State private var backupOperationMessage: String?
@@ -36,7 +53,9 @@ struct SettingsView: View {
         }
         .navigationTitle("")
         .toolbar {
-            PrimaryPageToolbarLeadingContent(title: "设置")
+            PrimaryPageToolbarLeadingContent(
+                title: SettingsL10n.string("settings.pane.settings.title", "Settings")
+            )
         }
         .task {
             await refreshCacheSize()
@@ -165,10 +184,10 @@ struct SettingsView: View {
 
     private var generalSettings: some View {
         SettingsPage(
-            title: "通用",
-            subtitle: "外观、隐私和历史记录"
+            title: SettingsL10n.string("settings.pane.general.title", "General"),
+            subtitle: SettingsL10n.string("settings.general.subtitle", "Appearance, privacy, and history")
         ) {
-            SettingsSectionTitle("外观")
+            SettingsSectionTitle(SettingsL10n.string("settings.general.appearance.section", "Appearance"))
             SettingsCard {
                 SettingsControlRow(
                     icon: "globe",
@@ -201,11 +220,11 @@ struct SettingsView: View {
                 SettingsControlRow(
                     icon: "paintpalette.fill",
                     color: .blue,
-                    title: "界面主题",
-                    subtitle: "选择浅色、深色或跟随系统"
+                    title: SettingsL10n.string("settings.appearance.theme.title", "Appearance"),
+                    subtitle: SettingsL10n.string("settings.appearance.theme.subtitle", "Choose Light, Dark, or System")
                 ) {
                     Picker(
-                        "界面主题",
+                        SettingsL10n.string("settings.appearance.theme.title", "Appearance"),
                         selection: Binding(
                             get: { state.appTheme },
                             set: { value in
@@ -225,18 +244,18 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsSectionTitle("窗口布局")
+            SettingsSectionTitle(SettingsL10n.string("settings.window.section", "Window Layout"))
             SettingsCard {
                 SettingsControlRow(
                     icon: "macwindow",
                     color: .teal,
-                    title: "主窗口",
-                    subtitle: "自动记住大小和位置；默认约为 1240 × 780"
+                    title: SettingsL10n.string("settings.window.main.title", "Main Window"),
+                    subtitle: SettingsL10n.string("settings.window.main.subtitle", "Automatically remembers its size and position; the default is approximately 1240 × 780")
                 ) {
-                    Button("恢复默认") {
+                    Button(SettingsL10n.string("settings.common.restore-default", "Restore Default")) {
                         state.restoreDefaultWindowLayout(.mainWindow)
                     }
-                    .help("将主窗口恢复到适合当前屏幕的默认大小并居中")
+                    .help(SettingsL10n.string("settings.window.main.restore.help", "Restore the main window to its default size for the current display and center it"))
                 }
 
                 SettingsDivider()
@@ -250,16 +269,16 @@ struct SettingsView: View {
                 )
             }
 
-            SettingsSectionTitle("隐私与记录")
+            SettingsSectionTitle(SettingsL10n.string("settings.general.privacy.section", "Privacy & History"))
             SettingsCard {
                 SettingsControlRow(
                     icon: "eye.slash.fill",
                     color: .indigo,
-                    title: "无痕模式",
-                    subtitle: "开启后不写入新的观看历史"
+                    title: SettingsL10n.string("settings.general.incognito.title", "Private Mode"),
+                    subtitle: SettingsL10n.string("settings.general.incognito.subtitle", "Do not save new watch history while enabled")
                 ) {
                     Toggle(
-                        "无痕模式",
+                        SettingsL10n.string("settings.general.incognito.title", "Private Mode"),
                         isOn: Binding(
                             get: { state.incognitoMode },
                             set: { value in
@@ -276,11 +295,11 @@ struct SettingsView: View {
                 SettingsControlRow(
                     icon: "clock.arrow.circlepath",
                     color: .orange,
-                    title: "历史保留",
-                    subtitle: "自动清理超过期限的观看记录"
+                    title: SettingsL10n.string("settings.general.history-retention.title", "History Retention"),
+                    subtitle: SettingsL10n.string("settings.general.history-retention.subtitle", "Automatically remove watch history older than the selected period")
                 ) {
                     Picker(
-                        "历史保留",
+                        SettingsL10n.string("settings.general.history-retention.title", "History Retention"),
                         selection: Binding(
                             get: { state.historyRetentionDays },
                             set: { value in
@@ -308,8 +327,8 @@ struct SettingsView: View {
 
     private var configurationSettings: some View {
         SettingsPage(
-            title: "点播配置",
-            subtitle: "导入、切换和维护点播配置"
+            title: SettingsL10n.string("settings.pane.providers.title", "Video Providers"),
+            subtitle: SettingsL10n.string("settings.providers.subtitle", "Import, switch, and maintain video provider configurations")
         ) {
             ConfigurationView(embedded: true)
                 .environmentObject(state)
@@ -318,16 +337,16 @@ struct SettingsView: View {
 
     private var playbackSettings: some View {
         SettingsPage(
-            title: "视频",
-            subtitle: "播放器状态和播放选项"
+            title: SettingsL10n.string("settings.pane.playback.title", "Playback"),
+            subtitle: SettingsL10n.string("settings.playback.subtitle", "Player status and playback options")
         ) {
-            SettingsSectionTitle("播放器")
+            SettingsSectionTitle(SettingsL10n.string("settings.playback.section", "Player"))
             SettingsCard {
                 SettingsInfoRow(
                     icon: "play.rectangle.fill",
                     color: .pink,
-                    title: "当前状态",
-                    subtitle: "内嵌 libmpv 播放后端",
+                    title: SettingsL10n.string("settings.playback.status.title", "Current Status"),
+                    subtitle: SettingsL10n.string("settings.playback.backend.detail", "Built-in libmpv playback backend"),
                     value: state.playerStatusDescription
                 )
 
@@ -336,10 +355,10 @@ struct SettingsView: View {
                 SettingsControlRow(
                     icon: "cpu.fill",
                     color: .purple,
-                    title: "硬件解码",
-                    subtitle: "播放时优先使用系统硬件解码能力"
+                    title: SettingsL10n.string("settings.playback.hardware-decoding.title", "Hardware Decoding"),
+                    subtitle: SettingsL10n.string("settings.playback.hardware-decoding.subtitle", "Prefer system hardware decoding during playback")
                 ) {
-                    Button(state.playerHardwareDecoding ? "已开启" : "已关闭") {
+                    Button(state.playerHardwareDecoding ? SettingsL10n.string("settings.common.enabled", "On") : SettingsL10n.string("settings.common.disabled", "Off")) {
                         Task { await state.togglePlayerHardwareDecoding() }
                     }
                 }
@@ -349,11 +368,11 @@ struct SettingsView: View {
                 SettingsControlRow(
                     icon: "forward.end.fill",
                     color: .blue,
-                    title: "自动播放下一集",
-                    subtitle: "当前一集自然播放结束后继续播放下一集"
+                    title: SettingsL10n.string("settings.playback.autoplay.title", "Autoplay Next Episode"),
+                    subtitle: SettingsL10n.string("settings.playback.autoplay.subtitle", "Play the next episode after the current episode ends naturally")
                 ) {
                     Toggle(
-                        "自动播放下一集",
+                        SettingsL10n.string("settings.playback.autoplay.title", "Autoplay Next Episode"),
                         isOn: Binding(
                             get: { state.autoPlayNextEpisode },
                             set: { enabled in
@@ -366,10 +385,10 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsSectionTitle("说明")
+            SettingsSectionTitle(SettingsL10n.string("settings.common.about.section", "About"))
             SettingsCard {
                 Label(
-                    "音轨、字幕、倍速、画面比例和延迟可在播放时通过悬浮控制栏调整。",
+                    SettingsL10n.string("settings.playback.controls.note", "Use the floating controls during playback to adjust audio tracks, subtitles, speed, aspect ratio, and delay."),
                     systemImage: "info.circle"
                 )
                 .foregroundColor(.secondary)
@@ -380,22 +399,22 @@ struct SettingsView: View {
 
     private var cacheSettings: some View {
         SettingsPage(
-            title: "缓存",
-            subtitle: "海报缓存和本地记录管理"
+            title: SettingsL10n.string("settings.pane.cache.title", "Storage"),
+            subtitle: SettingsL10n.string("settings.cache.subtitle", "Manage image cache and local history")
         ) {
-            SettingsSectionTitle("图像缓存")
+            SettingsSectionTitle(SettingsL10n.string("settings.cache.images.section", "Image Cache"))
             SettingsCard {
                 SettingsControlRow(
                     icon: "photo.on.rectangle.angled",
                     color: .orange,
-                    title: "海报缓存",
-                    subtitle: "当前海报与频道 Logo 占用空间"
+                    title: SettingsL10n.string("settings.cache.poster.title", "Poster Cache"),
+                    subtitle: SettingsL10n.string("settings.cache.poster.subtitle", "Space used by current posters and channel logos")
                 ) {
                     HStack(spacing: 12) {
                         Text(posterCacheSize)
                             .foregroundColor(.secondary)
                             .monospacedDigit()
-                        Button("清除") {
+                        Button(SettingsL10n.string("settings.common.clear", "Clear")) {
                             Task {
                                 await state.clearPosterCache()
                                 await refreshCacheSize()
@@ -405,15 +424,15 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsSectionTitle("观看记录")
+            SettingsSectionTitle(SettingsL10n.string("settings.cache.history.section", "Watch History"))
             SettingsCard {
                 SettingsControlRow(
                     icon: "clock.fill",
                     color: .blue,
-                    title: "观看历史",
-                    subtitle: "当前保存 \(state.history.count) 条记录"
+                    title: SettingsL10n.string("settings.cache.history.title", "Watch History"),
+                    subtitle: SettingsL10n.string("settings.cache.history.count", "%d records saved", state.history.count)
                 ) {
-                    Button("清空", role: .destructive) {
+                    Button(SettingsL10n.string("settings.common.clear-all", "Clear All"), role: .destructive) {
                         Task { await state.clearHistory() }
                     }
                     .disabled(state.history.isEmpty)
@@ -424,39 +443,40 @@ struct SettingsView: View {
 
     private var backupSettings: some View {
         SettingsPage(
-            title: "备份与恢复",
-            subtitle: "导出当前点播配置和对应的观看历史"
+            title: SettingsL10n.string("settings.pane.backup.title", "Backup & Restore"),
+            subtitle: SettingsL10n.string("settings.backup.subtitle", "Export the current video provider configuration and its watch history")
         ) {
-            SettingsSectionTitle("当前可备份数据")
+            SettingsSectionTitle(SettingsL10n.string("settings.backup.available.section", "Data Available for Backup"))
             SettingsCard {
                 SettingsInfoRow(
                     icon: "doc.badge.gearshape",
                     color: .indigo,
-                    title: "当前点播配置",
+                    title: SettingsL10n.string("settings.backup.configuration.title", "Current Video Provider Configuration"),
                     subtitle: state.activeConfigurationRecord == nil
-                        ? "尚未启用点播配置"
-                        : "包含最后一次成功加载的配置快照",
-                    value: state.activeConfigurationRecord?.name ?? "未设置"
+                        ? SettingsL10n.string("settings.backup.configuration.none", "No video provider configuration is active")
+                        : SettingsL10n.string("settings.backup.configuration.available-detail", "Includes the last successfully loaded configuration snapshot"),
+                    value: state.activeConfigurationRecord?.name
+                        ?? SettingsL10n.string("settings.common.not-set", "Not Set")
                 )
                 SettingsDivider()
                 SettingsInfoRow(
                     icon: "clock.arrow.circlepath",
                     color: .blue,
-                    title: "对应观看历史",
-                    subtitle: "保留线路、分集、播放位置和观看时间",
-                    value: "\(state.history.count) 条"
+                    title: SettingsL10n.string("settings.backup.history.title", "Related Watch History"),
+                    subtitle: SettingsL10n.string("settings.backup.history.detail", "Includes source, episode, playback position, and watch time"),
+                    value: SettingsL10n.string("settings.common.item-count", "%d items", state.history.count)
                 )
             }
 
-            SettingsSectionTitle("手动备份")
+            SettingsSectionTitle(SettingsL10n.string("settings.backup.manual.section", "Manual Backup"))
             SettingsCard {
                 SettingsControlRow(
                     icon: "square.and.arrow.up.fill",
                     color: .teal,
-                    title: "导出当前配置与历史",
-                    subtitle: "生成经过版本校验的 .okvideobackup 文件"
+                    title: SettingsL10n.string("settings.backup.export.title", "Export Current Configuration and History"),
+                    subtitle: SettingsL10n.string("settings.backup.export.subtitle", "Create a version-validated .okvideobackup file")
                 ) {
-                    Button("导出…") {
+                    Button(SettingsL10n.string("settings.common.export", "Export…")) {
                         exportPortableBackup()
                     }
                     .disabled(
@@ -467,10 +487,10 @@ struct SettingsView: View {
                 SettingsControlRow(
                     icon: "square.and.arrow.down.fill",
                     color: .orange,
-                    title: "从备份恢复",
-                    subtitle: "导入前会预览内容并自动保存当前数据"
+                    title: SettingsL10n.string("settings.backup.restore.title", "Restore from Backup"),
+                    subtitle: SettingsL10n.string("settings.backup.restore.subtitle", "Preview the contents and automatically save current data before import")
                 ) {
-                    Button("选择备份…") {
+                    Button(SettingsL10n.string("settings.backup.choose", "Choose Backup…")) {
                         choosePortableBackup()
                     }
                     .disabled(isBackupBusy)
@@ -478,7 +498,7 @@ struct SettingsView: View {
             }
 
             if isBackupBusy || backupOperationMessage != nil {
-                SettingsSectionTitle("状态")
+                SettingsSectionTitle(SettingsL10n.string("settings.common.status", "Status"))
                 SettingsCard {
                     HStack(spacing: 10) {
                         if isBackupBusy {
@@ -489,7 +509,7 @@ struct SettingsView: View {
                         }
                         Text(
                             isBackupBusy
-                                ? "正在校验和处理备份…"
+                                ? SettingsL10n.string("settings.backup.processing", "Validating and processing the backup…")
                                 : backupOperationMessage ?? ""
                         )
                         .foregroundColor(.secondary)
@@ -499,10 +519,10 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsSectionTitle("安全说明")
+            SettingsSectionTitle(SettingsL10n.string("settings.backup.security.section", "Security Notes"))
             SettingsCard {
                 Label(
-                    "备份不会额外导出钥匙串、网盘账号状态、二维码、临时播放地址或 Android 虚拟机数据。配置原文会随备份保存，可能包含私人源地址；文件未加密，请妥善保管。恢复后如网盘授权不可用，播放器会重新请求授权。",
+                    SettingsL10n.string("settings.backup.security.message", "Backups do not export Keychain items, cloud account status, QR codes, temporary playback URLs, or Android virtual machine data. Original configuration text is included and may contain private provider URLs. The file is not encrypted, so store it securely. If cloud authorization is no longer valid after a restore, the player will request it again."),
                     systemImage: "lock.shield.fill"
                 )
                 .foregroundColor(.secondary)
@@ -513,15 +533,15 @@ struct SettingsView: View {
 
     private var advancedSettings: some View {
         SettingsPage(
-            title: "高级",
-            subtitle: "运行信息、诊断与兼容范围"
+            title: SettingsL10n.string("settings.pane.advanced.title", "Advanced"),
+            subtitle: SettingsL10n.string("settings.advanced.subtitle", "Runtime information, diagnostics, and compatibility")
         ) {
-            SettingsSectionTitle("应用信息")
+            SettingsSectionTitle(SettingsL10n.string("settings.advanced.app-info.section", "App Information"))
             SettingsCard {
                 SettingsInfoRow(
                     icon: "app.badge",
                     color: .green,
-                    title: "版本",
+                    title: SettingsL10n.string("settings.advanced.version.title", "Version"),
                     subtitle: "OKVideoMac",
                     value: state.versionDescription
                 )
@@ -529,7 +549,7 @@ struct SettingsView: View {
                 SettingsInfoRow(
                     icon: "desktopcomputer",
                     color: .blue,
-                    title: "运行环境",
+                    title: SettingsL10n.string("settings.advanced.environment.title", "Environment"),
                     subtitle: state.systemDescription,
                     value: state.architectureDescription
                 )
@@ -537,34 +557,35 @@ struct SettingsView: View {
                 SettingsInfoRow(
                     icon: "square.stack.3d.up.fill",
                     color: .indigo,
-                    title: "当前配置",
+                    title: SettingsL10n.string("settings.common.current-configuration", "Current Configuration"),
                     subtitle: state.activeConfigurationRecord == nil
-                        ? "尚未导入点播配置"
-                        : "\(state.visibleSites.count) 个可见站点",
-                    value: state.activeConfigurationRecord?.name ?? "未设置"
+                        ? SettingsL10n.string("settings.advanced.configuration.none", "No video provider configuration has been imported")
+                        : SettingsL10n.string("settings.advanced.visible-provider-count", "%d visible providers", state.visibleSites.count),
+                    value: state.activeConfigurationRecord?.name
+                        ?? SettingsL10n.string("settings.common.not-set", "Not Set")
                 )
             }
 
-            SettingsSectionTitle("诊断")
+            SettingsSectionTitle(SettingsL10n.string("settings.diagnostics.section", "Diagnostics"))
             SettingsCard {
                 SettingsControlRow(
                     icon: "doc.text.magnifyingglass",
                     color: .teal,
-                    title: "导出诊断信息",
-                    subtitle: "导出经过脱敏的运行状态与站点能力"
+                    title: SettingsL10n.string("settings.diagnostics.title", "Export Diagnostics"),
+                    subtitle: SettingsL10n.string("settings.diagnostics.subtitle", "Export redacted runtime status and provider capabilities")
                 ) {
-                    Button("导出…") {
+                    Button(SettingsL10n.string("settings.common.export", "Export…")) {
                         exportDiagnostics()
                     }
                 }
             }
 
-            SettingsSectionTitle("Android 兼容模块")
+            SettingsSectionTitle(SettingsL10n.string("settings.android.section.title", "Android Compatibility"))
             SettingsCard {
                 SettingsControlRow(
                     icon: "arrow.triangle.branch",
                     color: .accentColor,
-                    title: "当前运行环境",
+                    title: SettingsL10n.string("settings.android.current-runtime.title", "Current Runtime"),
                     subtitle: runtimeModeDetail
                 ) {
                     Text(state.androidRuntimeModeSnapshot.mode.userFacingName)
@@ -576,7 +597,7 @@ struct SettingsView: View {
                 SettingsControlRow(
                     icon: managedRuntimeIcon,
                     color: managedRuntimeColor,
-                    title: "OKVideoMac 自动管理（推荐）",
+                    title: SettingsL10n.string("settings.android.mode.managed.title", "Managed by OKVideoMac (Recommended)"),
                     subtitle: managedRuntimeDetail
                 ) {
                     HStack(spacing: 8) {
@@ -614,13 +635,13 @@ struct SettingsView: View {
                 SettingsControlRow(
                     icon: externalRuntimeIcon,
                     color: externalRuntimeColor,
-                    title: "现有 Android SDK",
+                    title: SettingsL10n.string("settings.android.external.title", "Existing Android SDK"),
                     subtitle: externalRuntimeDetail
                 ) {
                     HStack(spacing: 8) {
                         if state.androidRuntimeModeSnapshot.mode != .external,
                            state.androidRuntimeModeSnapshot.externalSDKRoot != nil {
-                            Button("使用") {
+                            Button(SettingsL10n.string("settings.common.use", "Use")) {
                                 Task {
                                     await state
                                         .useConfiguredExternalAndroidRuntime()
@@ -665,12 +686,12 @@ struct SettingsView: View {
                             }
                         }
 
-                        Button("检查") {
+                        Button(SettingsL10n.string("settings.common.check", "Check")) {
                             Task { await state.refreshAndroidRuntimeStatus() }
                         }
                         .disabled(state.isAndroidRuntimeBusy)
 
-                        Button("修复 Bridge") {
+                        Button(SettingsL10n.string("settings.android.action.repair-bridge", "Repair Bridge")) {
                             Task { await state.repairAndroidRuntime() }
                         }
                         .disabled(
@@ -678,7 +699,7 @@ struct SettingsView: View {
                                 || state.androidRuntimeStatus.phase == .unavailable
                         )
 
-                        Button("修复 Android Runtime…", role: .destructive) {
+                        Button(SettingsL10n.string("settings.android.action.rebuild-runtime", "Repair Android Runtime…"), role: .destructive) {
                             Task { await state.rebuildAndroidRuntime() }
                         }
                         .disabled(
@@ -686,12 +707,12 @@ struct SettingsView: View {
                         )
 
                         if state.androidRuntimeStatus.isRunning {
-                            Button("停止", role: .destructive) {
+                            Button(SettingsL10n.string("settings.common.stop", "Stop"), role: .destructive) {
                                 Task { await state.stopAndroidRuntime() }
                             }
                             .disabled(state.isAndroidRuntimeBusy)
                         } else {
-                            Button("启动") {
+                            Button(SettingsL10n.string("settings.common.start", "Start")) {
                                 Task { await state.startAndroidRuntime() }
                             }
                             .buttonStyle(.borderedProminent)
@@ -707,7 +728,7 @@ struct SettingsView: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     Label(
-                        "该模块仅用于需要 Android Java/Dex 运行环境的点播站点；普通 API 站点和 JavaScript 站点不需要启动。",
+                        SettingsL10n.string("settings.android.scope.note", "This component is only used by video providers that require an Android Java/Dex runtime. Standard API and JavaScript providers do not start it."),
                         systemImage: "info.circle"
                     )
                     Text(
@@ -719,14 +740,14 @@ struct SettingsView: View {
                 .padding(16)
             }
 
-            SettingsSectionTitle("安全与范围")
+            SettingsSectionTitle(SettingsL10n.string("settings.advanced.security.section", "Security & Scope"))
             SettingsCard {
                 VStack(alignment: .leading, spacing: 8) {
                     Label(
-                        "应用不内置影视源、账号、Cookie、解析地址或 DRM 密钥。",
+                        SettingsL10n.string("settings.advanced.security.no-content", "The app does not include media providers, accounts, cookies, resolver URLs, or DRM keys."),
                         systemImage: "lock.shield"
                     )
-                    Text("最低系统为 macOS 12.0；DRM、TVBus 和 ForceTech 当前不执行。")
+                    Text(SettingsL10n.string("settings.advanced.security.compatibility", "The minimum supported system is macOS 12.0. DRM, TVBus, and ForceTech are not executed."))
                         .foregroundColor(.secondary)
                 }
                 .padding(18)
@@ -761,25 +782,26 @@ struct SettingsView: View {
     private var runtimeModeDetail: String {
         switch state.androidRuntimeModeSnapshot.mode {
         case .managed:
-            return "Android 内容只使用经过校验的 OKVideoMac 托管组件"
+            return SettingsL10n.string("settings.android.mode.managed.detail", "Android content uses only verified components managed by OKVideoMac")
         case .external:
-            return "Android 内容只使用下方明确选择的 SDK；不会触发托管安装"
+            return SettingsL10n.string("settings.android.mode.external.detail", "Android content uses only the SDK selected below and never triggers Managed Runtime installation")
         }
     }
 
     private var externalRuntimeDetail: String {
         guard let root = state.androidRuntimeModeSnapshot.externalSDKRoot else {
-            return "未配置；高级用户可选择已经安装的完整 Android SDK"
+            return SettingsL10n.string("settings.android.external.not-configured", "Not configured. Advanced users can select an installed, complete Android SDK.")
         }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let displayPath = root.path.hasPrefix(home + "/")
             ? "~/" + root.path.dropFirst(home.count + 1)
             : root.path
         if state.androidRuntimeModeSnapshot.mode != .external {
-            return "已保存：\(displayPath)；切换前将重新验证"
+            return SettingsL10n.string("settings.android.external.saved", "Saved: %@. It will be validated again before switching.", displayPath)
         }
         let stateDetail = state.androidRuntimeModeSnapshot.externalValidation?
-            .userFacingStatus ?? "正在检查现有 Android SDK"
+            .userFacingStatus
+            ?? SettingsL10n.string("settings.android.external.checking", "Checking the existing Android SDK")
         return "\(stateDetail) · \(displayPath)"
     }
 
@@ -806,13 +828,13 @@ struct SettingsView: View {
 
     private var externalRuntimeButtonTitle: String {
         state.androidRuntimeModeSnapshot.externalSDKRoot == nil
-            ? "选择…"
-            : "更改…"
+            ? SettingsL10n.string("settings.common.choose", "Choose…")
+            : SettingsL10n.string("settings.common.change", "Change…")
     }
 
     private var managedRuntimeButtonTitle: String {
         if state.androidRuntimeModeSnapshot.mode != .managed {
-            return "改用…"
+            return SettingsL10n.string("settings.android.action.switch-to", "Switch To…")
         }
         return managedRuntimeActionTitle
     }
@@ -820,40 +842,41 @@ struct SettingsView: View {
     private var runtimeIsolationDetail: String {
         switch state.androidRuntimeModeSnapshot.mode {
         case .managed:
-            return "所需文件按需下载到 OKVideoMac 专用目录；不会读取或借用外部 Android 工具。"
+            return SettingsL10n.string("settings.android.isolation.managed", "Required files are downloaded on demand to an OKVideoMac private directory. External Android tools are never read or reused.")
         case .external:
-            return "ADB 与 Emulator 固定来自所选 SDK；仍使用 OKVideoMac 私有 ADB、密钥和专用 AVD。"
+            return SettingsL10n.string("settings.android.isolation.external", "ADB and Emulator always come from the selected SDK, while OKVideoMac continues to use its private ADB server, keys, and dedicated AVD.")
         }
     }
 
     private var managedRuntimeTitle: String {
         switch state.managedRuntimeInstallationState {
-        case .ready: return "Android 兼容组件已安装"
-        case .updateAvailable: return "Android 兼容组件可更新"
-        case .failed, .damaged: return "Android 兼容组件需要修复"
-        case .incompatible: return "Android 兼容组件不兼容"
+        case .ready: return SettingsL10n.string("settings.android.managed.installed", "Android compatibility component installed")
+        case .updateAvailable: return SettingsL10n.string("settings.android.managed.update-available", "Android compatibility component update available")
+        case .failed, .damaged: return SettingsL10n.string("settings.android.managed.needs-repair", "Android compatibility component needs repair")
+        case .incompatible: return SettingsL10n.string("settings.android.managed.incompatible", "Android compatibility component is incompatible")
         case .notInstalled, .available, .cancelled:
-            return "Android 兼容组件未安装"
-        default: return "正在处理 Android 兼容组件"
+            return SettingsL10n.string("settings.android.managed.not-installed", "Android compatibility component not installed")
+        default: return SettingsL10n.string("settings.android.managed.processing", "Processing the Android compatibility component")
         }
     }
 
     private var managedRuntimeDetail: String {
         switch state.managedRuntimeInstallationState {
         case .ready:
-            return "受 OKVideoMac 独立管理，仅在 Dex 内容需要时启动"
+            return SettingsL10n.string("settings.android.managed.ready-detail", "Managed independently by OKVideoMac and started only when Dex content needs it")
         case .updateAvailable:
-            return "可安装新环境；当前环境会保留到新版本验证完成"
+            return SettingsL10n.string("settings.android.managed.update-detail", "A new runtime can be installed. The current runtime remains active until the new version is validated.")
         case .failed(let failure, _), .damaged(let failure, _),
              .incompatible(let failure):
             return ManagedRuntimeFailurePresentationMapper.presentation(
                 for: failure
             ).message
         case .downloading(let detail):
-            return detail.componentID.map { "正在下载：\($0)" }
-                ?? "正在下载"
+            return detail.componentID.map {
+                SettingsL10n.string("settings.android.managed.downloading-component", "Downloading: %@", $0)
+            } ?? SettingsL10n.string("settings.android.managed.downloading", "Downloading")
         default:
-            return "首次使用需要 Android 的内容时会自动提示"
+            return SettingsL10n.string("settings.android.managed.on-demand", "You will be prompted the first time content requires Android")
         }
     }
 
@@ -881,10 +904,10 @@ struct SettingsView: View {
 
     private var managedRuntimeActionTitle: String {
         switch state.managedRuntimeInstallationState {
-        case .ready: return "详情"
-        case .updateAvailable: return "更新…"
-        case .failed, .damaged, .incompatible: return "修复…"
-        default: return "安装…"
+        case .ready: return SettingsL10n.string("settings.common.details", "Details")
+        case .updateAvailable: return SettingsL10n.string("settings.common.update", "Update…")
+        case .failed, .damaged, .incompatible: return SettingsL10n.string("settings.common.repair", "Repair…")
+        default: return SettingsL10n.string("settings.common.install", "Install…")
         }
     }
 
@@ -942,8 +965,8 @@ struct SettingsView: View {
                 try await state.exportDiagnostics(to: url)
             } catch {
                 state.presentedError = UserFacingError(
-                    title: "诊断导出失败",
-                    message: error.localizedDescription
+                    title: L10n.string("diagnostics.export.failed.title", fallback: "Diagnostics Export Failed"),
+                    message: RuntimeUserFacingMessageMapper.message(for: error)
                 )
             }
         }
@@ -962,11 +985,16 @@ struct SettingsView: View {
             defer { isBackupBusy = false }
             do {
                 let preview = try await state.exportPortableBackup(to: url)
-                backupOperationMessage = "已导出“\(preview.configurationName)”和 \(preview.historyCount) 条历史记录。"
+                backupOperationMessage = SettingsL10n.string(
+                    "settings.backup.export.success",
+                    "Exported “%@” with %d history items.",
+                    preview.configurationName,
+                    preview.historyCount
+                )
             } catch {
                 state.presentedError = UserFacingError(
-                    title: "备份导出失败",
-                    message: error.localizedDescription
+                    title: SettingsL10n.string("settings.backup.export.failed", "Backup Export Failed"),
+                    message: RuntimeUserFacingMessageMapper.message(for: error)
                 )
             }
         }
@@ -978,7 +1006,7 @@ struct SettingsView: View {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.prompt = "检查备份"
+        panel.prompt = SettingsL10n.string("settings.backup.validate", "Validate Backup")
         guard panel.runModal() == .OK, let url = panel.url else { return }
         isBackupBusy = true
         backupOperationMessage = nil
@@ -990,8 +1018,8 @@ struct SettingsView: View {
                 )
             } catch {
                 state.presentedError = UserFacingError(
-                    title: "无法读取备份",
-                    message: error.localizedDescription
+                    title: SettingsL10n.string("settings.backup.read.failed", "Unable to Read Backup"),
+                    message: RuntimeUserFacingMessageMapper.message(for: error)
                 )
             }
         }
@@ -1006,12 +1034,19 @@ struct SettingsView: View {
                 let summary = try await state.importPortableBackup(from: url)
                 let safetyText = summary.safetyBackupURL == nil
                     ? ""
-                    : " 导入前的数据已保存为安全备份。"
-                backupOperationMessage = "已恢复“\(summary.configurationName)”，检查 \(summary.historyCount) 条历史，写入或更新 \(summary.changedHistoryCount) 条。\(safetyText)"
+                    : SettingsL10n.string("settings.backup.restore.safety-suffix", " Your previous data was saved as a safety backup.")
+                backupOperationMessage = SettingsL10n.string(
+                    "settings.backup.restore.success",
+                    "Restored “%@”. Checked %d history items and added or updated %d.%@",
+                    summary.configurationName,
+                    summary.historyCount,
+                    summary.changedHistoryCount,
+                    safetyText
+                )
             } catch {
                 state.presentedError = UserFacingError(
-                    title: "备份恢复失败",
-                    message: error.localizedDescription
+                    title: SettingsL10n.string("settings.backup.restore.failed", "Backup Restore Failed"),
+                    message: RuntimeUserFacingMessageMapper.message(for: error)
                 )
             }
         }
@@ -1042,28 +1077,34 @@ private struct PortableBackupImportPreviewSheet: View {
                     .font(.system(size: 28))
                     .foregroundColor(.accentColor)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("确认恢复备份")
+                    Text(SettingsL10n.string("settings.backup.preview.title", "Restore This Backup?"))
                         .font(.title2.bold())
-                    Text("文件已经通过格式和完整性校验")
+                    Text(SettingsL10n.string("settings.backup.preview.verified", "The file passed format and integrity validation"))
                         .foregroundColor(.secondary)
                 }
             }
 
             VStack(spacing: 0) {
-                previewRow("点播配置", value: preview.configurationName)
-                Divider()
-                previewRow("观看历史", value: "\(preview.historyCount) 条")
+                previewRow(SettingsL10n.string("settings.backup.preview.configuration", "Video Provider Configuration"), value: preview.configurationName)
                 Divider()
                 previewRow(
-                    "导出版本",
+                    SettingsL10n.string("settings.backup.preview.history", "Watch History"),
+                    value: SettingsL10n.string("settings.common.item-count", "%d items", preview.historyCount)
+                )
+                Divider()
+                previewRow(
+                    SettingsL10n.string("settings.backup.preview.version", "Export Version"),
                     value: "\(preview.appVersion) (\(preview.appBuild))"
                 )
                 Divider()
                 previewRow(
-                    "导出时间",
+                    SettingsL10n.string("settings.backup.preview.exported-at", "Exported"),
                     value: preview.createdAt.formatted(
-                        date: .abbreviated,
-                        time: .shortened
+                        Date.FormatStyle(
+                            date: .abbreviated,
+                            time: .shortened,
+                            locale: L10n.locale
+                        )
                     )
                 )
             }
@@ -1072,7 +1113,7 @@ private struct PortableBackupImportPreviewSheet: View {
                     .fill(Color.primary.opacity(0.05))
             )
 
-            Text("同一条历史会保留观看时间更新的记录；导入前会自动备份当前配置和历史。网盘账号授权不会被覆盖。")
+            Text(SettingsL10n.string("settings.backup.restore.merge-note", "When the same history item exists twice, the record with the newer watch time is kept. Current providers and history are backed up before import. Cloud account authorization is never overwritten."))
                 .font(.callout)
                 .foregroundColor(.secondary)
 
@@ -1080,9 +1121,9 @@ private struct PortableBackupImportPreviewSheet: View {
 
             HStack {
                 Spacer()
-                Button("取消", action: cancel)
+                Button(SettingsL10n.string("settings.common.cancel", "Cancel"), action: cancel)
                     .keyboardShortcut(.cancelAction)
-                Button("导入并合并", action: confirm)
+                Button(SettingsL10n.string("settings.backup.restore.confirm", "Import and Merge"), action: confirm)
                     .keyboardShortcut(.defaultAction)
             }
         }
@@ -1123,25 +1164,26 @@ private struct SearchSettingsPane: View {
 
     var body: some View {
         SettingsPage(
-            title: "搜索",
-            subtitle: "管理当前点播配置默认搜索的站点范围"
+            title: SettingsL10n.string("settings.pane.search.title", "Search"),
+            subtitle: SettingsL10n.string("settings.search.subtitle", "Manage the default provider scope for the current video configuration")
         ) {
-            SettingsSectionTitle("当前配置")
+            SettingsSectionTitle(SettingsL10n.string("settings.common.current-configuration", "Current Configuration"))
             SettingsCard {
                 SettingsControlRow(
                     icon: "doc.badge.gearshape",
                     color: .indigo,
-                    title: state.activeConfigurationRecord?.name ?? "未设置点播配置",
+                    title: state.activeConfigurationRecord?.name
+                        ?? SettingsL10n.string("settings.providers.none", "No Video Provider Configuration"),
                     subtitle: state.activeConfigurationRecord == nil
-                        ? "请先导入并启用一个点播配置"
-                        : "搜索范围按配置分别保存，互不影响"
+                        ? SettingsL10n.string("settings.providers.import-first", "Import and enable a video provider configuration first")
+                        : SettingsL10n.string("settings.search.configuration.saved-separately", "Search scope is saved separately for each configuration")
                 ) {
                     Text(state.searchScopeSummary)
                         .foregroundColor(.secondary)
                 }
             }
 
-            SettingsSectionTitle("默认搜索范围")
+            SettingsSectionTitle(SettingsL10n.string("settings.search.default-scope.section", "Default Search Scope"))
             SettingsCard {
                 VStack(alignment: .leading, spacing: 14) {
                     SearchScopeEditorContent(
@@ -1157,22 +1199,22 @@ private struct SearchSettingsPane: View {
                     HStack {
                         Text(
                             state.isSearching
-                                ? "保存后从下一次搜索生效，当前搜索范围保持不变。"
-                                : "首页和搜索页都会使用此默认范围。"
+                                ? SettingsL10n.string("settings.search.pending-change", "Changes take effect with the next search. The current search scope remains unchanged.")
+                                : SettingsL10n.string("settings.search.default-scope.note", "Home and Search both use this default scope.")
                         )
                         .font(.caption)
                         .foregroundColor(.secondary)
                         Spacer()
                         if !hasValidSelection {
-                            Text("至少选择一个可用站点")
+                            Text(SettingsL10n.string("settings.search.minimum-one", "Select at least one available provider"))
                                 .font(.caption)
                                 .foregroundColor(.red)
                         }
-                        Button("恢复全部站点") {
+                        Button(SettingsL10n.string("settings.search.restore-all", "Restore All Providers")) {
                             mode = .all
                             selectedKeys = []
                         }
-                        Button("保存") {
+                        Button(SettingsL10n.string("settings.common.save", "Save")) {
                             isSaving = true
                             Task {
                                 _ = await state.saveSearchSiteScope(draft)
@@ -1191,15 +1233,15 @@ private struct SearchSettingsPane: View {
                 .padding(16)
             }
 
-            SettingsSectionTitle("说明")
+            SettingsSectionTitle(SettingsL10n.string("settings.common.about.section", "About"))
             SettingsCard {
                 VStack(alignment: .leading, spacing: 7) {
                     Label(
-                        "搜索范围决定会向哪些站点发起请求。",
+                        SettingsL10n.string("settings.search.note.scope", "The search scope determines which providers receive requests."),
                         systemImage: "network"
                     )
                     Label(
-                        "搜索结果页的“结果来源”只过滤已有结果，不产生新的网络请求。",
+                        SettingsL10n.string("settings.search.note.result-filter", "The Result Providers control only filters existing results and does not make new network requests."),
                         systemImage: "line.3.horizontal.decrease.circle"
                     )
                 }
@@ -1230,10 +1272,10 @@ private struct LiveSourceSettingsPane: View {
 
     var body: some View {
         SettingsPage(
-            title: "直播源",
-            subtitle: "导入、刷新和维护直播频道列表"
+            title: SettingsL10n.string("settings.pane.live.title", "Live TV Sources"),
+            subtitle: SettingsL10n.string("settings.live.subtitle", "Import, refresh, and maintain live TV channel lists")
         ) {
-            SettingsSectionTitle("来源管理")
+            SettingsSectionTitle(SettingsL10n.string("settings.live.manage.section", "Source Management"))
 
             if state.liveSources.isEmpty {
                 SettingsCard {
@@ -1241,9 +1283,9 @@ private struct LiveSourceSettingsPane: View {
                         Image(systemName: "dot.radiowaves.left.and.right")
                             .font(.system(size: 30))
                             .foregroundColor(.secondary)
-                        Text("尚未添加直播源")
+                        Text(SettingsL10n.string("settings.live.empty.title", "No Live TV Sources"))
                             .font(.headline)
-                        Text("支持远程 URL、本地 M3U/M3U8/TXT/JSON 文件和粘贴内容。")
+                        Text(SettingsL10n.string("settings.live.empty.subtitle", "Supports remote URLs, local M3U/M3U8/TXT/JSON files, and pasted content."))
                             .font(.callout)
                             .foregroundColor(.secondary)
                     }
@@ -1262,15 +1304,15 @@ private struct LiveSourceSettingsPane: View {
                 }
             }
 
-            SettingsSectionTitle("添加来源")
+            SettingsSectionTitle(SettingsL10n.string("settings.live.add.section", "Add a Source"))
             SettingsCard {
                 SettingsControlRow(
                     icon: "link.badge.plus",
                     color: .teal,
-                    title: "通过 URL 或粘贴内容添加",
-                    subtitle: "远程来源添加后可随时重新下载并刷新"
+                    title: SettingsL10n.string("settings.live.add-url.title", "Add from URL or Pasted Content"),
+                    subtitle: SettingsL10n.string("settings.live.add-url.subtitle", "Remote sources can be downloaded and refreshed again at any time")
                 ) {
-                    Button("添加…") {
+                    Button(SettingsL10n.string("settings.common.add", "Add…")) {
                         showingImport = true
                     }
                 }
@@ -1278,19 +1320,19 @@ private struct LiveSourceSettingsPane: View {
                 SettingsControlRow(
                     icon: "folder.fill.badge.plus",
                     color: .blue,
-                    title: "导入本地直播文件",
-                    subtitle: "支持 M3U、M3U8、TXT 和 JSON"
+                    title: SettingsL10n.string("settings.live.import-file.title", "Import Local Live TV File"),
+                    subtitle: SettingsL10n.string("settings.live.import-file.subtitle", "Supports M3U, M3U8, TXT, and JSON")
                 ) {
-                    Button("选择文件…") {
+                    Button(SettingsL10n.string("settings.common.choose-file", "Choose File…")) {
                         showingFileImporter = true
                     }
                 }
             }
 
-            SettingsSectionTitle("说明")
+            SettingsSectionTitle(SettingsL10n.string("settings.common.about.section", "About"))
             SettingsCard {
                 Label(
-                    "直播页只负责浏览和播放频道；直播源的增删与更新统一在这里完成。",
+                    SettingsL10n.string("settings.live.management.note", "Use the Live TV page to browse and play channels. Add, remove, and update sources here."),
                     systemImage: "info.circle"
                 )
                 .foregroundColor(.secondary)
@@ -1318,16 +1360,16 @@ private struct LiveSourceSettingsPane: View {
                 }
             case .failure(let error):
                 state.presentedError = UserFacingError(
-                    title: "无法选择直播文件",
-                    message: error.localizedDescription
+                    title: SettingsL10n.string("settings.live.file-selection.failed", "Unable to Select Live TV File"),
+                    message: RuntimeUserFacingMessageMapper.message(for: error)
                 )
             }
         }
         .alert(item: $pendingDelete) { source in
             Alert(
-                title: Text("删除“\(source.name)”？"),
-                message: Text("只删除这条直播源，不会影响点播配置、收藏或历史。"),
-                primaryButton: .destructive(Text("删除")) {
+                title: Text(SettingsL10n.string("settings.live.delete.title", "Delete “%@”?", source.name)),
+                message: Text(SettingsL10n.string("settings.live.delete.message", "Only this live TV source will be removed. Video providers, favorites, and history are unaffected.")),
+                primaryButton: .destructive(Text(SettingsL10n.string("settings.common.delete", "Delete"))) {
                     Task { await state.deleteLiveSource(source.id) }
                 },
                 secondaryButton: .cancel()
@@ -1353,7 +1395,17 @@ private struct LiveSourceSettingsPane: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
-                Text("更新于 \(source.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+                Text(SettingsL10n.string(
+                    "settings.live.updated-at",
+                    "Updated %@",
+                    source.updatedAt.formatted(
+                        Date.FormatStyle(
+                            date: .abbreviated,
+                            time: .shortened,
+                            locale: L10n.locale
+                        )
+                    )
+                ))
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 if let status = state.liveSourceValidationStatuses[source.id] {
@@ -1369,7 +1421,7 @@ private struct LiveSourceSettingsPane: View {
                 }
                 .buttonStyle(.borderless)
                 .disabled(state.isLoading)
-                .help("刷新直播源")
+                .help(SettingsL10n.string("settings.live.refresh.help", "Refresh Live TV Source"))
             }
             Button(role: .destructive) {
                 pendingDelete = source
@@ -1377,7 +1429,7 @@ private struct LiveSourceSettingsPane: View {
                 Image(systemName: "trash")
             }
             .buttonStyle(.borderless)
-            .help("删除直播源")
+            .help(SettingsL10n.string("settings.live.delete.help", "Delete Live TV Source"))
         }
         .padding(16)
     }
@@ -1390,15 +1442,15 @@ private struct LiveSourceSettingsPane: View {
         case .checking(let completed, let total):
             HStack(spacing: 6) {
                 AppActivityIndicator(size: .mini)
-                Text("正在后台检测频道 \(completed)/\(total)")
+                Text(SettingsL10n.string("settings.live.health-check.progress", "Checking channels in the background: %d/%d", completed, total))
             }
             .font(.caption2)
             .foregroundColor(.secondary)
         case .completed(let removed, let total):
             Label(
                 removed == 0
-                    ? "已检测 \(total) 个频道，未发现明确失效项"
-                    : "已检测 \(total) 个频道，清理 \(removed) 个（可恢复）",
+                    ? SettingsL10n.string("settings.live.health-check.clean", "Checked %d channels; no confirmed failures found", total)
+                    : SettingsL10n.string("settings.live.health-check.removed", "Checked %d channels; removed %d recoverable failures", total, removed),
                 systemImage: removed == 0
                     ? "checkmark.circle"
                     : "trash.slash"
@@ -1406,7 +1458,7 @@ private struct LiveSourceSettingsPane: View {
             .font(.caption2)
             .foregroundColor(.secondary)
         case .failed(let message):
-            Label("后台检测未完成：\(message)", systemImage: "exclamationmark.triangle")
+            Label(SettingsL10n.string("settings.live.health-check.failed", "Background check did not finish: %@", message), systemImage: "exclamationmark.triangle")
                 .font(.caption2)
                 .foregroundColor(.orange)
                 .lineLimit(2)
@@ -1418,13 +1470,14 @@ private struct LiveSourceSettingsPane: View {
         case .remote:
             guard let value = source.sourceValue,
                   let url = URL(string: value) else {
-                return "远程 URL"
+                return SettingsL10n.string("settings.live.source.remote-url", "Remote URL")
             }
             return LogRedactor.url(url)
         case .localFile:
-            return source.sourceValue ?? "本地文件"
+            return source.sourceValue
+                ?? SettingsL10n.string("settings.live.source.local-file", "Local File")
         case .pasted:
-            return "粘贴内容"
+            return SettingsL10n.string("settings.live.source.pasted", "Pasted Content")
         }
     }
 
@@ -1449,12 +1502,12 @@ private struct PlayerWindowSettingsControl: View {
         SettingsControlRow(
             icon: "play.rectangle.on.rectangle.fill",
             color: .purple,
-            title: "播放器窗口",
+            title: SettingsL10n.string("settings.player-window.title", "Player Window"),
             subtitle: subtitle
         ) {
             HStack(spacing: 10) {
                 Picker(
-                    "播放器窗口模式",
+                    SettingsL10n.string("settings.player-window.mode.label", "Player Window Mode"),
                     selection: Binding(
                         get: { preferences.preference.mode },
                         set: setMode
@@ -1468,8 +1521,8 @@ private struct PlayerWindowSettingsControl: View {
                 .pickerStyle(.segmented)
                 .frame(width: 250)
 
-                Button("恢复默认", action: restoreDefault)
-                    .help("清除播放器窗口的大小、位置和模式记录")
+                Button(SettingsL10n.string("settings.common.restore-default", "Restore Default"), action: restoreDefault)
+                    .help(SettingsL10n.string("settings.player-window.restore.help", "Clear the saved player window size, position, and mode"))
             }
         }
     }
@@ -1477,9 +1530,9 @@ private struct PlayerWindowSettingsControl: View {
     private var subtitle: String {
         switch preferences.preference.mode {
         case .automaticAspect:
-            return "记住窗口位置和观看尺度；高度会随视频比例调整"
+            return SettingsL10n.string("settings.player-window.automatic.subtitle", "Remember the window position and viewing scale; adjust height to the video aspect ratio")
         case .fixedFrame:
-            return "精确恢复上次的宽度和高度；不同比例可能出现黑边"
+            return SettingsL10n.string("settings.player-window.fixed.subtitle", "Restore the exact previous width and height; different aspect ratios may show letterboxing")
         }
     }
 }
@@ -1487,27 +1540,27 @@ private struct PlayerWindowSettingsControl: View {
 private extension SettingsPane {
     var title: String {
         switch self {
-        case .general: return "通用"
-        case .configurations: return "点播配置"
-        case .search: return "搜索"
-        case .liveSources: return "直播源"
-        case .playback: return "视频"
-        case .cache: return "缓存"
-        case .backup: return "备份与恢复"
-        case .advanced: return "高级"
+        case .general: return SettingsL10n.string("settings.pane.general.title", "General")
+        case .configurations: return SettingsL10n.string("settings.pane.providers.title", "Video Providers")
+        case .search: return SettingsL10n.string("settings.pane.search.title", "Search")
+        case .liveSources: return SettingsL10n.string("settings.pane.live.title", "Live TV Sources")
+        case .playback: return SettingsL10n.string("settings.pane.playback.title", "Playback")
+        case .cache: return SettingsL10n.string("settings.pane.cache.title", "Storage")
+        case .backup: return SettingsL10n.string("settings.pane.backup.title", "Backup & Restore")
+        case .advanced: return SettingsL10n.string("settings.pane.advanced.title", "Advanced")
         }
     }
 
     var subtitle: String {
         switch self {
-        case .general: return "外观与基础设置"
-        case .configurations: return "导入与切换片源"
-        case .search: return "选择默认搜索站点"
-        case .liveSources: return "导入与管理直播源"
-        case .playback: return "播放器与播放设置"
-        case .cache: return "缓存与历史管理"
-        case .backup: return "配置与历史备份"
-        case .advanced: return "诊断和运行信息"
+        case .general: return SettingsL10n.string("settings.pane.general.subtitle", "Appearance and basic settings")
+        case .configurations: return SettingsL10n.string("settings.pane.providers.subtitle", "Import and switch provider sources")
+        case .search: return SettingsL10n.string("settings.pane.search.subtitle", "Choose Default Search Providers")
+        case .liveSources: return SettingsL10n.string("settings.pane.live.subtitle", "Import and manage live TV sources")
+        case .playback: return SettingsL10n.string("settings.pane.playback.subtitle", "Player and playback settings")
+        case .cache: return SettingsL10n.string("settings.pane.cache.subtitle", "Manage cache and history")
+        case .backup: return SettingsL10n.string("settings.pane.backup.subtitle", "Back up providers and history")
+        case .advanced: return SettingsL10n.string("settings.pane.advanced.subtitle", "Diagnostics and runtime information")
         }
     }
 
@@ -1549,11 +1602,11 @@ enum HistoryRetentionPresets {
     static func title(for days: Int) -> String {
         switch days {
         case 365:
-            return "1 年"
+            return SettingsL10n.string("settings.history.retention.one-year", "1 year")
         case 3_650:
-            return "10 年"
+            return SettingsL10n.string("settings.history.retention.ten-years", "10 years")
         default:
-            return "\(days) 天"
+            return SettingsL10n.string("settings.history.retention.days", "%d days", days)
         }
     }
 }

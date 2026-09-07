@@ -206,9 +206,9 @@ struct PlayerView: View {
         VStack(spacing: 12) {
             Image(systemName: "play.slash")
                 .font(.system(size: 42))
-            Text("内嵌播放器不可用")
+            Text(L10n.string("player.unavailable.title", fallback: "Built-in Player Unavailable"))
                 .font(.headline)
-            Text("请先构建并打包 libmpv 0.41.0。")
+            Text(L10n.string("player.unavailable.message", fallback: "Build and package libmpv 0.41.0 first."))
                 .foregroundColor(.secondary)
         }
         .foregroundColor(.white)
@@ -300,18 +300,18 @@ struct PlayerView: View {
                     .lineLimit(1)
 
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text("正在播放")
+                    Text(L10n.string("player.now-playing", fallback: "Now Playing"))
                         .foregroundColor(.white.opacity(0.72))
                     Text(
                         state.livePlaybackProgrammes.current?.title
-                            ?? "直播节目"
+                            ?? L10n.string("player.live-program", fallback: "Live Program")
                     )
                     .fontWeight(.semibold)
                     .lineLimit(1)
                 }
 
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text("即将播放")
+                    Text(L10n.string("player.up-next", fallback: "Up Next"))
                         .foregroundColor(.white.opacity(0.72))
                     Text(state.livePlaybackProgrammes.next?.title ?? "--")
                         .fontWeight(.semibold)
@@ -370,7 +370,11 @@ struct PlayerView: View {
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .help(isPaused ? "播放" : "暂停")
+            .help(
+                isPaused
+                    ? L10n.string("common.play", fallback: "Play")
+                    : L10n.string("common.pause", fallback: "Pause")
+            )
             .modifier(PlayerControlHoverEffect())
 
             liveVolumeControl(metrics: metrics)
@@ -406,8 +410,8 @@ struct PlayerView: View {
         )
         .contentShape(Circle())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("正在直播")
-        .help("正在直播")
+        .accessibilityLabel(L10n.string("player.live", fallback: "Live"))
+        .help(L10n.string("player.live", fallback: "Live"))
     }
 
     private func liveVolumeControl(
@@ -477,7 +481,11 @@ struct PlayerView: View {
                 .contentShape(Circle())
             }
             .buttonStyle(.plain)
-            .help(state.playerSnapshot.isMuted ? "取消静音" : "静音与音量")
+            .help(
+                state.playerSnapshot.isMuted
+                    ? L10n.string("player.unmute", fallback: "Unmute")
+                    : L10n.string("player.mute-volume", fallback: "Mute and Volume")
+            )
             .modifier(PlayerControlHoverEffect())
         }
         .onHover { inside in
@@ -522,7 +530,11 @@ struct PlayerView: View {
         }
         .buttonStyle(.plain)
         .foregroundColor(.white.opacity(0.96))
-        .help(isWindowFullScreen ? "退出全屏" : "进入全屏")
+        .help(
+            isWindowFullScreen
+                ? L10n.string("player.exit-full-screen", fallback: "Exit Full Screen")
+                : L10n.string("player.enter-full-screen", fallback: "Enter Full Screen")
+        )
         .modifier(PlayerControlHoverEffect())
         .onHover { inside in
             controlsHovering = inside
@@ -564,14 +576,16 @@ struct PlayerView: View {
     }
 
     private var liveStreamSummary: String {
-        guard let channel = state.livePlaybackChannel else { return "直播" }
+        guard let channel = state.livePlaybackChannel else {
+            return L10n.string("player.live", fallback: "Live")
+        }
         let format = state.livePlaybackStream?.format?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .uppercased()
         return [
             format?.isEmpty == false ? format : nil,
             channel.groupName,
-            "\(channel.streams.count) 条线路"
+            L10n.string("player.stream-count", fallback: "%d streams", channel.streams.count)
         ]
         .compactMap { $0 }
         .joined(separator: " · ")
@@ -581,7 +595,7 @@ struct PlayerView: View {
         _ presentation: EpisodePresentation
     ) -> String {
         if let number = presentation.episodeNumber {
-            return "第 \(number) 集"
+            return L10n.string("episode.number", fallback: "Episode %d", number)
         }
         return presentation.displayName
     }
@@ -649,8 +663,8 @@ struct PlayerView: View {
                 if let attempt = state.currentPlaybackAttempt {
                     Text(
                         "\(attempt.sourceName) · "
-                            + "\(attempt.parserName ?? "直链") · "
-                            + "尝试 \(attempt.number)"
+                            + L10n.string("player.direct-stream", fallback: "Direct Stream") + " · "
+                            + L10n.string("player.attempt-number", fallback: "Attempt %d", attempt.number)
                     )
                     .font(.caption)
                     .foregroundColor(.white.opacity(0.66))
@@ -666,7 +680,7 @@ struct PlayerView: View {
                 }
 
                 if state.hasHistoryPlaybackChoices {
-                    Text(state.playbackFailureSummary ?? "请选择要恢复的线路和分集")
+                    Text(state.playbackFailureSummary ?? L10n.string("player.history.choose-recovery", fallback: "Choose the stream and episode to restore"))
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.72))
                         .multilineTextAlignment(.center)
@@ -697,7 +711,7 @@ struct PlayerView: View {
                     }
                     .frame(maxWidth: 620, maxHeight: 230)
 
-                    Button("取消恢复") {
+                    Button(L10n.string("player.history.cancel-recovery", fallback: "Cancel Restore")) {
                         state.cancelHistoryPlaybackChoices()
                     }
                     .buttonStyle(.bordered)
@@ -705,12 +719,12 @@ struct PlayerView: View {
 
                 if isFailed, state.canRetryHistoryPlayback {
                     HStack(spacing: 10) {
-                        Button("重试") {
+                        Button(L10n.string("common.retry", fallback: "Try Again")) {
                             state.retryHistoryPlayback()
                         }
                         .buttonStyle(.borderedProminent)
 
-                        Button("返回历史") {
+                        Button(L10n.string("player.return-history", fallback: "Return to History")) {
                             state.returnToHistoryAfterPlaybackFailure()
                         }
                         .buttonStyle(.bordered)
@@ -721,7 +735,7 @@ struct PlayerView: View {
 
                 if isFailed,
                    state.canOpenNodeConfigurationForPlaybackFailure {
-                    Button("打开网盘授权配置") {
+                    Button(L10n.string("player.open-cloud-authorization", fallback: "Open Cloud Authorization Settings")) {
                         state.openNodeConfigurationForPlaybackFailure()
                     }
                     .buttonStyle(.bordered)
@@ -881,7 +895,9 @@ struct PlayerView: View {
                 systemImage: state.playerSnapshot.isMuted
                     ? "speaker.slash.fill"
                     : "speaker.wave.2.fill",
-                help: state.playerSnapshot.isMuted ? "取消静音" : "静音"
+                help: state.playerSnapshot.isMuted
+                    ? L10n.string("player.unmute", fallback: "Unmute")
+                    : L10n.string("player.mute", fallback: "Mute")
             ) {
                 Task { await state.togglePlayerMute() }
             }
@@ -947,7 +963,7 @@ struct PlayerView: View {
         HStack(spacing: 6) {
             playerIconButton(
                 systemImage: "backward.end.fill",
-                help: "上一集",
+                help: L10n.string("player.previous-episode", fallback: "Previous Episode"),
                 disabled: !state.hasPreviousEpisode
             ) {
                 Task { await state.playAdjacentEpisode(offset: -1) }
@@ -955,7 +971,9 @@ struct PlayerView: View {
 
             playerIconButton(
                 systemImage: "gobackward.10",
-                help: state.canSeekPlayback ? "快退 10 秒" : "当前线路不支持跳转",
+                help: state.canSeekPlayback
+                    ? L10n.string("player.seek-back-10", fallback: "Back 10 Seconds")
+                    : L10n.string("player.seek-unavailable", fallback: "Seeking is unavailable for this stream"),
                 disabled: !state.canSeekPlayback
             ) {
                 Task { await state.seek(by: -10) }
@@ -974,11 +992,17 @@ struct PlayerView: View {
             }
             .buttonStyle(.plain)
             .foregroundColor(Color.black.opacity(0.86))
-            .help(isPaused ? "播放" : "暂停")
+            .help(
+                isPaused
+                    ? L10n.string("common.play", fallback: "Play")
+                    : L10n.string("common.pause", fallback: "Pause")
+            )
 
             playerIconButton(
                 systemImage: "goforward.10",
-                help: state.canSeekPlayback ? "快进 10 秒" : "当前线路不支持跳转",
+                help: state.canSeekPlayback
+                    ? L10n.string("player.seek-forward-10", fallback: "Forward 10 Seconds")
+                    : L10n.string("player.seek-unavailable", fallback: "Seeking is unavailable for this stream"),
                 disabled: !state.canSeekPlayback
             ) {
                 Task { await state.seek(by: 10) }
@@ -986,7 +1010,7 @@ struct PlayerView: View {
 
             playerIconButton(
                 systemImage: "forward.end.fill",
-                help: "下一集",
+                help: L10n.string("player.next-episode", fallback: "Next Episode"),
                 disabled: !state.hasNextEpisode
             ) {
                 Task { await state.playAdjacentEpisode(offset: 1) }
@@ -999,29 +1023,33 @@ struct PlayerView: View {
             utilityPanelButton(
                 systemImage: "list.bullet",
                 panel: .episodes,
-                help: "选择剧集"
+                help: L10n.string("player.choose-episode", fallback: "Choose Episode")
             )
             utilityPanelButton(
                 systemImage: "waveform",
                 panel: .audio,
-                help: "音轨"
+                help: L10n.string("player.audio-tracks", fallback: "Audio Tracks")
             )
             utilityPanelButton(
                 systemImage: "captions.bubble",
                 panel: .subtitles,
-                help: state.playerSubtitlesEnabled ? "字幕已开启" : "字幕已关闭"
+                help: state.playerSubtitlesEnabled
+                    ? L10n.string("player.subtitles.on", fallback: "Subtitles On")
+                    : L10n.string("player.subtitles.off", fallback: "Subtitles Off")
             )
             utilityPanelButton(
                 systemImage: "gearshape",
                 panel: .settings,
-                help: "播放设置"
+                help: L10n.string("player.settings", fallback: "Playback Settings")
             )
 
             playerIconButton(
                 systemImage: isWindowFullScreen
                     ? "arrow.down.right.and.arrow.up.left"
                     : "arrow.up.left.and.arrow.down.right",
-                help: isWindowFullScreen ? "退出全屏" : "进入全屏"
+                help: isWindowFullScreen
+                    ? L10n.string("player.exit-full-screen", fallback: "Exit Full Screen")
+                    : L10n.string("player.enter-full-screen", fallback: "Enter Full Screen")
             ) {
                 toggleFullScreen()
             }
@@ -1088,20 +1116,20 @@ struct PlayerView: View {
         return playerPanel(width: 500) {
             VStack(alignment: .leading, spacing: 12) {
                 panelHeader(
-                    title: "选集",
-                    detail: "共 \(state.playerEpisodes.count) 集"
+                    title: L10n.string("player.episodes", fallback: "Episodes"),
+                    detail: L10n.string("player.episode-count", fallback: "%d episodes", state.playerEpisodes.count)
                 )
 
                 if state.isPlayerEpisodeListPreparing {
                     HStack(spacing: 9) {
                         AppActivityIndicator(size: .small, tint: .white)
-                        Text("正在整理分集…")
+                        Text(L10n.string("player.organizing-episodes", fallback: "Organizing episodes…"))
                             .font(.caption)
                             .foregroundColor(.white.opacity(0.62))
                     }
                     .frame(maxWidth: .infinity, minHeight: 74)
                 } else if presentations.isEmpty {
-                    panelEmptyState("暂无分集")
+                    panelEmptyState(L10n.string("player.no-episodes", fallback: "No Episodes"))
                 } else {
                     if pageCount > 1 {
                         playerEpisodePageControls(
@@ -1155,12 +1183,12 @@ struct PlayerView: View {
         selectedPageIndex: Int
     ) -> some View {
         HStack(spacing: 8) {
-            Text("分集区间")
+            Text(L10n.string("detail.episode-range", fallback: "Episode Range"))
                 .font(.caption)
                 .foregroundColor(.white.opacity(0.58))
 
             Picker(
-                "分集区间",
+                L10n.string("detail.episode-range", fallback: "Episode Range"),
                 selection: $playerEpisodePageIndex
             ) {
                 ForEach(0..<pageCount, id: \.self) { pageIndex in
@@ -1215,9 +1243,12 @@ struct PlayerView: View {
         let tracks = state.playerSnapshot.tracks.filter { $0.type == .audio }
         return playerPanel(width: 340) {
             VStack(alignment: .leading, spacing: 10) {
-                panelHeader(title: "音轨", detail: "\(tracks.count) 条")
+                panelHeader(
+                    title: L10n.string("player.audio-tracks", fallback: "Audio Tracks"),
+                    detail: L10n.string("player.track-count", fallback: "%d tracks", tracks.count)
+                )
                 if tracks.isEmpty {
-                    panelEmptyState("没有可选音轨")
+                    panelEmptyState(L10n.string("player.no-audio-tracks", fallback: "No Audio Tracks"))
                 } else {
                     ScrollView {
                         VStack(spacing: 5) {
@@ -1250,7 +1281,10 @@ struct PlayerView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
-                        panelHeader(title: "字幕", detail: "\(tracks.count) 条")
+                        panelHeader(
+                            title: L10n.string("player.subtitles", fallback: "Subtitles"),
+                            detail: L10n.string("player.track-count", fallback: "%d tracks", tracks.count)
+                        )
                         Spacer()
                         Toggle(
                             "",
@@ -1271,7 +1305,7 @@ struct PlayerView: View {
                     }
 
                     if tracks.isEmpty {
-                        panelEmptyState("没有内嵌字幕")
+                        panelEmptyState(L10n.string("player.no-embedded-subtitles", fallback: "No Embedded Subtitles"))
                     } else {
                         VStack(spacing: 5) {
                             ForEach(tracks) { track in
@@ -1287,11 +1321,11 @@ struct PlayerView: View {
                     }
 
                     panelDivider
-                    Text("字幕设置")
+                    Text(L10n.string("player.subtitle-settings", fallback: "Subtitle Settings"))
                         .font(.caption.weight(.semibold))
                         .foregroundColor(.white.opacity(0.58))
                     panelStepperRow(
-                        title: "大小",
+                        title: L10n.string("player.subtitle-size", fallback: "Size"),
                         value: "\(Int(state.playerSubtitleScale * 100))%",
                         decrease: {
                             Task { await state.adjustPlayerSubtitleScale(by: -0.1) }
@@ -1301,7 +1335,7 @@ struct PlayerView: View {
                         }
                     )
                     panelStepperRow(
-                        title: "位置",
+                        title: L10n.string("player.subtitle-position", fallback: "Position"),
                         value: "\(Int(state.playerSubtitlePosition))",
                         decrease: {
                             Task { await state.adjustPlayerSubtitlePosition(by: -5) }
@@ -1311,7 +1345,7 @@ struct PlayerView: View {
                         }
                     )
                     panelStepperRow(
-                        title: "描边",
+                        title: L10n.string("player.subtitle-outline", fallback: "Outline"),
                         value: String(format: "%.1f", state.playerSubtitleBorderSize),
                         decrease: {
                             Task { await state.adjustPlayerSubtitleBorderSize(by: -0.5) }
@@ -1321,8 +1355,8 @@ struct PlayerView: View {
                         }
                     )
                     panelStepperRow(
-                        title: "延迟",
-                        value: String(format: "%.1f 秒", state.playerSubtitleDelay),
+                        title: L10n.string("player.delay", fallback: "Delay"),
+                        value: L10n.string("player.seconds", fallback: "%.1f sec", state.playerSubtitleDelay),
                         decrease: {
                             Task { await state.adjustPlayerSubtitleDelay(by: -0.5) }
                         },
@@ -1333,10 +1367,10 @@ struct PlayerView: View {
 
                     panelDivider
                     HStack(spacing: 8) {
-                        panelActionButton("恢复默认") {
+                        panelActionButton(L10n.string("common.restore-default", fallback: "Restore Defaults")) {
                             Task { await state.resetPlayerSubtitleSettings() }
                         }
-                        panelActionButton("加载外部字幕…") {
+                        panelActionButton(L10n.string("player.load-external-subtitles", fallback: "Load External Subtitles…")) {
                             chooseSubtitle()
                         }
                     }
@@ -1350,10 +1384,10 @@ struct PlayerView: View {
         playerPanel(width: 370) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    panelHeader(title: "播放设置", detail: nil)
+                    panelHeader(title: L10n.string("player.settings", fallback: "Playback Settings"), detail: nil)
 
                     HStack {
-                        Text("自动播放下一集")
+                        Text(L10n.string("player.autoplay-next", fallback: "Autoplay Next Episode"))
                         Spacer()
                         Toggle(
                             "",
@@ -1374,7 +1408,7 @@ struct PlayerView: View {
                     if state.playbackQualities.count > 1 {
                         panelDivider
                         panelOptionGrid(
-                            title: "清晰度",
+                            title: L10n.string("player.quality", fallback: "Quality"),
                             values: state.playbackQualities.map { $0.name },
                             selected: state.selectedPlaybackQualityName
                         ) { selectedName in
@@ -1387,7 +1421,7 @@ struct PlayerView: View {
 
                     panelDivider
                     panelOptionGrid(
-                        title: "播放速度",
+                        title: L10n.string("player.speed", fallback: "Playback Speed"),
                         values: speeds.map(formatPlaybackSpeed),
                         selected: formatPlaybackSpeed(state.playerSnapshot.speed)
                     ) { selectedSpeed in
@@ -1397,19 +1431,24 @@ struct PlayerView: View {
                     }
 
                     panelOptionGrid(
-                        title: "画面比例",
-                        values: ["自动", "16:9", "4:3", "2.35:1"],
-                        selected: state.playerAspectRatio ?? "自动"
+                        title: L10n.string("player.aspect-ratio", fallback: "Aspect Ratio"),
+                        values: ["automatic", "16:9", "4:3", "2.35:1"],
+                        selected: state.playerAspectRatio ?? "automatic",
+                        displayTitle: { value in
+                            value == "automatic"
+                                ? L10n.string("common.automatic", fallback: "Automatic")
+                                : value
+                        }
                     ) { ratio in
                         Task {
                             await state.setPlayerAspectRatio(
-                                ratio == "自动" ? nil : ratio
+                                ratio == "automatic" ? nil : ratio
                             )
                         }
                     }
 
                     HStack {
-                        Text("硬件解码")
+                        Text(L10n.string("player.hardware-decoding", fallback: "Hardware Decoding"))
                         Spacer()
                         Toggle(
                             "",
@@ -1426,8 +1465,8 @@ struct PlayerView: View {
                     }
 
                     panelStepperRow(
-                        title: "音频延迟",
-                        value: String(format: "%.1f 秒", state.playerAudioDelay),
+                        title: L10n.string("player.audio-delay", fallback: "Audio Delay"),
+                        value: L10n.string("player.seconds", fallback: "%.1f sec", state.playerAudioDelay),
                         decrease: {
                             Task { await state.adjustPlayerAudioDelay(by: -0.1) }
                         },
@@ -1437,7 +1476,7 @@ struct PlayerView: View {
                     )
 
                     panelDivider
-                    panelActionButton("保存截图…") {
+                    panelActionButton(L10n.string("player.save-screenshot", fallback: "Save Screenshot…")) {
                         chooseScreenshotLocation()
                     }
                 }
@@ -1587,6 +1626,7 @@ struct PlayerView: View {
         title: String,
         values: [String],
         selected: String?,
+        displayTitle: @escaping (String) -> String = { $0 },
         action: @escaping (String) -> Void
     ) -> some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -1599,7 +1639,7 @@ struct PlayerView: View {
             ) {
                 ForEach(values, id: \.self) { value in
                     let isSelected = selected == value
-                    Button(value) { action(value) }
+                    Button(displayTitle(value)) { action(value) }
                         .buttonStyle(.plain)
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(.white.opacity(isSelected ? 1 : 0.76))
@@ -1618,7 +1658,7 @@ struct PlayerView: View {
     private var episodeMenu: some View {
         Menu {
             if state.playerEpisodes.isEmpty {
-                Text("暂无分集")
+                Text(L10n.string("player.no-episodes", fallback: "No Episodes"))
             } else {
                 ForEach(state.playerEpisodes) { episode in
                     Button {
@@ -1640,7 +1680,7 @@ struct PlayerView: View {
         .fixedSize()
         .tint(.white)
         .environment(\.colorScheme, .dark)
-        .help("选择剧集")
+        .help(L10n.string("player.choose-episode", fallback: "Choose Episode"))
     }
 
     private func playerIconButton(
@@ -1901,7 +1941,7 @@ struct PlayerView: View {
             }
             if type == .subtitle {
                 Divider()
-                Button("加载外部字幕…") {
+                Button(L10n.string("player.load-external-subtitles", fallback: "Load External Subtitles…")) {
                     chooseSubtitle()
                 }
             }
@@ -1921,7 +1961,7 @@ struct PlayerView: View {
         }
         return Menu {
             Toggle(
-                "显示字幕",
+                L10n.string("player.show-subtitles", fallback: "Show Subtitles"),
                 isOn: Binding(
                     get: { state.playerSubtitlesEnabled },
                     set: { enabled in
@@ -1934,7 +1974,7 @@ struct PlayerView: View {
 
             Divider()
             if tracks.isEmpty {
-                Text("没有内嵌字幕")
+                Text(L10n.string("player.no-embedded-subtitles", fallback: "No Embedded Subtitles"))
             } else {
                 ForEach(tracks) { track in
                     Toggle(
@@ -1955,52 +1995,52 @@ struct PlayerView: View {
                     )
                     .help(
                         state.selectedPlayerSubtitleTrackID == track.id
-                            ? "当前选择的字幕"
-                            : "选择此字幕"
+                            ? L10n.string("player.subtitle.current", fallback: "Current Subtitle")
+                            : L10n.string("player.subtitle.choose", fallback: "Choose This Subtitle")
                     )
                 }
             }
 
             Divider()
-            Menu("字幕设置") {
-                Menu("大小 · \(Int(state.playerSubtitleScale * 100))%") {
-                    Button("缩小 10%") {
+            Menu(L10n.string("player.subtitle-settings", fallback: "Subtitle Settings")) {
+                Menu(L10n.string("player.subtitle-size-value", fallback: "Size · %d%%", Int(state.playerSubtitleScale * 100))) {
+                    Button(L10n.string("player.subtitle-smaller", fallback: "Decrease 10%")) {
                         Task { await state.adjustPlayerSubtitleScale(by: -0.1) }
                     }
-                    Button("放大 10%") {
+                    Button(L10n.string("player.subtitle-larger", fallback: "Increase 10%")) {
                         Task { await state.adjustPlayerSubtitleScale(by: 0.1) }
                     }
                 }
-                Menu("位置 · \(Int(state.playerSubtitlePosition))") {
-                    Button("上移") {
+                Menu(L10n.string("player.subtitle-position-value", fallback: "Position · %d", Int(state.playerSubtitlePosition))) {
+                    Button(L10n.string("player.subtitle-move-up", fallback: "Move Up")) {
                         Task { await state.adjustPlayerSubtitlePosition(by: -5) }
                     }
-                    Button("下移") {
+                    Button(L10n.string("player.subtitle-move-down", fallback: "Move Down")) {
                         Task { await state.adjustPlayerSubtitlePosition(by: 5) }
                     }
                 }
-                Menu("描边 · \(state.playerSubtitleBorderSize, specifier: "%.1f")") {
-                    Button("减小描边") {
+                Menu(L10n.string("player.subtitle-outline-value", fallback: "Outline · %.1f", state.playerSubtitleBorderSize)) {
+                    Button(L10n.string("player.subtitle-outline-decrease", fallback: "Decrease Outline")) {
                         Task { await state.adjustPlayerSubtitleBorderSize(by: -0.5) }
                     }
-                    Button("增大描边") {
+                    Button(L10n.string("player.subtitle-outline-increase", fallback: "Increase Outline")) {
                         Task { await state.adjustPlayerSubtitleBorderSize(by: 0.5) }
                     }
                 }
-                Menu("延迟 · \(state.playerSubtitleDelay, specifier: "%.1f") 秒") {
-                    Button("字幕提前 0.5 秒") {
+                Menu(L10n.string("player.subtitle-delay-value", fallback: "Delay · %.1f sec", state.playerSubtitleDelay)) {
+                    Button(L10n.string("player.subtitle-earlier", fallback: "Subtitles 0.5 Seconds Earlier")) {
                         Task { await state.adjustPlayerSubtitleDelay(by: -0.5) }
                     }
-                    Button("字幕延后 0.5 秒") {
+                    Button(L10n.string("player.subtitle-later", fallback: "Subtitles 0.5 Seconds Later")) {
                         Task { await state.adjustPlayerSubtitleDelay(by: 0.5) }
                     }
                 }
                 Divider()
-                Button("恢复默认字幕设置") {
+                Button(L10n.string("player.subtitle-restore-defaults", fallback: "Restore Default Subtitle Settings")) {
                     Task { await state.resetPlayerSubtitleSettings() }
                 }
             }
-            Button("加载外部字幕…") {
+            Button(L10n.string("player.load-external-subtitles", fallback: "Load External Subtitles…")) {
                 chooseSubtitle()
             }
         } label: {
@@ -2010,13 +2050,17 @@ struct PlayerView: View {
         .fixedSize()
         .tint(.white)
         .environment(\.colorScheme, .dark)
-        .help(state.playerSubtitlesEnabled ? "字幕已开启" : "字幕已关闭")
+        .help(
+            state.playerSubtitlesEnabled
+                ? L10n.string("player.subtitles.on", fallback: "Subtitles On")
+                : L10n.string("player.subtitles.off", fallback: "Subtitles Off")
+        )
     }
 
     private var playbackOptionsMenu: some View {
         Menu {
             Toggle(
-                "自动播放下一集",
+                L10n.string("player.autoplay-next", fallback: "Autoplay Next Episode"),
                 isOn: Binding(
                     get: { state.autoPlayNextEpisode },
                     set: { enabled in
@@ -2029,10 +2073,11 @@ struct PlayerView: View {
 
             if state.playbackQualities.count > 1 {
                 Menu(
-                    "清晰度 · "
+                    L10n.string("player.quality", fallback: "Quality") + " · "
                         + (state.isSwitchingPlaybackQuality
-                            ? "切换中"
-                            : state.selectedPlaybackQualityName ?? "自动")
+                            ? L10n.string("player.switching", fallback: "Switching")
+                            : state.selectedPlaybackQualityName
+                                ?? L10n.string("common.automatic", fallback: "Automatic"))
                 ) {
                     ForEach(state.playbackQualities) { quality in
                         Button {
@@ -2052,7 +2097,7 @@ struct PlayerView: View {
                 Divider()
             }
 
-            Menu("播放速度 · \(formatPlaybackSpeed(state.playerSnapshot.speed))") {
+            Menu(L10n.string("player.speed-value", fallback: "Playback Speed · %@", formatPlaybackSpeed(state.playerSnapshot.speed))) {
                 ForEach(speeds, id: \.self) { speed in
                     Button(formatPlaybackSpeed(speed)) {
                         Task { await state.setPlayerSpeed(speed) }
@@ -2062,8 +2107,8 @@ struct PlayerView: View {
 
             Divider()
 
-            Menu("画面比例") {
-                Button("自动") {
+            Menu(L10n.string("player.aspect-ratio", fallback: "Aspect Ratio")) {
+                Button(L10n.string("common.automatic", fallback: "Automatic")) {
                     Task { await state.setPlayerAspectRatio(nil) }
                 }
                 ForEach(["16:9", "4:3", "2.35:1"], id: \.self) { ratio in
@@ -2073,24 +2118,26 @@ struct PlayerView: View {
                 }
             }
             Button(
-                state.playerHardwareDecoding ? "关闭硬件解码" : "开启硬件解码"
+                state.playerHardwareDecoding
+                    ? L10n.string("player.hardware-decoding.disable", fallback: "Disable Hardware Decoding")
+                    : L10n.string("player.hardware-decoding.enable", fallback: "Enable Hardware Decoding")
             ) {
                 Task { await state.togglePlayerHardwareDecoding() }
             }
             Divider()
             Group {
-                Button("音频提前 0.1 秒") {
+                Button(L10n.string("player.audio-earlier", fallback: "Audio 0.1 Seconds Earlier")) {
                     Task { await state.adjustPlayerAudioDelay(by: -0.1) }
                 }
-                Button("音频延后 0.1 秒") {
+                Button(L10n.string("player.audio-later", fallback: "Audio 0.1 Seconds Later")) {
                     Task { await state.adjustPlayerAudioDelay(by: 0.1) }
                 }
-                Text("音频延迟 \(state.playerAudioDelay, specifier: "%.1f") 秒")
+                Text(L10n.string("player.audio-delay-value", fallback: "Audio Delay %.1f sec", state.playerAudioDelay))
             }
 
             Divider()
 
-            Button("保存截图…") {
+            Button(L10n.string("player.save-screenshot", fallback: "Save Screenshot…")) {
                 chooseScreenshotLocation()
             }
         } label: {
@@ -2100,7 +2147,7 @@ struct PlayerView: View {
         .fixedSize()
         .tint(.white)
         .environment(\.colorScheme, .dark)
-        .help("播放设置")
+        .help(L10n.string("player.settings", fallback: "Playback Settings"))
     }
 
     private var playerAccentColor: Color {
@@ -2132,7 +2179,7 @@ struct PlayerView: View {
 
     private func chooseSubtitle() {
         let panel = NSOpenPanel()
-        panel.title = "选择字幕"
+        panel.title = L10n.string("player.choose-subtitle", fallback: "Choose Subtitles")
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.allowedContentTypes = ["srt", "ass", "ssa", "vtt", "sub"]
@@ -2145,7 +2192,7 @@ struct PlayerView: View {
 
     private func chooseScreenshotLocation() {
         let panel = NSSavePanel()
-        panel.title = "保存播放截图"
+        panel.title = L10n.string("player.save-screenshot.title", fallback: "Save Playback Screenshot")
         panel.nameFieldStringValue = "OKVideoMac-Screenshot.png"
         panel.allowedContentTypes = ["png", "jpg", "jpeg", "webp"]
             .compactMap { UTType(filenameExtension: $0) }
@@ -2266,19 +2313,19 @@ struct PlayerEpisodeButton: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            Button("查看原始名称") {
+            Button(L10n.string("detail.original-name.view-short", fallback: "View Original Name")) {
                 // Defer the state mutation until AppKit has dismissed the
                 // context menu. This keeps the inspector transition stable.
                 DispatchQueue.main.async(execute: onInspect)
             }
 
-            Button("复制原始名称") {
+            Button(L10n.string("detail.original-name.copy", fallback: "Copy Original Name")) {
                 PlayerEpisodeOriginalNameActions.copy(
                     presentation.originalName
                 )
             }
         }
-        .accessibilityHint("右键可以查看或复制原始名称")
+        .accessibilityHint(L10n.string("detail.original-name.hint", fallback: "Right-click to view or copy the original name"))
     }
 }
 
@@ -2300,7 +2347,7 @@ struct PlayerEpisodeOriginalNameInspector: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 7) {
-                Label("文件信息", systemImage: "doc.text")
+                Label(L10n.string("detail.file-info", fallback: "File Information"), systemImage: "doc.text")
                     .font(.caption.weight(.semibold))
                     .foregroundColor(.white.opacity(0.94))
 
@@ -2314,10 +2361,10 @@ struct PlayerEpisodeOriginalNameInspector: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(.white.opacity(0.62))
-                .help("关闭文件信息")
+                .help(L10n.string("detail.file-info.close", fallback: "Close File Information"))
             }
 
-            Text("原始名称")
+            Text(L10n.string("detail.original-name", fallback: "Original Name"))
                 .font(.caption2)
                 .foregroundColor(.white.opacity(0.55))
 
@@ -2345,7 +2392,9 @@ struct PlayerEpisodeOriginalNameInspector: View {
                     }
                 } label: {
                     Label(
-                        didCopy ? "已复制" : "复制名称",
+                        didCopy
+                            ? L10n.string("common.copied", fallback: "Copied")
+                            : L10n.string("detail.copy-name", fallback: "Copy Name"),
                         systemImage: didCopy ? "checkmark" : "doc.on.doc"
                     )
                 }
@@ -2354,7 +2403,7 @@ struct PlayerEpisodeOriginalNameInspector: View {
 
                 Spacer()
 
-                Text("右键剧集可查看或复制")
+                Text(L10n.string("player.original-name.hint", fallback: "Right-click an episode to view or copy its original name"))
                     .font(.caption2)
                     .foregroundColor(.white.opacity(0.45))
             }
@@ -2432,11 +2481,11 @@ enum PlayerEpisodePagePolicy {
     ) -> String {
         let values = page(presentations, pageIndex: pageIndex)
         guard let first = values.first, let last = values.last else {
-            return "暂无分集"
+            return L10n.string("player.no-episodes", fallback: "No Episodes")
         }
         if let firstNumber = first.episodeNumber,
            let lastNumber = last.episodeNumber {
-            return "\(firstNumber)–\(lastNumber) 集"
+            return L10n.string("episode.range", fallback: "Episodes %d–%d", firstNumber, lastNumber)
         }
         let safeIndex = clampedPageIndex(
             pageIndex,
@@ -2444,7 +2493,7 @@ enum PlayerEpisodePagePolicy {
         )
         let start = safeIndex * pageSize + 1
         let end = start + values.count - 1
-        return "\(start)–\(end) 项"
+        return L10n.string("player.item-range", fallback: "Items %d–%d", start, end)
     }
 }
 
@@ -3420,7 +3469,7 @@ private struct PlayerTimelineControl: View {
             )
         }
         .accessibilityElement()
-        .accessibilityLabel("播放进度")
+        .accessibilityLabel(L10n.string("history.playback-progress", fallback: "Playback Progress"))
         .accessibilityValue(
             "\(Int((PlayerTimelinePolicy.fraction(value: value, total: total) * 100).rounded()))%"
         )

@@ -23,7 +23,9 @@ struct AndroidRuntimeInstallView: View {
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("关闭")
+                    .accessibilityLabel(
+                        L10n.string("common.close", fallback: "Close")
+                    )
                 }
             }
             .padding(.horizontal, 24)
@@ -80,18 +82,24 @@ struct AndroidRuntimeInstallView: View {
 
                 HStack {
                     if state.managedRuntimeInstallationState.isBusy {
-                        Button("取消") {
+                        Button(L10n.string(.commonCancel)) {
                             Task { await state.cancelManagedRuntimeInstallation() }
                         }
                     } else if case .failed = state.managedRuntimeInstallationState {
-                        Button("导出诊断…") {
+                        Button(L10n.string(
+                            "diagnostics.export.action",
+                            fallback: "Export Diagnostics…"
+                        )) {
                             exportDiagnostics()
                         }
                     }
 
                     if !state.managedRuntimeInstallationState.isBusy,
                        state.androidRuntimeModeSnapshot.externalSDKRoot != nil {
-                        Button("使用已配置的 Android SDK") {
+                        Button(L10n.string(
+                            "android.install.use-configured-sdk",
+                            fallback: "Use Configured Android SDK"
+                        )) {
                             Task {
                                 await state
                                     .useConfiguredExternalAndroidRuntime()
@@ -114,31 +122,46 @@ struct AndroidRuntimeInstallView: View {
 
     private var title: String {
         switch state.managedRuntimeInstallationState {
-        case .ready: return "Android 兼容组件已就绪"
+        case .ready:
+            return L10n.string(
+                "android.install.title.ready",
+                fallback: "Android Compatibility Component Is Ready"
+            )
         case .failed, .damaged, .incompatible:
-            return "Android 兼容组件需要处理"
-        case .updateAvailable: return "Android 兼容组件可更新"
-        default: return "安装 Android 兼容组件"
+            return L10n.string(
+                "android.install.title.action-required",
+                fallback: "Android Compatibility Component Needs Attention"
+            )
+        case .updateAvailable:
+            return L10n.string(
+                "android.install.title.update-available",
+                fallback: "Android Compatibility Component Update Available"
+            )
+        default:
+            return L10n.string(
+                "android.install.title.install",
+                fallback: "Install Android Compatibility Component"
+            )
         }
     }
 
     private var headline: String {
         switch state.managedRuntimeInstallationState {
         case .notInstalled, .available:
-            return "当前内容需要 Android 兼容组件"
-        case .detecting: return "正在检查运行环境"
-        case .preparing: return "正在准备安装"
-        case .downloading: return "正在下载组件"
-        case .verifying: return "正在校验下载内容"
-        case .extracting: return "正在解压组件"
-        case .installing: return "正在安装运行环境"
-        case .validating: return "正在验证运行环境"
-        case .activating: return "正在启用新环境"
-        case .ready: return "Android Bridge 已准备完成"
-        case .updateAvailable: return "Android 兼容组件有可用更新"
-        case .cancelling: return "正在安全取消"
-        case .cancelled: return "安装已取消"
-        case .repairing: return "正在修复兼容组件"
+            return copy("needs-component", "This Content Requires the Android Compatibility Component")
+        case .detecting: return copy("detecting", "Checking the Runtime")
+        case .preparing: return copy("preparing", "Preparing Installation")
+        case .downloading: return copy("downloading", "Downloading Components")
+        case .verifying: return copy("verifying", "Verifying Downloads")
+        case .extracting: return copy("extracting", "Extracting Components")
+        case .installing: return copy("installing", "Installing the Runtime")
+        case .validating: return copy("validating", "Validating the Runtime")
+        case .activating: return copy("activating", "Activating the New Runtime")
+        case .ready: return copy("bridge-ready", "Android Bridge Is Ready")
+        case .updateAvailable: return copy("update-available", "An Android Compatibility Component Update Is Available")
+        case .cancelling: return copy("cancelling", "Cancelling Safely")
+        case .cancelled: return copy("cancelled", "Installation Cancelled")
+        case .repairing: return copy("repairing", "Repairing the Compatibility Component")
         case .damaged(let failure, _), .incompatible(let failure):
             return ManagedRuntimeFailurePresentationMapper.presentation(
                 for: failure
@@ -153,20 +176,35 @@ struct AndroidRuntimeInstallView: View {
     private var detail: String {
         switch state.managedRuntimeInstallationState {
         case .notInstalled, .available:
-            return "OKVideoMac 会将所需环境安装到自己的专用目录，不会更改 Android Studio、Homebrew 或您的其他模拟器。"
+            return copy(
+                "detail.isolated",
+                "OKVideoMac installs the required environment in its own private directory. It does not change Android Studio, Homebrew, or your other emulators."
+            )
         case .ready:
-            return "原来的内容请求已自动继续，以后使用时无需手动配置。"
+            return copy(
+                "detail.ready",
+                "The original content request continued automatically. No manual setup is required next time."
+            )
         case .updateAvailable:
-            return "可安装经过锁定和校验的新 Runtime Generation；当前版本在新环境生效前保持不变。"
+            return copy(
+                "detail.update",
+                "A pinned and verified Runtime Generation is available. The current runtime stays unchanged until the new one is validated and activated."
+            )
         case .cancelled:
-            return "未启用任何未完整的环境；下次可以从已下载的部分继续。"
+            return copy(
+                "detail.cancelled",
+                "No incomplete environment was activated. You can continue from resumable downloads next time."
+            )
         case .failed(let failure, _), .damaged(let failure, _),
              .incompatible(let failure):
             return ManagedRuntimeFailurePresentationMapper.presentation(
                 for: failure
             ).message
         default:
-            return "安装在隔离的临时目录中进行；校验和自检全部通过后才会生效。"
+            return copy(
+                "detail.transactional",
+                "Installation runs in an isolated staging directory and is activated only after every integrity check and self-test passes."
+            )
         }
     }
 
@@ -234,16 +272,19 @@ struct AndroidRuntimeInstallView: View {
     private func installFacts(_ offer: ManagedRuntimeInstallOffer) -> some View {
         VStack(spacing: 0) {
             factRow(
-                title: "预计下载",
+                title: copy("facts.download", "Download Size"),
                 value: formattedBytes(offer.downloadBytes)
             )
             Divider()
             factRow(
-                title: "安装所需空间",
+                title: copy("facts.disk-space", "Required Disk Space"),
                 value: formattedBytes(offer.requiredFreeSpace)
             )
             Divider()
-            factRow(title: "安装位置", value: "OKVideoMac 专用目录")
+            factRow(
+                title: copy("facts.location", "Install Location"),
+                value: copy("facts.private-directory", "OKVideoMac Private Directory")
+            )
         }
         .background(Color.secondary.opacity(0.07))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -271,7 +312,10 @@ struct AndroidRuntimeInstallView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 9) {
             Toggle(isOn: $acceptsLicenses) {
-                Text("我已阅读并同意所需组件的许可条款")
+                Text(copy(
+                    "license.acceptance",
+                    "I have read and agree to the required component licenses"
+                ))
             }
             ForEach(offer.licenses) { license in
                 Button(license.title) { openURL(license.url) }
@@ -285,7 +329,7 @@ struct AndroidRuntimeInstallView: View {
     private var primaryAction: some View {
         switch state.managedRuntimeInstallationState {
         case .available:
-            Button("安装") {
+            Button(copy("action.install", "Install")) {
                 Task {
                     await state.installManagedRuntime(
                         acceptingLicenses: acceptsLicenses
@@ -296,7 +340,7 @@ struct AndroidRuntimeInstallView: View {
             .disabled(!acceptsLicenses)
         case .failed(_, let offer), .damaged(_, let offer):
             if offer != nil {
-                Button("修复并重试") {
+                Button(copy("action.repair-retry", "Repair and Try Again")) {
                     Task {
                         await state.repairManagedRuntime(
                             acceptingLicenses: acceptsLicenses
@@ -306,12 +350,16 @@ struct AndroidRuntimeInstallView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!acceptsLicenses)
             } else {
-                Button("关闭") { state.dismissManagedRuntimeInstaller() }
+                Button(L10n.string("common.close", fallback: "Close")) {
+                    state.dismissManagedRuntimeInstaller()
+                }
             }
         case .incompatible:
-            Button("关闭") { state.dismissManagedRuntimeInstaller() }
+            Button(L10n.string("common.close", fallback: "Close")) {
+                state.dismissManagedRuntimeInstaller()
+            }
         case .updateAvailable:
-            Button("更新") {
+            Button(copy("action.update", "Update")) {
                 Task {
                     await state.installManagedRuntime(
                         acceptingLicenses: acceptsLicenses
@@ -322,20 +370,20 @@ struct AndroidRuntimeInstallView: View {
             .disabled(!acceptsLicenses)
         case .ready:
             HStack {
-                Button("修复组件…") {
+                Button(copy("action.repair", "Repair Component…")) {
                     Task {
                         await state.repairManagedRuntime(
                             acceptingLicenses: true
                         )
                     }
                 }
-                Button("继续使用") {
+                Button(copy("action.continue", "Continue")) {
                     state.dismissManagedRuntimeInstaller()
                 }
                 .buttonStyle(.borderedProminent)
             }
         case .cancelled, .notInstalled:
-            Button("重新开始") {
+            Button(copy("action.restart", "Start Again")) {
                 Task { await state.showManagedRuntimeInstaller() }
             }
             .buttonStyle(.borderedProminent)
@@ -355,10 +403,17 @@ struct AndroidRuntimeInstallView: View {
                 try await state.exportDiagnostics(to: url)
             } catch {
                 state.presentedError = UserFacingError(
-                    title: "诊断导出失败",
-                    message: error.localizedDescription
+                    title: L10n.string(
+                        "diagnostics.export.failed.title",
+                        fallback: "Diagnostics Export Failed"
+                    ),
+                    message: RuntimeUserFacingMessageMapper.message(for: error)
                 )
             }
         }
+    }
+
+    private func copy(_ suffix: String, _ fallback: String) -> String {
+        L10n.string("android.install.\(suffix)", fallback: fallback)
     }
 }
