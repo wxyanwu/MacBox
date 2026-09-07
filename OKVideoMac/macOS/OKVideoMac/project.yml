@@ -197,6 +197,7 @@ targets:
     dependencies:
       - target: OKVideoMacRelauncher
         link: false
+        embed: false
       - package: OKVideoKit
         product: OKVideoCore
       - package: OKVideoKit

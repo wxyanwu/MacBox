@@ -24,7 +24,6 @@
 		5728CE6395E44C04B4A0C12A /* AppEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09C1F786F0D9BA2EB9105485 /* AppEnvironment.swift */; };
 		5A9D06284CB5E372842F82ED /* AndroidRuntimeModeCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBFFECCFB6DB351621C00FA7 /* AndroidRuntimeModeCoordinator.swift */; };
 		5B836D9F97EED98D73BB7905 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 234BEE7B0F12E1ADF62B0FC5 /* main.swift */; };
-		5D13CBBD5D5D2D2161F148C9 /* OKVideoMacRelauncher in Resources */ = {isa = PBXBuildFile; fileRef = AB9CAF08A930E4ABBA6B50F3 /* OKVideoMacRelauncher */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		60D66F92BE071037B7CC8508 /* AppLocalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 524A6FFC75575C7A3986A97C /* AppLocalizer.swift */; };
 		6933FAC9DB77F047D6303CC8 /* AppRelaunchCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0443D3DC2B3D840D56D011E6 /* AppRelaunchCoordinator.swift */; };
 		6C218C2C6AAC7BA83B2DB968 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = ED0F982CA57DBEA3A9CBF1FE /* LICENSE */; };
@@ -529,7 +528,6 @@
 				EB38C679BF2A786E9E0B233D /* THIRD_PARTY_LICENSES.md in Resources */,
 				B0DF0200CA6A81F268264204 /* catpaw-quark-lifecycle.patch.js in Resources */,
 				9026FCDA3BBE44AB9C8EA9BE /* catpaw-quark-transfer-lifecycle.js in Resources */,
-				5D13CBBD5D5D2D2161F148C9 /* OKVideoMacRelauncher in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
