@@ -22,6 +22,7 @@ CDX_NS = uuid.UUID("ce6fdc54-4547-4142-b70f-3ed50cbd18f8")
 
 NATIVE = {
     "OKVideoMac": ("OKVideoMac", "GPL-3.0-only"),
+    "OKVideoMacRelauncher": ("0.5.0", "GPL-3.0-only"),
     "node": ("22.23.0", "MIT"),
     "libOKMPVBridge.dylib": ("0.3.41", "GPL-3.0-only"),
     "libOKQuickJS.dylib": ("2025-04-26", "GPL-3.0-only AND MIT"),
@@ -115,8 +116,8 @@ def native_inventory(app: Path) -> list[dict[str, str]]:
                 "sha256": "" if relative == "Contents/MacOS/OKVideoMac" else sha256(path),
             }
         )
-    if len(result) != 28:
-        raise SystemExit(f"Expected 28 bundled Mach-O objects, found {len(result)}")
+    if len(result) != 29:
+        raise SystemExit(f"Expected 29 bundled Mach-O objects, found {len(result)}")
     return result
 
 

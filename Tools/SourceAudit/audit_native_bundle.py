@@ -24,6 +24,7 @@ FFMPEG_OUTPUTS = {
 
 COMPONENTS = {
     "OKVideoMac": ("OKVideoMac", "0.3.41 (62)", "project Git commit", None, "A", "Xcode Release recipe verified"),
+    "OKVideoMacRelauncher": ("OKVideoMacRelauncher", "project", "project Git commit", None, "A", "Swift Release recipe verified"),
     "libOKMPVBridge.dylib": ("OKMPVBridge", "project", "project Git commit", None, "A", "source and clang recipe verified with bridge smoke"),
     "libOKQuickJS.dylib": ("QuickJS + OKQuickJSBridge", "2025-09-13-2", "quickjs-2025-09-13-2.tar.xz", "996c6b5018fc955ad4d06426d0e9cb713685a00c825aa5c0418bd53f7df8b0b4", "A", "exact source, locked recipe, rebuild and smoke verified"),
     "libmpv.dylib": ("mpv", "0.41.0", "mpv-v0.41.0.tar.gz + project patch", "ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209", "A", "exact source/patch, Meson recipe, rebuild and ABI smoke verified"),
@@ -176,7 +177,7 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(f"Inventoried {len(entries)} Mach-O files: {counts}")
-    if len(entries) != 28 or counts["D"]:
+    if len(entries) != 29 or counts["D"]:
         return 1
     return 0
 

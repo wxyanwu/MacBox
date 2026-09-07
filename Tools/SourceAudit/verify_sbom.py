@@ -51,8 +51,8 @@ def main() -> None:
             f"Mach-O/SBOM mismatch: missing={sorted(actual_paths-declared_paths)}, "
             f"stale={sorted(declared_paths-actual_paths)}"
         )
-    if len(actual_paths) != 28:
-        raise SystemExit(f"Expected 28 Mach-O objects, found {len(actual_paths)}")
+    if len(actual_paths) != 29:
+        raise SystemExit(f"Expected 29 Mach-O objects, found {len(actual_paths)}")
     for package in mac["packages"]:
         relative = package["packageFileName"]
         if relative == "Contents/MacOS/OKVideoMac":
