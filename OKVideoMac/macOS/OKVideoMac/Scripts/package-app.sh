@@ -682,14 +682,18 @@ PYTHONDONTWRITEBYTECODE=1 python3 \
   "${final_sensitive_scan_arguments[@]}"
 
 # Materialize the standalone App only after the canonical staging App, ZIP,
-# DMG, signatures, SBOMs, and source-release identity have all passed. The
-# destination may acquire host-local File Provider attributes, but its signed
-# file bytes are copied from the already verified canonical bundle.
+# DMG, signatures, SBOMs, and source-release identity have all passed. A
+# File Provider-backed destination may attach FinderInfo during the copy, so
+# sanitize and independently verify the final standalone App before reporting
+# it as a deliverable.
 FINAL_APP_STAGING="$ARTIFACTS/.OKVideoMac.app.incoming"
 rm -rf "$FINAL_APP_STAGING"
 cp -R "$APP_DESTINATION" "$FINAL_APP_STAGING"
 rm -rf "$FINAL_APP_DESTINATION"
 mv "$FINAL_APP_STAGING" "$FINAL_APP_DESTINATION"
+/usr/bin/xattr -cr "$FINAL_APP_DESTINATION"
+"$SCRIPT_DIR/verify-bundle.sh" "$FINAL_APP_DESTINATION"
+"$SCRIPT_DIR/verify-release-signing.sh" --mode "$PACKAGE_MODE" "$FINAL_APP_DESTINATION"
 
 echo "Packaged app: $FINAL_APP_DESTINATION"
 echo "Internal archive: $ARCHIVE"
