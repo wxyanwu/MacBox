@@ -234,13 +234,23 @@ enum DetailPerformanceContext {
 }
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case home = "点播"
-    case live = "直播"
-    case favorites = "收藏"
-    case history = "历史"
-    case settings = "设置"
+    case home
+    case live
+    case favorites
+    case history
+    case settings
 
     var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .home: return L10n.string(.sectionBrowse)
+        case .live: return L10n.string(.sectionLiveTV)
+        case .favorites: return L10n.string(.sectionFavorites)
+        case .history: return L10n.string(.sectionHistory)
+        case .settings: return L10n.string(.sectionSettings)
+        }
+    }
 
     var systemImage: String {
         switch self {
@@ -271,16 +281,34 @@ enum SidebarSearchPresentationPolicy {
         case .live:
             return SidebarSearchPresentation(
                 kind: .liveChannels,
-                placeholder: "搜索频道…",
-                accessibilityLabel: "搜索直播频道",
-                help: "筛选当前直播源中的频道"
+                placeholder: L10n.string(
+                    "sidebar.search.live.placeholder",
+                    fallback: "Search channels…"
+                ),
+                accessibilityLabel: L10n.string(
+                    "sidebar.search.live.accessibility",
+                    fallback: "Search live TV channels"
+                ),
+                help: L10n.string(
+                    "sidebar.search.live.help",
+                    fallback: "Filter channels in the current live TV source"
+                )
             )
         case .home, .favorites, .history, .settings:
             return SidebarSearchPresentation(
                 kind: .video,
-                placeholder: "搜索点播内容…",
-                accessibilityLabel: "搜索点播内容",
-                help: "搜索当前点播配置中的全部站点"
+                placeholder: L10n.string(
+                    "sidebar.search.video.placeholder",
+                    fallback: "Search videos…"
+                ),
+                accessibilityLabel: L10n.string(
+                    "sidebar.search.video.accessibility",
+                    fallback: "Search videos"
+                ),
+                help: L10n.string(
+                    "sidebar.search.video.help",
+                    fallback: "Search all providers in the current configuration"
+                )
             )
         }
     }
@@ -381,17 +409,50 @@ enum SettingsPane: String, CaseIterable, Identifiable {
 }
 
 enum AppTheme: String, CaseIterable, Identifiable {
-    case system = "跟随系统"
-    case light = "浅色"
-    case dark = "深色"
+    case system
+    case light
+    case dark
 
     var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .system: return L10n.string(.themeSystem)
+        case .light: return L10n.string(.themeLight)
+        case .dark: return L10n.string(.themeDark)
+        }
+    }
+
+    init?(persistedValue: String) {
+        switch persistedValue {
+        case Self.system.rawValue, "跟随系统": self = .system
+        case Self.light.rawValue, "浅色": self = .light
+        case Self.dark.rawValue, "深色": self = .dark
+        default: return nil
+        }
+    }
+}
+
+enum UserFacingErrorTarget: String, Equatable, Sendable {
+    case browser
+    case player
 }
 
 struct UserFacingError: Identifiable, Equatable {
     let id = UUID()
     let title: String
     let message: String
+    let target: UserFacingErrorTarget
+
+    init(
+        title: String,
+        message: String,
+        target: UserFacingErrorTarget = .browser
+    ) {
+        self.title = title
+        self.message = message
+        self.target = target
+    }
 
     static func == (lhs: UserFacingError, rhs: UserFacingError) -> Bool {
         lhs.id == rhs.id
@@ -460,17 +521,11 @@ enum PlayerWindowFocusCompensationPolicy {
 }
 
 enum PlayerErrorPresentationPolicy {
-    private static let playerTitleFragments = [
-        "播放", "播放器", "跳转", "音量", "静音", "倍速", "清晰度",
-        "轨道", "字幕", "音频", "画面", "截图", "硬件解码", "视频渲染"
-    ]
-
     static func targetsPlayer(
-        title: String,
+        target: UserFacingErrorTarget,
         isPlayerPresented: Bool
     ) -> Bool {
-        isPlayerPresented
-            && playerTitleFragments.contains(where: title.contains)
+        isPlayerPresented && target == .player
     }
 }
 
@@ -631,14 +686,110 @@ struct NodeReleaseErrorPresentation: Equatable {
 
 enum AndroidRuntimeUserFacingErrorMapper {
     static func presentation(
-        for error: Error
+        for error: Error,
+        localizer: AppLocalizer = .shared
     ) -> NodeReleaseErrorPresentation? {
         guard let runtimeError = error as? AndroidRuntimeFailureError else {
             return nil
         }
         return .init(
-            title: runtimeError.userFacingTitle,
-            message: runtimeError.userFacingMessage
+            title: localizer.string(.androidStartupFailureTitle),
+            message: message(
+                for: runtimeError.record.category,
+                localizer: localizer
+            )
+        )
+    }
+
+    private static func message(
+        for category: AndroidRuntimeFailureCategory,
+        localizer: AppLocalizer
+    ) -> String {
+        let key: String
+        let fallback: String
+        switch category {
+        case .sdkIncomplete:
+            key = "android.error.sdk-incomplete"
+            fallback = "The selected Android SDK is incomplete. Choose an SDK that includes ADB, Emulator, and a compatible system image in Settings."
+        case .javaRuntimeMissing:
+            key = "android.error.java-runtime-missing"
+            fallback = "Creating or repairing an AVD with the selected external SDK requires a working Java runtime. Existing compatible AVDs can still be launched without it."
+        case .adbUnavailable:
+            key = "android.error.adb-unavailable"
+            fallback = "ADB is unavailable, so OKVideoMac cannot connect to its dedicated Android Emulator."
+        case .adbPrivateServerFailed:
+            key = "android.error.adb-private-server-failed"
+            fallback = "OKVideoMac could not start its private ADB server. The system ADB server was not connected to or stopped."
+        case .adbDeviceMissing, .adbSerialMissingTimeout:
+            key = "android.error.adb-device-missing"
+            fallback = "Android Emulator is still running, but ADB did not discover the expected device."
+        case .adbDeviceOffline, .adbOfflineTimeout,
+             .hostGPUADBOfflineTimeout, .softwareGPUADBOfflineTimeout:
+            key = "android.error.adb-device-offline"
+            fallback = "ADB discovered the dedicated Android Emulator, but the device remained offline."
+        case .adbReconnectFailed:
+            key = "android.error.adb-reconnect-failed"
+            fallback = "The bounded reconnect attempt for the dedicated Android Emulator failed."
+        case .privateAVDRecoveryRequired:
+            key = "android.error.avd-recovery-required"
+            fallback = "The dedicated Android Runtime failed with both hardware and software rendering. Rebuild the Runtime from Settings."
+        case .emulatorLaunchFailed, .emulatorLaunchTimedOut,
+             .emulatorExitedBeforeADB, .emulatorExitedEarly,
+             .emulatorExited, .runtimeExited:
+            key = "android.error.emulator-launch-failed"
+            fallback = "Android Emulator did not start correctly. Export diagnostics and try again."
+        case .appRequestedTermination:
+            key = "android.error.app-requested-termination"
+            fallback = "Android Emulator startup was cancelled or ended by OKVideoMac."
+        case .emulatorOwnershipMismatch:
+            key = "android.error.emulator-ownership-mismatch"
+            fallback = "OKVideoMac could not safely verify ownership of the dedicated Android Emulator and did not touch other devices."
+        case .emulatorProcessMismatch:
+            key = "android.error.emulator-process-mismatch"
+            fallback = "The recorded Android Emulator process no longer belongs to this startup session."
+        case .emulatorRuntimeConflict:
+            key = "android.error.emulator-runtime-conflict"
+            fallback = "Another Emulator is using the dedicated AVD or reserved ports. No process was terminated."
+        case .portConflict:
+            key = "android.error.port-conflict"
+            fallback = "A port required by Android Emulator is in use by another process. The other process was not terminated."
+        case .unexpectedSerial:
+            key = "android.error.unexpected-serial"
+            fallback = "ADB discovered another Emulator, but not the device expected for this startup session."
+        case .androidBootTimedOut:
+            key = "android.error.boot-timeout"
+            fallback = "Android did not finish booting within the allowed time."
+        case .emulatorNetworkUnavailable:
+            key = "android.error.network-unavailable"
+            fallback = "Android Emulator did not establish a usable network connection. Check your network and try again."
+        case .bridgeAPKMissing, .bridgeInstallFailed:
+            key = "android.error.bridge-install-failed"
+            fallback = "Android Bridge could not be installed. Reinstall OKVideoMac or export diagnostics."
+        case .bridgeLaunchFailed:
+            key = "android.error.bridge-launch-failed"
+            fallback = "Android Bridge did not start. Use Repair in Settings and try again."
+        case .portForwardFailed:
+            key = "android.error.port-forward-failed"
+            fallback = "ADB port forwarding failed, so Android Bridge could not connect to the Mac."
+        case .hostPortConflict:
+            key = "android.error.host-port-conflict"
+            fallback = "The local Android Bridge port is already in use. Close the conflicting app and try again."
+        case .bridgeIdentityMismatch:
+            key = "android.error.bridge-identity-mismatch"
+            fallback = "The detected Android Bridge does not belong to this startup session. The connection was refused."
+        case .bridgeVersionMismatch:
+            key = "android.error.bridge-version-mismatch"
+            fallback = "Android Bridge does not match this version of OKVideoMac. Use Repair to install the current Bridge."
+        case .bridgeHealthTimedOut:
+            key = "android.error.bridge-health-timeout"
+            fallback = "Android Bridge did not connect within the allowed time. This startup attempt has failed; try again or use Repair."
+        case .unknown:
+            key = "android.error.unknown"
+            fallback = "The Android compatibility environment failed to start. Export diagnostics now for troubleshooting."
+        }
+        return localizer.string(
+            L10nKey(rawValue: key),
+            fallback: fallback
         )
     }
 }
@@ -715,6 +866,14 @@ enum CloudAccountSnapshotStatus: String, Codable, Equatable, Sendable {
     case authenticated
     case unauthenticated
     case pending
+
+    var localizedTitle: String {
+        switch self {
+        case .authenticated: return L10n.string(.cloudAuthenticated)
+        case .unauthenticated: return L10n.string(.cloudUnauthenticated)
+        case .pending: return L10n.string(.cloudPending)
+        }
+    }
 }
 
 struct CloudAccountStatusKey: Codable, Equatable, Hashable, Sendable {
@@ -943,7 +1102,11 @@ enum CloudAccountStatusTitlePolicy {
         ("已登录", .authenticated),
         ("已登入", .authenticated),
         ("已授权", .authenticated),
-        ("正在确认", .pending)
+        ("正在确认", .pending),
+        ("Not Signed In", .unauthenticated),
+        ("Previously Authorized", .pending),
+        ("Signed In", .authenticated),
+        ("Confirming", .pending)
     ]
 
     static func parse(_ title: String) -> ParsedStatus? {
@@ -982,16 +1145,12 @@ enum CloudAccountStatusTitlePolicy {
             charactersIn: "-—–_:：|｜·•()（）[]【】"
         ).union(.whitespacesAndNewlines)
         base = base.trimmingCharacters(in: separators)
-        let suffix: String
-        switch status {
-        case .authenticated:
-            suffix = "已登录"
-        case .unauthenticated:
-            suffix = "未登录"
-        case .pending:
-            suffix = "上次已授权"
-        }
-        return "\(base) - \(suffix)"
+        return L10n.string(
+            .cloudTitleFormat,
+            fallback: "%1$@ — %2$@",
+            base,
+            status.localizedTitle
+        )
     }
 
     static func replacingStatusOnly(
@@ -999,14 +1158,7 @@ enum CloudAccountStatusTitlePolicy {
         with status: CloudAccountSnapshotStatus
     ) -> String {
         guard isStatusOnly(value) else { return value }
-        switch status {
-        case .authenticated:
-            return "已登录"
-        case .unauthenticated:
-            return "未登录"
-        case .pending:
-            return "上次已授权"
-        }
+        return status.localizedTitle
     }
 
     static func isStatusOnly(_ value: String) -> Bool {
@@ -7011,7 +7163,11 @@ final class AppState: ObservableObject {
             if discoverySearchReturnSnapshot?.folderPath.isEmpty == false {
                 return "返回片单"
             }
-            return "返回\((homeSearchReturnSection ?? .home).rawValue)"
+            return L10n.string(
+                "search.return-section",
+                fallback: "Return to %@",
+                (homeSearchReturnSection ?? .home).title
+            )
         }
         return SearchFolderNavigationPolicy.backTitle(
             pathCount: searchFolderPath.count,
@@ -7027,7 +7183,11 @@ final class AppState: ObservableObject {
             if discoverySearchReturnSnapshot?.folderPath.isEmpty == false {
                 return "返回进入搜索前的片单目录"
             }
-            return "关闭搜索并返回\((homeSearchReturnSection ?? .home).rawValue)"
+            return L10n.string(
+                "search.close-and-return-section",
+                fallback: "Close Search and Return to %@",
+                (homeSearchReturnSection ?? .home).title
+            )
         }
         return SearchFolderNavigationPolicy.backHelp(
             pathCount: searchFolderPath.count,
@@ -10525,7 +10685,8 @@ final class AppState: ObservableObject {
         ) else {
             show(
                 AppError.playback("播放所属配置已经切换，请切回原配置后重试"),
-                title: "播放已停止"
+                title: "播放已停止",
+                target: .player
             )
             return
         }
@@ -10694,7 +10855,7 @@ final class AppState: ObservableObject {
         } catch {
             PlayerStartupTraceStore.shared.cancel(requestID: sessionID)
             guard playbackSessionID == sessionID else { return }
-            show(error, title: "播放器初始化失败")
+            show(error, title: "播放器初始化失败", target: .player)
             return
         }
         guard playbackSessionID == sessionID else { return }
@@ -12728,7 +12889,7 @@ final class AppState: ObservableObject {
         do {
             try await environment?.player.play()
         } catch {
-            show(error, title: "唤醒后恢复播放失败")
+            show(error, title: "唤醒后恢复播放失败", target: .player)
         }
     }
 
@@ -12846,7 +13007,7 @@ final class AppState: ObservableObject {
             if playerSnapshot.status == optimisticStatus {
                 playerSnapshot.status = previousStatus
             }
-            show(error, title: "播放控制失败")
+            show(error, title: "播放控制失败", target: .player)
         }
     }
 
@@ -12868,7 +13029,11 @@ final class AppState: ObservableObject {
             requested: position,
             duration: playerSnapshot.duration
         ) else {
-            show(AppError.playback("跳转位置无效"), title: "跳转失败")
+            show(
+                AppError.playback("跳转位置无效"),
+                title: "跳转失败",
+                target: .player
+            )
             return
         }
         let previousPosition = playerSnapshot.position
@@ -12913,7 +13078,8 @@ final class AppState: ObservableObject {
                     "播放器在 10 秒内没有完成跳转，已返回原播放位置。"
                         + "当前网络或线路响应较慢，请稍后重试或切换清晰度。"
                 ),
-                title: "跳转超时"
+                title: "跳转超时",
+                target: .player
             )
         } catch is CancellationError {
             if activeSeekConfirmationID == confirmationID {
@@ -12928,7 +13094,7 @@ final class AppState: ObservableObject {
                 playerSnapshot.isSeeking = false
                 playerSnapshot.seekTarget = nil
             }
-            show(error, title: "跳转失败")
+            show(error, title: "跳转失败", target: .player)
         }
     }
 
@@ -12942,7 +13108,7 @@ final class AppState: ObservableObject {
             if playerSnapshot.volume == clampedVolume {
                 playerSnapshot.volume = previousVolume
             }
-            show(error, title: "音量设置失败")
+            show(error, title: "音量设置失败", target: .player)
         }
     }
 
@@ -12960,7 +13126,7 @@ final class AppState: ObservableObject {
             if playerSnapshot.isMuted == targetMuted {
                 playerSnapshot.isMuted = previousMuted
             }
-            show(error, title: "静音设置失败")
+            show(error, title: "静音设置失败", target: .player)
         }
     }
 
@@ -12973,7 +13139,7 @@ final class AppState: ObservableObject {
             if playerSnapshot.speed == speed {
                 playerSnapshot.speed = previousSpeed
             }
-            show(error, title: "倍速设置失败")
+            show(error, title: "倍速设置失败", target: .player)
         }
     }
 
@@ -13164,12 +13330,13 @@ final class AppState: ObservableObject {
                         "\(error.localizedDescription)；恢复原清晰度也失败："
                             + restoreError.localizedDescription
                     ),
-                    title: "清晰度切换失败"
+                    title: "清晰度切换失败",
+                    target: .player
                 )
             } else {
                 playbackResolutionState = .playing
                 playbackFailureSummary = nil
-                show(error, title: "清晰度切换失败")
+                show(error, title: "清晰度切换失败", target: .player)
             }
         }
     }
@@ -13193,7 +13360,7 @@ final class AppState: ObservableObject {
                 )
             }
         } catch {
-            show(error, title: "轨道切换失败")
+            show(error, title: "轨道切换失败", target: .player)
         }
     }
 
@@ -13202,7 +13369,11 @@ final class AppState: ObservableObject {
             $0.type == .subtitle
         }
         guard !subtitleTracks.isEmpty else {
-            show(AppError.playback("当前视频没有可用字幕"), title: "字幕设置失败")
+            show(
+                AppError.playback("当前视频没有可用字幕"),
+                title: "字幕设置失败",
+                target: .player
+            )
             return
         }
         do {
@@ -13249,7 +13420,7 @@ final class AppState: ObservableObject {
                 )
             }
         } catch {
-            show(error, title: "字幕设置失败")
+            show(error, title: "字幕设置失败", target: .player)
         }
     }
 
@@ -13259,7 +13430,7 @@ final class AppState: ObservableObject {
             try await environment?.player.setSubtitleDelay(value)
             playerSubtitleDelay = value
         } catch {
-            show(error, title: "字幕延迟设置失败")
+            show(error, title: "字幕延迟设置失败", target: .player)
         }
     }
 
@@ -13269,7 +13440,7 @@ final class AppState: ObservableObject {
             try await environment?.player.setSubtitleScale(value)
             playerSubtitleScale = value
         } catch {
-            show(error, title: "字幕大小设置失败")
+            show(error, title: "字幕大小设置失败", target: .player)
         }
     }
 
@@ -13279,7 +13450,7 @@ final class AppState: ObservableObject {
             try await environment?.player.setSubtitlePosition(value)
             playerSubtitlePosition = value
         } catch {
-            show(error, title: "字幕位置设置失败")
+            show(error, title: "字幕位置设置失败", target: .player)
         }
     }
 
@@ -13289,7 +13460,7 @@ final class AppState: ObservableObject {
             try await environment?.player.setSubtitleBorderSize(value)
             playerSubtitleBorderSize = value
         } catch {
-            show(error, title: "字幕描边设置失败")
+            show(error, title: "字幕描边设置失败", target: .player)
         }
     }
 
@@ -13304,7 +13475,7 @@ final class AppState: ObservableObject {
             playerSubtitlePosition = 100
             playerSubtitleBorderSize = 3
         } catch {
-            show(error, title: "字幕设置重置失败")
+            show(error, title: "字幕设置重置失败", target: .player)
         }
     }
 
@@ -13314,7 +13485,7 @@ final class AppState: ObservableObject {
             try await environment?.player.setAudioDelay(value)
             playerAudioDelay = value
         } catch {
-            show(error, title: "音频延迟设置失败")
+            show(error, title: "音频延迟设置失败", target: .player)
         }
     }
 
@@ -13323,7 +13494,7 @@ final class AppState: ObservableObject {
             try await environment?.player.setAspectRatio(ratio)
             playerAspectRatio = ratio
         } catch {
-            show(error, title: "画面比例设置失败")
+            show(error, title: "画面比例设置失败", target: .player)
         }
     }
 
@@ -13333,7 +13504,7 @@ final class AppState: ObservableObject {
             try await environment?.player.setHardwareDecoding(enabled: value)
             playerHardwareDecoding = value
         } catch {
-            show(error, title: "硬件解码设置失败")
+            show(error, title: "硬件解码设置失败", target: .player)
         }
     }
 
@@ -13344,7 +13515,7 @@ final class AppState: ObservableObject {
             prefersPlayerSubtitlesEnabled = true
             await persistPlayerSubtitlePreference(enabled: true, track: nil)
         } catch {
-            show(error, title: "字幕加载失败")
+            show(error, title: "字幕加载失败", target: .player)
         }
     }
 
@@ -13352,7 +13523,7 @@ final class AppState: ObservableObject {
         do {
             try await environment?.player.screenshot(to: url)
         } catch {
-            show(error, title: "截图失败")
+            show(error, title: "截图失败", target: .player)
         }
     }
 
@@ -13387,7 +13558,7 @@ final class AppState: ObservableObject {
     }
 
     func reportPlayerRenderError(_ error: Error) {
-        show(error, title: "视频渲染失败")
+        show(error, title: "视频渲染失败", target: .player)
     }
 
     var visibleSites: [SiteConfiguration] {
@@ -16008,7 +16179,7 @@ final class AppState: ObservableObject {
         if let value = try await environment.database.setting(
             forKey: "appearance.theme"
         ), case .string(let rawTheme) = value,
-           let theme = AppTheme(rawValue: rawTheme) {
+           let theme = AppTheme(persistedValue: rawTheme) {
             appTheme = theme
         }
         if let value = try await environment.database.setting(
@@ -16334,7 +16505,11 @@ final class AppState: ObservableObject {
         if let requestID {
             presentPlaybackErrorOnce(message, requestID: requestID)
         } else {
-            show(AppError.playback(message), title: "播放器错误")
+            show(
+                AppError.playback(message),
+                title: "播放器错误",
+                target: .player
+            )
         }
     }
 
@@ -16423,7 +16598,7 @@ final class AppState: ObservableObject {
                 activeRequestID: activePlayerRequestID
             ) else { return }
             playerSubtitlesEnabled = false
-            show(error, title: "恢复字幕设置失败")
+            show(error, title: "恢复字幕设置失败", target: .player)
         }
     }
 
@@ -16444,7 +16619,7 @@ final class AppState: ObservableObject {
                 )
             }
         } catch {
-            show(error, title: "无法保存字幕设置")
+            show(error, title: "无法保存字幕设置", target: .player)
         }
     }
 
@@ -16512,7 +16687,11 @@ final class AppState: ObservableObject {
            activePlayerRequestID == requestID {
             return
         }
-        show(AppError.playback(message), title: "播放器错误")
+        show(
+            AppError.playback(message),
+            title: "播放器错误",
+            target: .player
+        )
     }
 
     private func loadResolvedPlayback(
@@ -17011,10 +17190,18 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func show(_ error: Error, title: String) {
-        let presentation = userFacingError(for: error, title: title)
-        if PlayerErrorPresentationPolicy.targetsPlayer(
+    private func show(
+        _ error: Error,
+        title: String,
+        target: UserFacingErrorTarget = .browser
+    ) {
+        let presentation = userFacingError(
+            for: error,
             title: title,
+            target: target
+        )
+        if PlayerErrorPresentationPolicy.targetsPlayer(
+            target: presentation.target,
             isPlayerPresented: isPlayerPresented
         ) {
             playerPresentedError = presentation
@@ -17025,25 +17212,29 @@ final class AppState: ObservableObject {
 
     private func userFacingError(
         for error: Error,
-        title: String
+        title: String,
+        target: UserFacingErrorTarget = .browser
     ) -> UserFacingError {
         if let presentation = AndroidRuntimeUserFacingErrorMapper.presentation(
             for: error
         ) {
             return UserFacingError(
                 title: presentation.title,
-                message: presentation.message
+                message: presentation.message,
+                target: target
             )
         }
         if let presentation = NodeUserFacingErrorMapper.presentation(for: error) {
             return UserFacingError(
                 title: presentation.title,
-                message: presentation.message
+                message: presentation.message,
+                target: target
             )
         }
         return UserFacingError(
             title: title,
-            message: LogRedactor.text(error.localizedDescription)
+            message: LogRedactor.text(error.localizedDescription),
+            target: target
         )
     }
 }

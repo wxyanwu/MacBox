@@ -1,0 +1,20 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "CFBundleDisplayName" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "OKVideoMac" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "OKVideoMac" } }
+      }
+    },
+    "CFBundleName" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "OKVideoMac" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "OKVideoMac" } }
+      }
+    }
+  },
+  "version" : "1.0"
+}

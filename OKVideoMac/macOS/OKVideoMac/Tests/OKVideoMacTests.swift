@@ -18,6 +18,77 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testLanguageResolverSupportsOnlyDeclaredLocalizations() {
+        XCTAssertEqual(
+            AppLanguageResolver.resolve(
+                mode: .system,
+                preferredLanguages: ["zh-Hans-CN"]
+            ),
+            .simplifiedChinese
+        )
+        XCTAssertEqual(
+            AppLanguageResolver.resolve(
+                mode: .system,
+                preferredLanguages: ["zh-TW", "en-US"]
+            ),
+            .english
+        )
+        XCTAssertEqual(
+            AppLanguageResolver.resolve(
+                mode: .system,
+                preferredLanguages: ["fr-FR", "zh-CN"]
+            ),
+            .english
+        )
+        XCTAssertEqual(
+            AppLanguageResolver.resolve(
+                mode: .simplifiedChinese,
+                preferredLanguages: ["en-US"]
+            ),
+            .simplifiedChinese
+        )
+    }
+
+    func testLanguagePreferenceUsesIsolatedStableUserDefaultsKey() throws {
+        let suiteName = "OKVideoMacTests.Language.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = AppLanguagePreferenceStore(defaults: defaults)
+        let originalAppleLanguages = defaults.object(forKey: "AppleLanguages")
+
+        XCTAssertEqual(store.load(), .system)
+        store.save(.english)
+        XCTAssertEqual(store.load(), .english)
+        XCTAssertEqual(
+            defaults.object(forKey: "AppleLanguages") as? [String],
+            originalAppleLanguages as? [String]
+        )
+        XCTAssertEqual(
+            defaults.string(forKey: AppLanguagePreferenceStore.key),
+            "en"
+        )
+    }
+
+    func testExplicitLocalizationBundleLoadsEnglishAndSimplifiedChinese() {
+        let english = AppLocalizer(language: .english)
+        let chinese = AppLocalizer(language: .simplifiedChinese)
+
+        XCTAssertEqual(english.string(.sectionBrowse), "Browse")
+        XCTAssertEqual(chinese.string(.sectionBrowse), "点播")
+        XCTAssertFalse(english.usedEnglishFallback)
+        XCTAssertFalse(chinese.usedEnglishFallback)
+    }
+
+    func testThemeLegacyValuesMigrateToStableIdentity() {
+        XCTAssertEqual(AppTheme(persistedValue: "跟随系统"), .system)
+        XCTAssertEqual(AppTheme(persistedValue: "浅色"), .light)
+        XCTAssertEqual(AppTheme(persistedValue: "深色"), .dark)
+        XCTAssertEqual(AppTheme(persistedValue: "system"), .system)
+        XCTAssertEqual(AppTheme(persistedValue: "light"), .light)
+        XCTAssertEqual(AppTheme(persistedValue: "dark"), .dark)
+        XCTAssertNil(AppTheme(persistedValue: "unknown"))
+    }
+
     func testApplicationInstancePolicyFindsOnlyAnotherProcess() {
         XCTAssertNil(
             ApplicationInstancePolicy.conflictingProcessIdentifier(
@@ -540,19 +611,19 @@ final class OKVideoMacTests: XCTestCase {
     func testPlaybackErrorsRouteToPlayerOnlyWhileItExists() {
         XCTAssertTrue(
             PlayerErrorPresentationPolicy.targetsPlayer(
-                title: "清晰度切换失败",
+                target: .player,
                 isPlayerPresented: true
             )
         )
         XCTAssertFalse(
             PlayerErrorPresentationPolicy.targetsPlayer(
-                title: "清晰度切换失败",
+                target: .player,
                 isPlayerPresented: false
             )
         )
         XCTAssertFalse(
             PlayerErrorPresentationPolicy.targetsPlayer(
-                title: "配置刷新失败",
+                target: .browser,
                 isPlayerPresented: true
             )
         )
@@ -7145,7 +7216,20 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertFalse(AppSection.allCases.contains { $0.systemImage.isEmpty })
         XCTAssertEqual(
             AppSection.allCases.map(\.rawValue),
-            ["点播", "直播", "收藏", "历史", "设置"]
+            ["home", "live", "favorites", "history", "settings"]
+        )
+        let english = AppLocalizer(language: .english)
+        XCTAssertEqual(
+            AppSection.allCases.map { section in
+                switch section {
+                case .home: return english.string(.sectionBrowse)
+                case .live: return english.string(.sectionLiveTV)
+                case .favorites: return english.string(.sectionFavorites)
+                case .history: return english.string(.sectionHistory)
+                case .settings: return english.string(.sectionSettings)
+                }
+            },
+            ["Browse", "Live TV", "Favorites", "History", "Settings"]
         )
     }
 
@@ -7680,19 +7764,34 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testSystemMenuTitlesAreTranslatedToChinese() {
-        XCTAssertEqual(MainMenuChineseLocalization.title(for: "File"), "文件")
-        XCTAssertEqual(MainMenuChineseLocalization.title(for: "Edit"), "编辑")
+    func testSystemMenuTitlesCanLocalizeInBothDirections() {
         XCTAssertEqual(
-            MainMenuChineseLocalization.title(for: "About OKVideoMac"),
+            MainMenuLocalization.title(for: "File", language: .simplifiedChinese),
+            "文件"
+        )
+        XCTAssertEqual(
+            MainMenuLocalization.title(for: "文件", language: .english),
+            "File"
+        )
+        XCTAssertEqual(
+            MainMenuLocalization.title(
+                for: "About OKVideoMac",
+                language: .simplifiedChinese
+            ),
             "关于 OKVideoMac"
         )
         XCTAssertEqual(
-            MainMenuChineseLocalization.title(for: "Bring All to Front"),
+            MainMenuLocalization.title(
+                for: "Bring All to Front",
+                language: .simplifiedChinese
+            ),
             "前置全部窗口"
         )
         XCTAssertEqual(
-            MainMenuChineseLocalization.title(for: "自定义菜单"),
+            MainMenuLocalization.title(
+                for: "自定义菜单",
+                language: .english
+            ),
             "自定义菜单"
         )
     }
@@ -8854,7 +8953,10 @@ final class OKVideoMacTests: XCTestCase {
             )
         )
         let presentation = try XCTUnwrap(
-            AndroidRuntimeUserFacingErrorMapper.presentation(for: error)
+            AndroidRuntimeUserFacingErrorMapper.presentation(
+                for: error,
+                localizer: AppLocalizer(language: .simplifiedChinese)
+            )
         )
         XCTAssertEqual(presentation.title, "Android 兼容环境启动失败")
         XCTAssertTrue(presentation.message.contains("Emulator"))
@@ -8872,7 +8974,10 @@ final class OKVideoMacTests: XCTestCase {
             )
         )
         let presentation = try XCTUnwrap(
-            AndroidRuntimeUserFacingErrorMapper.presentation(for: error)
+            AndroidRuntimeUserFacingErrorMapper.presentation(
+                for: error,
+                localizer: AppLocalizer(language: .simplifiedChinese)
+            )
         )
 
         XCTAssertTrue(presentation.message.contains("本次启动已失败"))

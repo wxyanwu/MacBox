@@ -140,8 +140,13 @@ struct AndroidRuntimeInstallView: View {
         case .cancelled: return "安装已取消"
         case .repairing: return "正在修复兼容组件"
         case .damaged(let failure, _), .incompatible(let failure):
-            return failure.title
-        case .failed(let failure, _): return failure.title
+            return ManagedRuntimeFailurePresentationMapper.presentation(
+                for: failure
+            ).title
+        case .failed(let failure, _):
+            return ManagedRuntimeFailurePresentationMapper.presentation(
+                for: failure
+            ).title
         }
     }
 
@@ -157,7 +162,9 @@ struct AndroidRuntimeInstallView: View {
             return "未启用任何未完整的环境；下次可以从已下载的部分继续。"
         case .failed(let failure, _), .damaged(let failure, _),
              .incompatible(let failure):
-            return failure.message
+            return ManagedRuntimeFailurePresentationMapper.presentation(
+                for: failure
+            ).message
         default:
             return "安装在隔离的临时目录中进行；校验和自检全部通过后才会生效。"
         }

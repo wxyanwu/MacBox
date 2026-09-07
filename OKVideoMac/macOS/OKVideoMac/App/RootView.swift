@@ -2299,11 +2299,11 @@ private struct NativeSidebarSourceList: NSViewRepresentable {
         }
 
         func configure(section: AppSection) {
-            label.stringValue = section.rawValue
-            label.setAccessibilityLabel(section.rawValue)
+            label.stringValue = section.title
+            label.setAccessibilityLabel(section.title)
             symbolView.image = NSImage(
                 systemSymbolName: section.systemImage,
-                accessibilityDescription: section.rawValue
+                accessibilityDescription: section.title
             )
         }
     }

@@ -7,7 +7,16 @@ struct OKVideoMacApp: App {
     @NSApplicationDelegateAdaptor(OKVideoMacAppDelegate.self)
     private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
-    @StateObject private var state = AppState.bootstrap()
+    @StateObject private var state: AppState
+    private let localizer: AppLocalizer
+
+    init() {
+        // Resolve the process language and its explicit resource bundle before
+        // AppState formats any user-facing presentation state.
+        let localizer = AppLocalizer.shared
+        self.localizer = localizer
+        _state = StateObject(wrappedValue: AppState.bootstrap())
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -15,6 +24,7 @@ struct OKVideoMacApp: App {
                 .environmentObject(state)
                 .environmentObject(state.navigation)
                 .environment(\.imageRepository, state.imageRepository)
+                .environment(\.locale, localizer.locale)
                 .frame(minWidth: 900, minHeight: 600)
                 .onAppear {
                     appDelegate.install(appState: state)
@@ -64,6 +74,7 @@ struct OKVideoMacApp: App {
             SettingsView()
                 .environmentObject(state)
                 .environmentObject(state.navigation)
+                .environment(\.locale, localizer.locale)
                 .frame(width: 980, height: 650)
         }
     }
@@ -79,7 +90,7 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
         case completed
     }
 
-    private let mainMenuLocalizer = MainMenuChineseLocalizer()
+    private let mainMenuLocalizer = MainMenuLocalizationController()
     private weak var appState: AppState?
     private var playerWindowController: PlayerPlaybackWindowController?
     private var playerPresentationCancellable: AnyCancellable?
@@ -1347,7 +1358,7 @@ private struct PlayerPlaybackWindowRoot: View {
     }
 }
 
-enum MainMenuChineseLocalization {
+enum MainMenuLocalization {
     private static let exactTitles: [String: String] = [
         "File": "文件",
         "Edit": "编辑",
@@ -1438,34 +1449,69 @@ enum MainMenuChineseLocalization {
         "Arrange in Front": "前置排列"
     ]
 
-    static func title(for original: String) -> String {
-        if let exact = exactTitles[original] {
-            return exact
+    private static let englishTitles = Dictionary(
+        uniqueKeysWithValues: exactTitles.map { ($1, $0) }
+    )
+
+    static func title(
+        for original: String,
+        language: AppLanguage = L10n.language
+    ) -> String {
+        switch language {
+        case .simplifiedChinese:
+            if let exact = exactTitles[original] {
+                return exact
+            }
+        case .english:
+            if let exact = englishTitles[original] {
+                return exact
+            }
         }
-        if original.hasPrefix("About ") {
-            return "关于 " + String(original.dropFirst("About ".count))
-        }
-        if original.hasPrefix("Hide ") {
-            return "隐藏 " + String(original.dropFirst("Hide ".count))
-        }
-        if original.hasPrefix("Quit ") {
-            return "退出 " + String(original.dropFirst("Quit ".count))
-        }
-        if original.hasPrefix("Undo ") {
-            return "撤销 " + String(original.dropFirst("Undo ".count))
-        }
-        if original.hasPrefix("Redo ") {
-            return "重做 " + String(original.dropFirst("Redo ".count))
-        }
-        if original.hasSuffix(" Help") {
-            return String(original.dropLast(" Help".count)) + " 帮助"
+        return dynamicTitle(for: original, language: language)
+    }
+
+    private static func dynamicTitle(
+        for original: String,
+        language: AppLanguage
+    ) -> String {
+        switch language {
+        case .simplifiedChinese:
+            if original.hasPrefix("About ") {
+                return "关于 " + String(original.dropFirst("About ".count))
+            }
+            if original.hasPrefix("Hide ") {
+                return "隐藏 " + String(original.dropFirst("Hide ".count))
+            }
+            if original.hasPrefix("Quit ") {
+                return "退出 " + String(original.dropFirst("Quit ".count))
+            }
+            if original.hasPrefix("Undo ") {
+                return "撤销 " + String(original.dropFirst("Undo ".count))
+            }
+            if original.hasPrefix("Redo ") {
+                return "重做 " + String(original.dropFirst("Redo ".count))
+            }
+            if original.hasSuffix(" Help") {
+                return String(original.dropLast(" Help".count)) + " 帮助"
+            }
+        case .english:
+            for (chinese, english) in [
+                ("关于 ", "About "), ("隐藏 ", "Hide "),
+                ("退出 ", "Quit "), ("撤销 ", "Undo "),
+                ("重做 ", "Redo ")
+            ] where original.hasPrefix(chinese) {
+                return english + String(original.dropFirst(chinese.count))
+            }
+            if original.hasSuffix(" 帮助") {
+                return String(original.dropLast(" 帮助".count)) + " Help"
+            }
         }
         return original
     }
 }
 
 @MainActor
-final class MainMenuChineseLocalizer {
+final class MainMenuLocalizationController {
     private var observers: [NSObjectProtocol] = []
     private var pendingMenus: [ObjectIdentifier: NSMenu] = [:]
     private var localizationScheduled = false
@@ -1507,14 +1553,14 @@ final class MainMenuChineseLocalizer {
 
     private func localize(_ menu: NSMenu) {
         for item in menu.items {
-            let translatedTitle = MainMenuChineseLocalization.title(
+            let translatedTitle = MainMenuLocalization.title(
                 for: item.title
             )
             if translatedTitle != item.title {
                 item.title = translatedTitle
             }
             if let submenu = item.submenu {
-                let translatedMenuTitle = MainMenuChineseLocalization.title(
+                let translatedMenuTitle = MainMenuLocalization.title(
                     for: submenu.title
                 )
                 if translatedMenuTitle != submenu.title {
@@ -1565,7 +1611,7 @@ struct AppCommands: Commands {
         CommandMenu("导航") {
             ForEach(Array(AppSection.allCases.enumerated()), id: \.element.id) {
                 index, section in
-                Button(section.rawValue) {
+                Button(section.title) {
                     state.selectSection(section)
                 }
                 .keyboardShortcut(

@@ -11,6 +11,8 @@ struct SettingsView: View {
     @State private var pendingBackupImport: PortableBackupPreview?
     @State private var isBackupBusy = false
     @State private var backupOperationMessage: String?
+    @State private var languageMode = AppLanguagePreferenceStore().load()
+    @State private var isLanguageRestartPromptPresented = false
 
     var body: some View {
         ZStack {
@@ -51,6 +53,17 @@ struct SettingsView: View {
                 }
             )
             .frame(width: 520, height: 390)
+        }
+        .alert(
+            L10n.string(.languageRestartTitle),
+            isPresented: $isLanguageRestartPromptPresented
+        ) {
+            Button(L10n.string(.commonRestart)) {
+                NSApp.terminate(nil)
+            }
+            Button(L10n.string(.languageRestartLater), role: .cancel) {}
+        } message: {
+            Text(L10n.string(.languageRestartMessage))
         }
     }
 
@@ -158,6 +171,34 @@ struct SettingsView: View {
             SettingsSectionTitle("外观")
             SettingsCard {
                 SettingsControlRow(
+                    icon: "globe",
+                    color: .indigo,
+                    title: L10n.string(.languageTitle),
+                    subtitle: L10n.string(.languageSubtitle)
+                ) {
+                    Picker(
+                        L10n.string(.languageTitle),
+                        selection: Binding(
+                            get: { languageMode },
+                            set: { value in
+                                guard value != languageMode else { return }
+                                languageMode = value
+                                AppLanguagePreferenceStore().save(value)
+                                isLanguageRestartPromptPresented = true
+                            }
+                        )
+                    ) {
+                        ForEach(AppLanguageMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 210)
+                }
+
+                SettingsDivider()
+
+                SettingsControlRow(
                     icon: "paintpalette.fill",
                     color: .blue,
                     title: "界面主题",
@@ -175,7 +216,7 @@ struct SettingsView: View {
                         ForEach(
                             [AppTheme.light, .dark, .system]
                         ) { theme in
-                            Text(theme.rawValue).tag(theme)
+                            Text(theme.title).tag(theme)
                         }
                     }
                     .labelsHidden()
@@ -805,7 +846,9 @@ struct SettingsView: View {
             return "可安装新环境；当前环境会保留到新版本验证完成"
         case .failed(let failure, _), .damaged(let failure, _),
              .incompatible(let failure):
-            return failure.message
+            return ManagedRuntimeFailurePresentationMapper.presentation(
+                for: failure
+            ).message
         case .downloading(let detail):
             return detail.componentID.map { "正在下载：\($0)" }
                 ?? "正在下载"
