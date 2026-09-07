@@ -109,6 +109,7 @@ LIBMPV_ROOT="$OKVIDEOMAC_BUILD_ROOT/libmpv"
 QUICKJS_ROOT="$OKVIDEOMAC_BUILD_ROOT/QuickJS"
 NODE_RUNTIME="$APP_DESTINATION/Contents/Resources/NodeRuntime/node"
 EXECUTABLE="$APP_DESTINATION/Contents/MacOS/OKVideoMac"
+RELAUNCHER="$APP_DESTINATION/Contents/Helpers/OKVideoMacRelauncher"
 MPV_BRIDGE="$LIBMPV_ROOT/lib/libOKMPVBridge.dylib"
 LEGAL_SOURCE_DIR="$SOURCE_ROOT/THIRD_PARTY_LICENSES"
 LEGAL_ROOT="$APP_DESTINATION/Contents/Resources/Legal"
@@ -407,6 +408,7 @@ fi
 
 pending=(
   "$EXECUTABLE"
+  "$RELAUNCHER"
   "$NODE_RUNTIME"
   "$FRAMEWORKS/libmpv.dylib"
   "$FRAMEWORKS/libOKMPVBridge.dylib"
@@ -490,12 +492,15 @@ sign_code() {
 # to create or repair signatures.
 for ((index=${#processed[@]} - 1; index >= 0; index--)); do
   binary="${processed[$index]}"
-  if [[ "$binary" == "$EXECUTABLE" || "$binary" == "$NODE_RUNTIME" ]]; then
+  if [[ "$binary" == "$EXECUTABLE" ||
+        "$binary" == "$NODE_RUNTIME" ||
+        "$binary" == "$RELAUNCHER" ]]; then
     continue
   fi
   sign_code "$binary"
 done
 sign_code "$NODE_RUNTIME" "$NODE_ENTITLEMENTS"
+sign_code "$RELAUNCHER"
 sign_code "$EXECUTABLE" "$APP_ENTITLEMENTS"
 
 # Generate the release SBOMs after nested-code signatures are final. The main

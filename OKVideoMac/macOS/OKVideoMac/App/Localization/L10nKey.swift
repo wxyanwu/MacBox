@@ -21,6 +21,8 @@ extension L10nKey {
     static let languageRestartTitle = Self(rawValue: "settings.language.restart.title")
     static let languageRestartMessage = Self(rawValue: "settings.language.restart.message")
     static let languageRestartLater = Self(rawValue: "settings.language.restart.later")
+    static let languageRestartFailureTitle = Self(rawValue: "settings.language.restart.failure.title")
+    static let languageRestartFailureMessage = Self(rawValue: "settings.language.restart.failure.message")
 
     static let sectionBrowse = Self(rawValue: "sidebar.browse")
     static let sectionLiveTV = Self(rawValue: "sidebar.live-tv")

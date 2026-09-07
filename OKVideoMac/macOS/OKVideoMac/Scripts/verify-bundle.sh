@@ -18,6 +18,7 @@ EXECUTABLE="$APP/Contents/MacOS/OKVideoMac"
 FRAMEWORKS="$APP/Contents/Frameworks"
 BRIDGE_APK="$APP/Contents/Resources/AndroidDexBridge-release.apk"
 NODE_RUNTIME="$APP/Contents/Resources/NodeRuntime/node"
+RELAUNCHER="$APP/Contents/Helpers/OKVideoMacRelauncher"
 LEGAL_ROOT="$APP/Contents/Resources/Legal"
 ANDROID_SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 if [[ -z "$ANDROID_SDK" && -d "$HOME/Library/Android/sdk" ]]; then
@@ -113,10 +114,31 @@ if [[ ! -x "$EXECUTABLE" ]]; then
   echo "Main executable missing: $EXECUTABLE" >&2
   exit 1
 fi
+if [[ ! -x "$RELAUNCHER" ]]; then
+  echo "Bundled app relaunch helper is missing: $RELAUNCHER" >&2
+  exit 1
+fi
+if ! lipo -info "$RELAUNCHER" | grep -q 'arm64'; then
+  echo "Bundled app relaunch helper is not arm64." >&2
+  exit 1
+fi
 if ! lipo -info "$EXECUTABLE" | grep -q 'arm64'; then
   echo "Main executable is not arm64." >&2
   exit 1
 fi
+for localization in en zh-Hans; do
+  localization_root="$APP/Contents/Resources/$localization.lproj"
+  if [[ ! -f "$localization_root/Localizable.strings" ]] ||
+     [[ ! -f "$localization_root/InfoPlist.strings" ]]; then
+    echo "Required $localization localization resources are missing." >&2
+    exit 1
+  fi
+  if ! plutil -p "$localization_root/Localizable.strings" |
+       grep -F '"settings.language.restart.failure.title"' >/dev/null; then
+    echo "Relaunch failure localization is missing for $localization." >&2
+    exit 1
+  fi
+done
 if [[ ! -f "$FRAMEWORKS/libmpv.dylib" ]]; then
   echo "Bundled libmpv is missing." >&2
   exit 1
@@ -433,9 +455,9 @@ if ! grep -Fqx "$apk_sha  $apk_relative" "$OUTPUT_HASH_MANIFEST"; then
 fi
 actual_hash_entries="$(grep -Ec '^[0-9a-f]{64}  Contents/' \
   "$OUTPUT_HASH_MANIFEST")"
-if [[ "$mach_o_entries" -ne 28 ]] ||
-   [[ "$expected_hash_entries" -ne 27 ]] ||
-   [[ "$actual_hash_entries" -ne 28 ]]; then
+if [[ "$mach_o_entries" -ne 29 ]] ||
+   [[ "$expected_hash_entries" -ne 28 ]] ||
+   [[ "$actual_hash_entries" -ne 29 ]]; then
   echo "Unexpected generated output hash inventory: $actual_hash_entries entries" >&2
   exit 1
 fi
@@ -487,8 +509,8 @@ while IFS= read -r binary; do
   fi
 done < <(find "$APP/Contents" -type f \( -perm -111 -o -name '*.dylib' \))
 
-if [[ "$mach_o_count" -ne 28 ]]; then
-  echo "Unexpected Mach-O inventory count: $mach_o_count (expected 28)" >&2
+if [[ "$mach_o_count" -ne 29 ]]; then
+  echo "Unexpected Mach-O inventory count: $mach_o_count (expected 29)" >&2
   failure=1
 fi
 

@@ -8,6 +8,38 @@ import OKVideoCore
 import OKVideoPersistence
 @testable import OKVideoMac
 
+@MainActor
+private final class AppRelaunchHelperLauncherSpy: AppRelaunchHelperLaunching {
+    var requests: [AppRelaunchRequest] = []
+    var failure: AppRelaunchError?
+
+    func prepareRelaunch(_ request: AppRelaunchRequest) async throws {
+        requests.append(request)
+        if let failure {
+            throw failure
+        }
+    }
+}
+
+@MainActor
+private final class SuspendedAppRelaunchHelperLauncher:
+    AppRelaunchHelperLaunching {
+    var requests: [AppRelaunchRequest] = []
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func prepareRelaunch(_ request: AppRelaunchRequest) async throws {
+        requests.append(request)
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func finishPreparation() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
 final class OKVideoMacTests: XCTestCase {
     func testApplicationBundleProhibitsMultipleInstances() {
         XCTAssertEqual(
@@ -67,6 +99,234 @@ final class OKVideoMacTests: XCTestCase {
             defaults.string(forKey: AppLanguagePreferenceStore.key),
             "en"
         )
+    }
+
+    func testLanguageSelectionPersistsBeforeRestartDecision() throws {
+        let suiteName = "OKVideoMacTests.LanguageSelection.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = AppLanguagePreferenceStore(defaults: defaults)
+        let controller = AppLanguageSelectionController(store: store)
+
+        let selection = controller.select(
+            .simplifiedChinese,
+            activeLanguage: .english,
+            preferredLanguages: ["en-US"]
+        )
+
+        XCTAssertEqual(store.load(), .simplifiedChinese)
+        XCTAssertEqual(selection.resolvedLanguage, .simplifiedChinese)
+        XCTAssertTrue(selection.requiresRestart)
+    }
+
+    func testLanguageSelectionDoesNotRestartWhenResolvedLanguageIsActive() throws {
+        let suiteName = "OKVideoMacTests.LanguageResolved.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = AppLanguagePreferenceStore(defaults: defaults)
+
+        let selection = AppLanguageSelectionController(store: store).select(
+            .system,
+            activeLanguage: .simplifiedChinese,
+            preferredLanguages: ["zh-Hans-CN"]
+        )
+
+        XCTAssertEqual(store.load(), .system)
+        XCTAssertFalse(selection.requiresRestart)
+    }
+
+    func testDeferredLanguageRestartKeepsPersistedPreference() throws {
+        let suiteName = "OKVideoMacTests.LanguageDeferred.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = AppLanguagePreferenceStore(defaults: defaults)
+
+        let selection = AppLanguageSelectionController(store: store).select(
+            .english,
+            activeLanguage: .simplifiedChinese,
+            preferredLanguages: ["zh-Hans-CN"]
+        )
+
+        XCTAssertTrue(selection.requiresRestart)
+        // This is the model-side equivalent of choosing Later: no relaunch
+        // action is invoked and the newly selected preference is retained.
+        XCTAssertEqual(store.load(), .english)
+    }
+
+    func testRelaunchParentExitMonitorUsesActualPIDExit() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["0.15"]
+        try process.run()
+
+        let monitor = RelaunchParentExitMonitor(
+            processIdentifier: process.processIdentifier
+        )
+        XCTAssertTrue(monitor.waitForExit(timeout: 2))
+        process.waitUntilExit()
+    }
+
+    func testRelaunchParentExitMonitorDoesNotTreatRunningPIDAsExited() {
+        let monitor = RelaunchParentExitMonitor(
+            processIdentifier: ProcessInfo.processInfo.processIdentifier
+        )
+        XCTAssertFalse(monitor.waitForExit(timeout: 0.02))
+    }
+
+    @MainActor
+    func testRelaunchCoordinatorArmsHelperBeforeTermination() async throws {
+        let helper = AppRelaunchHelperLauncherSpy()
+        let bundleURL = URL(fileURLWithPath: "/Applications/OKVideoMac.app")
+        var terminationCount = 0
+        let coordinator = AppRelaunchCoordinator(
+            helperLauncher: helper,
+            bundleURLProvider: { bundleURL },
+            bundleIdentifierProvider: { "com.okvideomac.OKVideoMac" },
+            processIdentifierProvider: { 1_234 },
+            terminationRequest: { terminationCount += 1 }
+        )
+
+        try await coordinator.restartApplication()
+
+        XCTAssertEqual(helper.requests.count, 1)
+        XCTAssertEqual(helper.requests.first?.parentProcessIdentifier, 1_234)
+        XCTAssertEqual(helper.requests.first?.bundleURL, bundleURL)
+        XCTAssertEqual(
+            helper.requests.first?.bundleIdentifier,
+            "com.okvideomac.OKVideoMac"
+        )
+        XCTAssertFalse(helper.requests.first?.handshakeToken.isEmpty ?? true)
+        XCTAssertEqual(terminationCount, 1)
+        XCTAssertEqual(coordinator.state, .terminationRequested)
+    }
+
+    @MainActor
+    func testRelaunchCoordinatorKeepsAppRunningWhenHelperFails() async {
+        let helper = AppRelaunchHelperLauncherSpy()
+        helper.failure = .helperHandshakeFailed
+        var terminationCount = 0
+        let coordinator = AppRelaunchCoordinator(
+            helperLauncher: helper,
+            bundleURLProvider: {
+                URL(fileURLWithPath: "/Applications/OKVideoMac.app")
+            },
+            bundleIdentifierProvider: { "com.okvideomac.OKVideoMac" },
+            processIdentifierProvider: { 1_234 },
+            terminationRequest: { terminationCount += 1 }
+        )
+
+        do {
+            try await coordinator.restartApplication()
+            XCTFail("Expected relaunch preparation to fail")
+        } catch {
+            XCTAssertEqual(error as? AppRelaunchError, .helperHandshakeFailed)
+        }
+
+        XCTAssertEqual(helper.requests.count, 1)
+        XCTAssertEqual(terminationCount, 0)
+        XCTAssertEqual(coordinator.state, .idle)
+    }
+
+    @MainActor
+    func testRelaunchCoordinatorStartsOnlyOneConcurrentHelper() async throws {
+        let helper = SuspendedAppRelaunchHelperLauncher()
+        var terminationCount = 0
+        let coordinator = AppRelaunchCoordinator(
+            helperLauncher: helper,
+            bundleURLProvider: {
+                URL(fileURLWithPath: "/Applications/OKVideoMac.app")
+            },
+            bundleIdentifierProvider: { "com.okvideomac.OKVideoMac" },
+            processIdentifierProvider: { 1_234 },
+            terminationRequest: { terminationCount += 1 }
+        )
+
+        let firstRequest = Task { @MainActor in
+            try await coordinator.restartApplication()
+        }
+        while helper.requests.isEmpty {
+            await Task.yield()
+        }
+        try await coordinator.restartApplication()
+
+        XCTAssertEqual(helper.requests.count, 1)
+        XCTAssertEqual(terminationCount, 0)
+        helper.finishPreparation()
+        try await firstRequest.value
+        XCTAssertEqual(terminationCount, 1)
+    }
+
+    @MainActor
+    func testRelaunchHelperURLUsesExactApplicationBundle() {
+        let bundleURL = URL(
+            fileURLWithPath: "/tmp/Derived Data/Build/OKVideoMac.app"
+        )
+
+        XCTAssertEqual(
+            ProcessAppRelaunchHelperLauncher.helperURL(
+                inApplicationBundle: bundleURL
+            ).path,
+            "/tmp/Derived Data/Build/OKVideoMac.app/Contents/Helpers/OKVideoMacRelauncher"
+        )
+    }
+
+    @MainActor
+    func testLanguageRestartDoesNotMutateAndroidRuntimeState() async throws {
+        let suiteName = "OKVideoMacTests.LanguageIsolation.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(
+            "/Volumes/External Android SDK",
+            forKey: AndroidRuntimeModeStore.legacySDKRootDefaultsKey
+        )
+
+        let fixtureRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let runtimeSelectionURL = fixtureRoot
+            .appendingPathComponent("AndroidRuntime", isDirectory: true)
+            .appendingPathComponent("runtime-selection.json")
+        let userdataURL = fixtureRoot
+            .appendingPathComponent("avd", isDirectory: true)
+            .appendingPathComponent("userdata-qemu.img")
+        try FileManager.default.createDirectory(
+            at: runtimeSelectionURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: userdataURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let runtimeSelection = Data("runtime-selection-fixture".utf8)
+        let userdata = Data("avd-userdata-fixture".utf8)
+        try runtimeSelection.write(to: runtimeSelectionURL)
+        try userdata.write(to: userdataURL)
+        defer { try? FileManager.default.removeItem(at: fixtureRoot) }
+
+        let store = AppLanguagePreferenceStore(defaults: defaults)
+        _ = AppLanguageSelectionController(store: store).select(
+            .english,
+            activeLanguage: .simplifiedChinese
+        )
+        let helper = AppRelaunchHelperLauncherSpy()
+        let coordinator = AppRelaunchCoordinator(
+            helperLauncher: helper,
+            bundleURLProvider: {
+                URL(fileURLWithPath: "/Applications/OKVideoMac.app")
+            },
+            bundleIdentifierProvider: { "com.okvideomac.OKVideoMac" },
+            processIdentifierProvider: { 1_234 },
+            terminationRequest: {}
+        )
+        try await coordinator.restartApplication()
+
+        XCTAssertEqual(
+            defaults.string(
+                forKey: AndroidRuntimeModeStore.legacySDKRootDefaultsKey
+            ),
+            "/Volumes/External Android SDK"
+        )
+        XCTAssertEqual(try Data(contentsOf: runtimeSelectionURL), runtimeSelection)
+        XCTAssertEqual(try Data(contentsOf: userdataURL), userdata)
     }
 
     func testExplicitLocalizationBundleLoadsEnglishAndSimplifiedChinese() {

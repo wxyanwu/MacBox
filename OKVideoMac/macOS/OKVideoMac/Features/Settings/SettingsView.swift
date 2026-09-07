@@ -19,6 +19,13 @@ private enum SettingsL10n {
     }
 }
 
+private enum SettingsLanguageAlert: String, Identifiable {
+    case restartRequired
+    case restartFailed
+
+    var id: String { rawValue }
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var state: AppState
     @State private var posterCacheSize = SettingsL10n.string(
@@ -29,7 +36,7 @@ struct SettingsView: View {
     @State private var isBackupBusy = false
     @State private var backupOperationMessage: String?
     @State private var languageMode = AppLanguagePreferenceStore().load()
-    @State private var isLanguageRestartPromptPresented = false
+    @State private var languageAlert: SettingsLanguageAlert?
 
     var body: some View {
         ZStack {
@@ -73,16 +80,8 @@ struct SettingsView: View {
             )
             .frame(width: 520, height: 390)
         }
-        .alert(
-            L10n.string(.languageRestartTitle),
-            isPresented: $isLanguageRestartPromptPresented
-        ) {
-            Button(L10n.string(.commonRestart)) {
-                NSApp.terminate(nil)
-            }
-            Button(L10n.string(.languageRestartLater), role: .cancel) {}
-        } message: {
-            Text(L10n.string(.languageRestartMessage))
+        .alert(item: $languageAlert) { alert in
+            languageAlertPresentation(alert)
         }
     }
 
@@ -203,8 +202,14 @@ struct SettingsView: View {
                             set: { value in
                                 guard value != languageMode else { return }
                                 languageMode = value
-                                AppLanguagePreferenceStore().save(value)
-                                isLanguageRestartPromptPresented = true
+                                let selection = AppLanguageSelectionController()
+                                    .select(
+                                        value,
+                                        activeLanguage: L10n.language
+                                    )
+                                languageAlert = selection.requiresRestart
+                                    ? .restartRequired
+                                    : nil
                             }
                         )
                     ) {
@@ -322,6 +327,41 @@ struct SettingsView: View {
                     .pickerStyle(.menu)
                     .frame(width: 128)
                 }
+            }
+        }
+    }
+
+    private func languageAlertPresentation(
+        _ alert: SettingsLanguageAlert
+    ) -> Alert {
+        switch alert {
+        case .restartRequired:
+            return Alert(
+                title: Text(L10n.string(.languageRestartTitle)),
+                message: Text(L10n.string(.languageRestartMessage)),
+                primaryButton: .default(
+                    Text(L10n.string(.commonRestart)),
+                    action: requestLanguageRestart
+                ),
+                secondaryButton: .cancel(
+                    Text(L10n.string(.languageRestartLater))
+                )
+            )
+        case .restartFailed:
+            return Alert(
+                title: Text(L10n.string(.languageRestartFailureTitle)),
+                message: Text(L10n.string(.languageRestartFailureMessage)),
+                dismissButton: .default(Text(L10n.string(.commonOK)))
+            )
+        }
+    }
+
+    private func requestLanguageRestart() {
+        Task { @MainActor in
+            do {
+                try await AppRelaunchCoordinator.shared.restartApplication()
+            } catch {
+                languageAlert = .restartFailed
             }
         }
     }

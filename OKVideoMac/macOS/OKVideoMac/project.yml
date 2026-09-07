@@ -23,6 +23,20 @@ settings:
     CURRENT_PROJECT_VERSION: 99
 
 targets:
+  OKVideoMacRelauncher:
+    type: tool
+    platform: macOS
+    deploymentTarget: "12.0"
+    sources:
+      - path: Relauncher
+      - path: App/RelaunchParentExitMonitor.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.okvideomac.OKVideoMac.Relauncher
+        PRODUCT_NAME: OKVideoMacRelauncher
+        CODE_SIGN_STYLE: Automatic
+        SKIP_INSTALL: true
+
   OKVideoMac:
     type: application
     platform: macOS
@@ -80,6 +94,17 @@ targets:
               public.mime-type:
                 - application/vnd.okvideomac.backup+json
     postBuildScripts:
+      - name: Embed app relaunch helper
+        script: |
+          RELAUNCHER_SOURCE="${BUILT_PRODUCTS_DIR}/OKVideoMacRelauncher"
+          HELPERS_DIR="${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers"
+          if [[ ! -x "${RELAUNCHER_SOURCE}" ]]; then
+            echo "App relaunch helper is missing: ${RELAUNCHER_SOURCE}" >&2
+            exit 1
+          fi
+          mkdir -p "${HELPERS_DIR}"
+          cp "${RELAUNCHER_SOURCE}" "${HELPERS_DIR}/OKVideoMacRelauncher"
+          chmod 755 "${HELPERS_DIR}/OKVideoMacRelauncher"
       - name: Embed Android Java/Dex bridge
         script: |
           BRIDGE_APK="${SRCROOT}/../../Helpers/AndroidDexBridge/app/build/outputs/apk/release/app-release.apk"
@@ -170,6 +195,8 @@ targets:
           chmod 755 "${NODE_DIR}/node"
           cp "${NODE_ROOT}/LICENSE" "${LICENSES_DIR}/Node.js-LICENSE.txt"
     dependencies:
+      - target: OKVideoMacRelauncher
+        link: false
       - package: OKVideoKit
         product: OKVideoCore
       - package: OKVideoKit

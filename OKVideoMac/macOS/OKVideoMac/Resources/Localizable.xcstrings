@@ -3863,6 +3863,40 @@
         }
       }
     },
+    "settings.language.restart.failure.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OKVideoMac couldn't restart automatically. Quit and reopen the app to apply the new language."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OKVideoMac 无法自动重新启动。请退出并重新打开 App 以应用新的语言。"
+          }
+        }
+      }
+    },
+    "settings.language.restart.failure.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unable to Restart"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法重新启动"
+          }
+        }
+      }
+    },
     "settings.language.restart.later": {
       "extractionState": "manual",
       "localizations": {

@@ -43,7 +43,8 @@ fi
 APP="$1"
 MAIN_EXECUTABLE="$APP/Contents/MacOS/OKVideoMac"
 NODE_EXECUTABLE="$APP/Contents/Resources/NodeRuntime/node"
-if [[ ! -d "$APP" || ! -x "$MAIN_EXECUTABLE" || ! -x "$NODE_EXECUTABLE" ]]; then
+RELAUNCHER_EXECUTABLE="$APP/Contents/Helpers/OKVideoMacRelauncher"
+if [[ ! -d "$APP" || ! -x "$MAIN_EXECUTABLE" || ! -x "$NODE_EXECUTABLE" || ! -x "$RELAUNCHER_EXECUTABLE" ]]; then
   echo "Incomplete OKVideoMac bundle: $APP" >&2
   exit 1
 fi

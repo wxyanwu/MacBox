@@ -83,3 +83,37 @@ struct AppLanguagePreferenceStore {
         defaults.set(mode.rawValue, forKey: Self.key)
     }
 }
+
+struct AppLanguageSelection: Equatable, Sendable {
+    let mode: AppLanguageMode
+    let resolvedLanguage: AppLanguage
+    let requiresRestart: Bool
+}
+
+struct AppLanguageSelectionController {
+    private let store: AppLanguagePreferenceStore
+
+    init(store: AppLanguagePreferenceStore = AppLanguagePreferenceStore()) {
+        self.store = store
+    }
+
+    /// Persists the stable preference before returning a presentation decision.
+    /// The comparison is against the language of the running process rather than
+    /// the previously selected mode: a user may have already chosen Later.
+    func select(
+        _ mode: AppLanguageMode,
+        activeLanguage: AppLanguage,
+        preferredLanguages: [String] = Locale.preferredLanguages
+    ) -> AppLanguageSelection {
+        store.save(mode)
+        let resolvedLanguage = AppLanguageResolver.resolve(
+            mode: mode,
+            preferredLanguages: preferredLanguages
+        )
+        return AppLanguageSelection(
+            mode: mode,
+            resolvedLanguage: resolvedLanguage,
+            requiresRestart: resolvedLanguage != activeLanguage
+        )
+    }
+}
