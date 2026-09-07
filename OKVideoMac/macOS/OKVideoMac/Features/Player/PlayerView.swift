@@ -370,6 +370,11 @@ struct PlayerView: View {
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(
+                isPaused
+                    ? L10n.string("common.play", fallback: "Play")
+                    : L10n.string("common.pause", fallback: "Pause")
+            )
             .help(
                 isPaused
                     ? L10n.string("common.play", fallback: "Play")
@@ -481,6 +486,11 @@ struct PlayerView: View {
                 .contentShape(Circle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(
+                state.playerSnapshot.isMuted
+                    ? L10n.string("player.unmute", fallback: "Unmute")
+                    : L10n.string("player.mute-volume", fallback: "Mute and Volume")
+            )
             .help(
                 state.playerSnapshot.isMuted
                     ? L10n.string("player.unmute", fallback: "Unmute")
@@ -529,6 +539,11 @@ struct PlayerView: View {
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(
+            isWindowFullScreen
+                ? L10n.string("player.exit-full-screen", fallback: "Exit Full Screen")
+                : L10n.string("player.enter-full-screen", fallback: "Enter Full Screen")
+        )
         .foregroundColor(.white.opacity(0.96))
         .help(
             isWindowFullScreen

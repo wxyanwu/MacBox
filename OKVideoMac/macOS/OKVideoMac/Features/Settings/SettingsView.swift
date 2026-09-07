@@ -46,7 +46,7 @@ struct SettingsView: View {
 
             HSplitView {
                 settingsSidebar
-                    .frame(minWidth: 190, idealWidth: 210, maxWidth: 230)
+                    .frame(minWidth: 260, idealWidth: 280, maxWidth: 300)
                 detailContent
                     .frame(minWidth: 590)
             }
@@ -123,7 +123,8 @@ struct SettingsView: View {
                     Text(pane.subtitle)
                         .font(.caption2)
                         .foregroundColor(.secondary)
-                        .lineLimit(1)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Spacer(minLength: 4)
@@ -1499,13 +1500,24 @@ private struct PlayerWindowSettingsControl: View {
     let restoreDefault: () -> Void
 
     var body: some View {
-        SettingsControlRow(
-            icon: "play.rectangle.on.rectangle.fill",
-            color: .purple,
-            title: SettingsL10n.string("settings.player-window.title", "Player Window"),
-            subtitle: subtitle
-        ) {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 13) {
+                SettingsRowIcon(
+                    systemImage: "play.rectangle.on.rectangle.fill",
+                    color: .purple
+                )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(SettingsL10n.string("settings.player-window.title", "Player Window"))
+                        .font(.headline)
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
             HStack(spacing: 10) {
+                Spacer(minLength: 45)
+
                 Picker(
                     SettingsL10n.string("settings.player-window.mode.label", "Player Window Mode"),
                     selection: Binding(
@@ -1523,8 +1535,10 @@ private struct PlayerWindowSettingsControl: View {
 
                 Button(SettingsL10n.string("settings.common.restore-default", "Restore Default"), action: restoreDefault)
                     .help(SettingsL10n.string("settings.player-window.restore.help", "Clear the saved player window size, position, and mode"))
+                    .fixedSize()
             }
         }
+        .padding(16)
     }
 
     private var subtitle: String {
