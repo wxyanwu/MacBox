@@ -2,8 +2,9 @@
 
 English | [简体中文](README_zh-CN.md)
 
-**A native macOS video and live-TV client for Apple Silicon, with selected
-TVBox-, CatVod-, and CatPaw-style providers, QuickJS and Node Spider runtimes,
+**A native macOS video and live-TV client for Apple Silicon, with
+Native Xtream-compatible APIs, selected TVBox-, CatVod-, and CatPaw-style
+providers, QuickJS and Node Spider runtimes,
 and optional managed Android support.**
 
 [![Latest release](https://img.shields.io/github/v/release/yaolin-dev/OKVideoMac?display_name=tag&sort=semver)](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
@@ -20,7 +21,7 @@ QuickJS/Node Spiders · Optional Java/Dex compatibility**
 
 ### [Download the latest stable release →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-The current release is **0.5.0 (Build 99)** · macOS 12.0+ · Apple Silicon
+The current release is **0.6.0 (Build 100)** · macOS 12.0+ · Apple Silicon
 (`arm64`) only · Developer ID signed · Apple notarized and stapled.
 
 Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to
@@ -29,6 +30,25 @@ and notices are published with each release.
 
 > OKVideoMac is a player and provider client. It does not include third-party
 > video sources, accounts, cookies, parsing services, or DRM keys.
+
+## New in 0.6.0
+
+- **Native Xtream-compatible APIs:** add an account, browse Movies and Series,
+  navigate seasons/episodes, search both catalogs and play Basic Live channels.
+  Credentials stay in macOS Keychain; exports require credentials to be entered again.
+- **Native Live compatibility:** isolated static HTTP proxy handling, HTTPS CONNECT,
+  normal media redirects, bounded TS/HLS fallback, and cancellation/ownership guards.
+  Ordinary imported Live and VOD retain their existing startup policies.
+- **English and Simplified Chinese:** String Catalog resources, a persistent language
+  choice and a restart/relaunch flow. First launch follows the first system-preferred
+  language; unsupported languages, including Traditional Chinese, resolve to English.
+- **Simpler source setup and player panels:** grouped configuration entry points and
+  content-sized episode/audio/subtitle/settings panels across window sizes.
+
+Native Xtream does not implement Xtream EPG, catch-up/timeshift or `direct_source`.
+Proxy support does not reproduce all PAC, SOCKS, authenticated-proxy or per-CDN
+routing behavior. Complex HLS masters can still start slowly; the bounded fallback
+handles only a conservative subset. See the [release notes](Docs/RELEASE_NOTES_0.6.0.md).
 
 ## Screenshots
 
@@ -44,7 +64,8 @@ and notices are published with each release.
   </tr>
 </table>
 
-These are real Release-app captures made with the repository's original demo
+These historical 0.4.0 screenshots predate the new source and language settings.
+They are real Release-app captures made with the repository's original demo
 source—no third-party catalogue, account, or private URL is shown. See the
 [screenshot manifest](Docs/Media/v0.4.0/README.md) and
 [demo source](Docs/DemoSource/README.md). The full set also includes
@@ -82,6 +103,7 @@ source—no third-party catalogue, account, or private URL is shown. See the
 | Apple Silicon | Supported | `arm64`, macOS 12.0 or later |
 | VOD and libmpv playback | Supported | Media behavior still depends on the source/server |
 | Live TV and XMLTV EPG | Supported | M3U, TXT, and JSON import paths |
+| Native Xtream | Supported | Authentication, Movies, Series, Movie/Series search and Basic Live; server differences apply |
 | Native CMS JSON | Supported | Home, category, filter, detail, search, and play handoff |
 | QuickJS Spider | Selected | Compatible scripts matching the implemented API |
 | Node Spider | Selected | CatVod/CatPaw-style video-interface subset |
@@ -131,6 +153,7 @@ validation limits are documented in [Android Bridge Setup](OKVideoMac/macOS/OKVi
 
 | Source / runtime | Level | Current scope |
 | --- | --- | --- |
+| Native Xtream | Supported | Authentication, Movies, Series, Movie/Series search and Basic Live; server differences apply |
 | Native CMS JSON | Supported | Main provider path |
 | CMS XML / native type 4 | Partial | Narrower coverage than CMS JSON |
 | TVBox/CatVod-style QuickJS | Selected | `home`, `category`, `detail`, `search`, `play`, and selected helpers |
@@ -234,10 +257,10 @@ checks; a local Debug compile is not a public release artifact.
 
 ## Release integrity
 
-The public **0.5.0 (Build 99)** assets are built from tag `v0.5.0`. The signed,
+The public **0.6.0 (Build 100)** assets are built from tag `v0.6.0`. The signed,
 notarized, and stapled DMG is published with a SHA-256 checksum, corresponding
 source, SBOMs, notices, and release manifests. See the
-[0.5.0 release notes](Docs/RELEASE_NOTES_0.5.0.md),
+[0.6.0 release notes](Docs/RELEASE_NOTES_0.6.0.md),
 [source release process](Docs/SOURCE_RELEASE_PROCESS.md), and
 [DMG release process](Docs/DMG_RELEASE_PROCESS.md).
 

@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E56F923C89AE4390A50D1001 /* SystemMediaProxyResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = E56F923C89AE4390A50D1002; };
 		05D5512B69A7C71CC3112A74 /* MPVLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D3A1A89473AFD33AAF47D01 /* MPVLibrary.swift */; };
 		083415A33963622BE41DA10B /* RuntimeFailurePresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26FCBADA60EED61610353636 /* RuntimeFailurePresentation.swift */; };
 		0DC49DC6E8989EB3C7FFADD2 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADFC0D6C3C9A30793D7813B3 /* AppState.swift */; };
@@ -79,6 +80,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		E56F923C89AE4390A50D1002 /* SystemMediaProxyResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemMediaProxyResolver.swift; sourceTree = "<group>"; };
 		0443D3DC2B3D840D56D011E6 /* AppRelaunchCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRelaunchCoordinator.swift; sourceTree = "<group>"; };
 		04E18EAE5CCFAEC3E0E3E49A /* DetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailView.swift; sourceTree = "<group>"; };
 		09C1F786F0D9BA2EB9105485 /* AppEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppEnvironment.swift; sourceTree = "<group>"; };
@@ -358,6 +360,7 @@
 			children = (
 				3D3A1A89473AFD33AAF47D01 /* MPVLibrary.swift */,
 				C6326E81195BB34CCB3CEC61 /* MPVPlayerClient.swift */,
+				E56F923C89AE4390A50D1002 /* SystemMediaProxyResolver.swift */,
 				2A119CE857C4037E4EA9BAB8 /* MPVRenderView.swift */,
 				A3FF98807A0D56E338F4B907 /* PlayerWindowPreferenceStore.swift */,
 			);
@@ -669,6 +672,7 @@
 				907BE2DC1B86A821A8D0AC2B /* LiveView.swift in Sources */,
 				05D5512B69A7C71CC3112A74 /* MPVLibrary.swift in Sources */,
 				A0BF2B3C33EFE592A9DF59F9 /* MPVPlayerClient.swift in Sources */,
+				E56F923C89AE4390A50D1001 /* SystemMediaProxyResolver.swift in Sources */,
 				15EC54A8AB04926723F01FFD /* MPVRenderView.swift in Sources */,
 				CA7782FAED307EC8B1B38D2D /* NodeBundleRuntimeService.swift in Sources */,
 				285AF5B7AA73E51C0BE0F632 /* NodeHTTPSpiderSiteProvider.swift in Sources */,
@@ -756,7 +760,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 99;
+				CURRENT_PROJECT_VERSION = 100;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -775,7 +779,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 0.5.0;
+				MARKETING_VERSION = 0.6.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -917,7 +921,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 99;
+				CURRENT_PROJECT_VERSION = 100;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -930,7 +934,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 0.5.0;
+				MARKETING_VERSION = 0.6.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

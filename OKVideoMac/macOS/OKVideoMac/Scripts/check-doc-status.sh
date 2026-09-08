@@ -58,16 +58,39 @@ assert_exact_line "$COMPATIBILITY" "- 对照版本：${VERSION}（Build ${BUILD}
 assert_exact_line "$PERFORMANCE" "- 对照版本：${VERSION}（Build ${BUILD}）"
 assert_contains "$ROOT_README" "current release is **${VERSION} (Build ${BUILD})**"
 assert_contains "$ROOT_README_ZH" "当前正式版本为 **${VERSION}（Build ${BUILD}）**"
-assert_exact_line "$CHANGELOG" "## [${VERSION}] - 2026-09-07"
+assert_exact_line "$CHANGELOG" "## [${VERSION}] - 2026-09-09"
 assert_contains "$NOTICES" "OKVideoMac ${VERSION} (Build ${BUILD})"
-assert_contains "$README" "- Xcode：649 total / 643 passed / 6 intentionally skipped / 0 failed"
-assert_contains "$README" "- OKVideoKit：173 passed / 0 failed"
+assert_contains "$README" "- Xcode：719 total / 713 passed / 6 intentionally skipped / 0 failed"
+assert_contains "$README" "- OKVideoKit：261 passed / 0 failed"
 assert_contains "$README" "- Node / CatPaw / Quark：30 passed / 0 failed"
 assert_contains "$README" "- Android Release assemble 与 lint：通过；Android JVM unit tests：NO-SOURCE"
 assert_exact_line "$PERFORMANCE" "- 多站搜索全局并发 20；共享同一 Node runtime 的站点并发 20，聚合搜索每站只取第一页；"
 assert_contains "$SOURCE_RELEASE_PROCESS" "OKVideoMac-${VERSION}.dmg"
 assert_contains "$SOURCE_RELEASE_PROCESS" "OKVideoMac-${VERSION}-macOS-arm64.zip"
 assert_exact_line "$REPOSITORY_ROOT/Docs/RELEASE_NOTES_${VERSION}.md" "# OKVideoMac ${VERSION}（Build ${BUILD}）Release Notes"
+assert_contains "$README" "releases/tag/v${VERSION}"
+assert_contains "$README" "OKVideoMac-${VERSION}-build${BUILD}-SOURCE_RELEASE_INDEX.json"
+assert_contains "$COMPATIBILITY" "tag \`v${VERSION}\`"
+
+PYTHONDONTWRITEBYTECODE=1 python3 - "$PROJECT_DIR" "$VERSION" "$BUILD" <<'PY'
+import pathlib
+import plistlib
+import re
+import sys
+
+root, version, build = sys.argv[1:]
+root = pathlib.Path(root)
+project = (root / "OKVideoMac.xcodeproj/project.pbxproj").read_text()
+for key, expected in (("MARKETING_VERSION", version), ("CURRENT_PROJECT_VERSION", build)):
+    values = re.findall(rf"\b{key}\s*=\s*([^;]+);", project)
+    if not values or any(value.strip().strip('"') != expected for value in values):
+        raise SystemExit(f"Xcode project {key} disagrees with project.yml: {values}")
+info = plistlib.loads((root / "Supporting/Info.plist").read_bytes())
+for key, expected in (("CFBundleShortVersionString", "$(MARKETING_VERSION)"),
+                      ("CFBundleVersion", "$(CURRENT_PROJECT_VERSION)")):
+    if info.get(key) != expected:
+        raise SystemExit(f"Info.plist must use the shared build setting for {key}")
+PY
 
 PYTHONDONTWRITEBYTECODE=1 python3 - "$NATIVE_LOCK" "$VERSION" "$BUILD" <<'PY'
 import json
@@ -96,4 +119,4 @@ for historical_document in \
   fi
 done
 
-echo "Documentation status check passed: ${VERSION} (${BUILD})"
+echo "Documentation status check passed: ${VERSION} (Build ${BUILD})"

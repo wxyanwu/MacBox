@@ -111,6 +111,133 @@ final class HTTPClientTests: XCTestCase {
         }
     }
 
+    func testEarlyResponseLimitIsOptInAndStopsOversizedResponse() async {
+        let ordinary = HTTPRequest(
+            url: URL(string: "https://example.invalid/ordinary")!
+        )
+        XCTAssertNil(ordinary.earlyResponseLimitBytes)
+        XCTAssertEqual(ordinary.redirectPolicy, .follow)
+
+        MockURLProtocol.handler = { request in
+            (
+                HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: ["Content-Length": "11"]
+                )!,
+                Data(repeating: 1, count: 11)
+            )
+        }
+
+        do {
+            _ = try await makeClient().send(
+                HTTPRequest(
+                    url: URL(string: "https://example.invalid/large")!,
+                    maximumResponseBytes: 10,
+                    earlyResponseLimitBytes: 10,
+                    retryPolicy: .none
+                )
+            )
+            XCTFail("Expected early size error")
+        } catch {
+            XCTAssertEqual(
+                error as? HTTPClientError,
+                .responseTooLarge(limit: 10, actual: 11)
+            )
+        }
+    }
+
+    func testDefaultTransportRetainsSharedCookieAndCacheSemantics() {
+        let original = URLSessionConfiguration.default
+        let originalCache = original.urlCache
+        let originalCredentials = original.urlCredentialStorage
+        let client = URLSessionHTTPClient(configuration: original)
+        let configuration = client.transportConfiguration
+
+        XCTAssertTrue(configuration.httpShouldSetCookies)
+        XCTAssertTrue(configuration.httpCookieStorage === HTTPCookieStorage.shared)
+        XCTAssertTrue(configuration.urlCache === originalCache)
+        XCTAssertTrue(configuration.urlCredentialStorage === originalCredentials)
+        XCTAssertEqual(configuration.requestCachePolicy, .reloadIgnoringLocalCacheData)
+    }
+
+    func testIsolatedEphemeralFactoryDisablesAllSessionStorage() {
+        let client = URLSessionHTTPClient.isolatedEphemeral()
+        let configuration = client.transportConfiguration
+
+        XCTAssertFalse(configuration.httpShouldSetCookies)
+        XCTAssertEqual(configuration.httpCookieAcceptPolicy, .never)
+        XCTAssertNil(configuration.httpCookieStorage)
+        XCTAssertNil(configuration.urlCache)
+        XCTAssertNil(configuration.urlCredentialStorage)
+        XCTAssertEqual(configuration.requestCachePolicy, .reloadIgnoringLocalCacheData)
+
+        // Mutating an inspection copy must not weaken subsequent bounded loads.
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieStorage = .shared
+        XCTAssertFalse(client.transportConfiguration.httpShouldSetCookies)
+        XCTAssertNil(client.transportConfiguration.httpCookieStorage)
+    }
+
+    func testIsolatedTransportIgnoresSharedAndResponseCookiesInBothLoadPaths() async throws {
+        let host = "xtream-isolation-\(UUID().uuidString.lowercased()).invalid"
+        let url = try XCTUnwrap(URL(string: "https://\(host)/player_api.php"))
+        let sharedCookie = try XCTUnwrap(HTTPCookie(properties: [
+            .domain: host,
+            .path: "/",
+            .name: "existing_shared_session",
+            .value: "test-only-cookie",
+            .secure: "TRUE"
+        ]))
+        HTTPCookieStorage.shared.setCookie(sharedCookie)
+        defer {
+            // Remove only the unique fixture inserted by this test. Never
+            // clear the application's or any other provider's shared cookies.
+            HTTPCookieStorage.shared.deleteCookie(sharedCookie)
+        }
+
+        let requests = LockedCounter()
+        MockURLProtocol.handler = { request in
+            _ = requests.increment()
+            XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            return (
+                HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: [
+                        "Set-Cookie": "xtream_response_session=private; Path=/; Secure",
+                        "Content-Length": "2"
+                    ]
+                )!,
+                Data("ok".utf8)
+            )
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let firstAccount = URLSessionHTTPClient(isolatedConfiguration: configuration)
+        let secondAccount = URLSessionHTTPClient(isolatedConfiguration: configuration)
+        for client in [firstAccount, secondAccount] {
+            // The second request in each path also proves a Set-Cookie
+            // response does not become account/session state.
+            for limit: Int? in [nil, nil, 1_024, 1_024] {
+                let response = try await client.send(HTTPRequest(
+                    url: url,
+                    earlyResponseLimitBytes: limit,
+                    retryPolicy: .none
+                ))
+                XCTAssertEqual(try response.text(), "ok")
+            }
+        }
+        XCTAssertEqual(requests.value, 8)
+        let remaining = HTTPCookieStorage.shared.cookies(for: url) ?? []
+        XCTAssertTrue(remaining.contains { $0.name == sharedCookie.name })
+        XCTAssertFalse(remaining.contains { $0.name == "xtream_response_session" })
+    }
+
     func testIdempotentRequestRetriesServerError() async throws {
         let counter = LockedCounter()
         MockURLProtocol.handler = { request in
@@ -235,6 +362,32 @@ final class HTTPClientTests: XCTestCase {
         )
         XCTAssertNil(
             redirected.value(forHTTPHeaderField: "Authorization")
+        )
+    }
+
+    func testStrictRedirectPolicyAllowsOnlyOriginalOrigin() throws {
+        let origin = try XCTUnwrap(URL(string: "https://example.invalid/api"))
+
+        XCTAssertTrue(
+            HTTPRedirectSecurity.isAllowed(
+                URL(string: "https://example.invalid:443/other"),
+                from: origin,
+                policy: .sameOriginNoDowngrade
+            )
+        )
+        XCTAssertFalse(
+            HTTPRedirectSecurity.isAllowed(
+                URL(string: "http://example.invalid/other"),
+                from: origin,
+                policy: .sameOriginNoDowngrade
+            )
+        )
+        XCTAssertFalse(
+            HTTPRedirectSecurity.isAllowed(
+                URL(string: "https://cdn.example.invalid/other"),
+                from: origin,
+                policy: .sameOriginNoDowngrade
+            )
         )
     }
 

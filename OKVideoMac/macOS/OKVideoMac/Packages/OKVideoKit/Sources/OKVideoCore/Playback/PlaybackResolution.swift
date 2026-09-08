@@ -60,6 +60,12 @@ public enum MediaTransportProfile: Equatable, Sendable {
     case tvBox
 }
 
+/// Runtime-only opt-in. Existing providers do not inherit Native Xtream fixes.
+public enum PlaybackCompatibilityPolicy: Equatable, Sendable {
+    case existing
+    case nativeXtreamLive
+}
+
 public struct ResolvedMedia: Equatable, Sendable {
     public var url: URL
     public var headers: HTTPHeaders
@@ -70,6 +76,9 @@ public struct ResolvedMedia: Equatable, Sendable {
     public var episodeName: String
     public var parserName: String?
     public var transportProfile: MediaTransportProfile
+    public var nativeStartupBudgetSeconds: Int?
+    public var hlsStartupSelection: HLSStartupSelection?
+    public var compatibilityPolicy: PlaybackCompatibilityPolicy
     public var transferReceipt: TransferReceipt?
 
     public init(
@@ -82,6 +91,9 @@ public struct ResolvedMedia: Equatable, Sendable {
         episodeName: String,
         parserName: String? = nil,
         transportProfile: MediaTransportProfile = .standard,
+        nativeStartupBudgetSeconds: Int? = nil,
+        hlsStartupSelection: HLSStartupSelection? = nil,
+        compatibilityPolicy: PlaybackCompatibilityPolicy = .existing,
         transferReceipt: TransferReceipt? = nil
     ) {
         self.url = url
@@ -93,6 +105,9 @@ public struct ResolvedMedia: Equatable, Sendable {
         self.episodeName = episodeName
         self.parserName = parserName
         self.transportProfile = transportProfile
+        self.nativeStartupBudgetSeconds = nativeStartupBudgetSeconds
+        self.hlsStartupSelection = hlsStartupSelection
+        self.compatibilityPolicy = compatibilityPolicy
         self.transferReceipt = transferReceipt
     }
 }

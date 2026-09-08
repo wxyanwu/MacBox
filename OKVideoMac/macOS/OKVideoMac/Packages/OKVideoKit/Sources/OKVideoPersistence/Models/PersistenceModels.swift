@@ -5,6 +5,7 @@ public enum StoredConfigurationSourceKind: String, Codable, Sendable {
     case remote
     case localFile
     case pasted
+    case xtream
 }
 
 public struct StoredConfiguration: Equatable, Identifiable, Sendable {

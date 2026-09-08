@@ -319,14 +319,15 @@ private struct SearchToolbarLeadingItem: View {
 
     var body: some View {
         HStack(spacing: PrimaryToolbarMetrics.itemSpacing) {
-            Button(action: onBack) {
-                Image(systemName: "chevron.backward")
-            }
-            .primaryToolbarIconControl()
-            .fixedSize()
-            .help(backHelp)
-            .accessibilityLabel(backHelp)
-            .accessibilityIdentifier("search.back")
+            BrowserToolbarBackButton(
+                help: backHelp,
+                identifier: "search.back",
+                action: onBack
+            )
+            .frame(
+                width: PrimaryToolbarMetrics.iconControlSize,
+                height: PrimaryToolbarMetrics.iconControlSize
+            )
 
             BrowserToolbarTitle(title)
                 .lineLimit(1)

@@ -48,6 +48,12 @@ enum PlayerWindowPreferencePolicy {
     static let screenMargin = 40.0
     static let fallbackAspectRatio = 16.0 / 9.0
 
+    static func minimumContentSize(aspectRatio: Double) -> NSSize {
+        let ratio = validAspectRatio(aspectRatio) ?? fallbackAspectRatio
+        let width = max(minimumContentWidth, minimumContentHeight * ratio)
+        return NSSize(width: width, height: width / ratio)
+    }
+
     static func sanitized(
         _ preference: PlayerWindowPreference
     ) -> PlayerWindowPreference {
@@ -84,7 +90,7 @@ enum PlayerWindowPreferencePolicy {
             let ratio = validAspectRatio(aspectRatio)
                 ?? fallbackAspectRatio
             let requestedWidth = max(
-                minimumContentWidth,
+                Double(minimumContentSize(aspectRatio: ratio).width),
                 preference.viewingWidth
             )
             let width = min(

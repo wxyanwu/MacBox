@@ -9666,13 +9666,22 @@ actor AndroidDexBridgeRuntime {
         } catch {
             return false
         }
-        let prefix = avdDirectory.standardizedFileURL
-            .resolvingSymlinksInPath().path + "/"
         return output.split(whereSeparator: \.isNewline).contains { rawLine in
             guard rawLine.first == "n" else { return false }
-            let path = String(rawLine.dropFirst())
-            return path == avdDirectory.path || path.hasPrefix(prefix)
+            return Self.privateAVDFilePathMatches(
+                String(rawLine.dropFirst()), avdDirectory: avdDirectory
+            )
         }
+    }
+
+    static func privateAVDFilePathMatches(_ path: String, avdDirectory: URL) -> Bool {
+        guard path.hasPrefix("/") else { return false }
+        // lsof reports /private/tmp while Foundation may normalize it to /tmp.
+        // Compare both canonical paths without weakening the directory boundary.
+        let directory = avdDirectory.standardizedFileURL.resolvingSymlinksInPath().path
+        let file = URL(fileURLWithPath: path).standardizedFileURL
+            .resolvingSymlinksInPath().path
+        return file == directory || file.hasPrefix(directory + "/")
     }
 
     private func processBirthIdentity(

@@ -1,0 +1,45 @@
+{
+  "info": {
+    "series_id": 700,
+    "name": "Fixture Series",
+    "cover": "https://media.example.invalid/series.jpg",
+    "plot": "Series plot",
+    "rating": "8.2",
+    "backdrop_path": "https://media.example.invalid/series-backdrop.jpg",
+    "episode_run_time": "45"
+  },
+  "seasons": [
+    {"id": 71, "name": "Season 1", "episode_count": "2", "season_number": "1"},
+    {"id": "72", "name": "Season 2", "episode_count": 1, "season_number": 2}
+  ],
+  "episodes": {
+    "1": [
+      {
+        "id": 7001,
+        "episode_num": "1",
+        "title": "Pilot",
+        "container_extension": "mp4",
+        "season": "1",
+        "info": {"duration": "00:45:00", "duration_secs": "2700"}
+      },
+      {
+        "id": "7002",
+        "episode_num": 2,
+        "title": "Second",
+        "container_extension": "mkv",
+        "season": 1,
+        "info": null
+      }
+    ],
+    "2": [
+      {
+        "id": "7101",
+        "episode_num": 1,
+        "title": "Return",
+        "container_extension": "mp4",
+        "season": 2,
+        "info": {"duration_secs": 2700}
+      }
+    ]
+  }
+}

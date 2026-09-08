@@ -27,7 +27,7 @@ final class LiveSourceLoaderTests: XCTestCase {
             "https://cdn.example.invalid/live/"
         )
         XCTAssertEqual(
-            loaded.playlist.groups.first?.channels.first?.streams.first?.url
+            loaded.playlist.groups.first?.channels.first?.streams.first?.url?
                 .absoluteString,
             "https://cdn.example.invalid/live/stream/index.m3u8"
         )

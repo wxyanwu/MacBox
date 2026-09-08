@@ -5,14 +5,30 @@ import SwiftUI
 
 @MainActor
 final class LiveBrowserSession: ObservableObject {
-    @Published var selectedSourceID: UUID?
+    @Published var selectedSourceID: LiveSourceID?
     @Published var searchText = ""
-    @Published var selectedGroupName: String?
+    @Published var selectedGroupID: String?
     @Published var showsFavoritesOnly = false
 
     /// Deliberately not published: changing sections must not invalidate the
     /// mounted live grid. It only gates source-loading side effects.
     var isActive = false
+
+    func reconcileSources(_ sources: [LiveSourceDescriptor]) {
+        if let selectedSourceID,
+           sources.contains(where: { $0.id == selectedSourceID }) {
+            return
+        }
+        selectedSourceID = sources.first?.id
+    }
+
+    func reconcileGroups(_ groups: [LiveGroup]) {
+        guard let selectedGroupID,
+              !groups.contains(where: { $0.id == selectedGroupID }) else {
+            return
+        }
+        self.selectedGroupID = nil
+    }
 }
 
 struct LiveView: View {
@@ -24,7 +40,7 @@ struct LiveView: View {
 
     var body: some View {
         Group {
-            if state.liveSources.isEmpty {
+            if state.liveSourceDescriptors.isEmpty {
                 emptyLibrary
             } else {
                 channelContent
@@ -42,12 +58,12 @@ struct LiveView: View {
         }
         .onChange(of: session.selectedSourceID) { _ in
             session.searchText = ""
-            session.selectedGroupName = nil
+            session.selectedGroupID = nil
             session.showsFavoritesOnly = false
             guard session.isActive else { return }
             Task { await loadSelectedIfNeeded() }
         }
-        .onChange(of: state.liveSources) { _ in
+        .onChange(of: state.liveSourceDescriptors) { _ in
             let previousSourceID = session.selectedSourceID
             selectFirstSourceIfNeeded()
             guard session.isActive,
@@ -56,15 +72,22 @@ struct LiveView: View {
             }
             Task { await loadSelectedIfNeeded() }
         }
+        .onChange(of: selectedCatalog?.groups.filter { $0.password == nil }.map(\.id) ?? []) { _ in
+            // A temporary loading state is not evidence that a category was
+            // removed. Reconcile only against a completed catalog snapshot.
+            if let selectedCatalog {
+                session.reconcileGroups(selectedCatalog.groups.filter { $0.password == nil })
+            }
+        }
         .onChange(of: state.shortcutLiveRefreshRequest) { _ in
             guard session.isActive,
                   let source = selectedSource,
-                  source.sourceKind == .remote else { return }
+                  source.canRefresh else { return }
             Task { await state.refreshLiveSource(source.id) }
         }
         .onChange(of: state.shortcutLiveSourceSelection) { request in
             guard let request,
-                  state.liveSources.contains(where: {
+                  state.liveSourceDescriptors.contains(where: {
                       $0.id == request.sourceID
                   }) else { return }
             session.selectedSourceID = request.sourceID
@@ -89,16 +112,34 @@ struct LiveView: View {
 
     @ViewBuilder
     private var channelContent: some View {
-        if let source = selectedSource,
-           let playlist = state.loadedLivePlaylists[source.id] {
-            playlistContent(
-                playlist,
-                sourceID: source.id,
-                sourceName: source.name
-            )
-        } else if state.isLoading {
-            AppActivityLabel(L10n.string("live.loading-source", fallback: "Loading Live TV source…"))
+        if let source = selectedSource {
+            if let catalog = state.liveCatalog(for: source.id) {
+                playlistContent(
+                    catalog,
+                    sourceID: source.id,
+                    sourceName: source.name
+                )
+            } else if state.isLiveCatalogLoading(source.id) {
+                AppActivityLabel(L10n.string("live.loading-source", fallback: "Loading Live TV source…"))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                VStack(spacing: 18) {
+                    EmptyStateView(
+                        systemImage: "exclamationmark.triangle",
+                        title: L10n.string("live.source.load.failed", fallback: "Live TV Source Failed to Load"),
+                        message: state.liveCatalogError(for: source.id)
+                            ?? L10n.string("live.choose-source.message", fallback: "Choose a source from the menu above.")
+                    )
+                    if source.canRefresh {
+                        Button {
+                            Task { await state.refreshLiveSource(source.id) }
+                        } label: {
+                            Label(L10n.string("live.refresh-current", fallback: "Refresh Current Live TV Source"), systemImage: "arrow.clockwise")
+                        }
+                    }
+                }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         } else {
             EmptyStateView(
                 systemImage: "list.bullet.rectangle",
@@ -109,16 +150,19 @@ struct LiveView: View {
     }
 
     private func playlistContent(
-        _ playlist: LivePlaylist,
-        sourceID: UUID,
+        _ playlist: LiveCatalogSnapshot,
+        sourceID: LiveSourceID,
         sourceName: String
     ) -> some View {
         let visibleGroups = playlist.groups.filter { $0.password == nil }
         let hiddenCount = playlist.groups.count - visibleGroups.count
+        let allowsLogoFallback: Bool = {
+            if case .imported = sourceID { return true }
+            return false
+        }()
         let channels = filteredChannels(
             visibleGroups.flatMap(\.channels),
-            sourceID: sourceID,
-            sourceName: sourceName
+            sourceID: sourceID
         )
         let programmeDate = Date()
         return GeometryReader { viewport in
@@ -165,7 +209,10 @@ struct LiveView: View {
                                 )
                                 LiveChannelCard(
                                     channel: channel,
-                                    artworkURLs: logoURLCache.urls(for: channel),
+                                    artworkURLs: logoURLCache.urls(
+                                        for: channel,
+                                        allowsFallback: allowsLogoFallback
+                                    ),
                                     navigationChannels: channels,
                                     sourceID: sourceID,
                                     sourceName: sourceName,
@@ -197,7 +244,23 @@ struct LiveView: View {
     }
 
     @ViewBuilder
-    private func liveSourceBackgroundStatus(sourceID: UUID) -> some View {
+    private func liveSourceBackgroundStatus(sourceID: LiveSourceID) -> some View {
+        if let message = state.liveCatalogError(for: sourceID) {
+            backgroundStatusLabel(
+                message,
+                systemImage: "exclamationmark.triangle",
+                color: .orange
+            )
+        }
+        // Xtream Basic Live deliberately has no EPG or background channel
+        // probing. Keep the existing imported-source status domain intact.
+        if case .imported(let importedID) = sourceID {
+            importedSourceBackgroundStatus(sourceID: importedID)
+        }
+    }
+
+    @ViewBuilder
+    private func importedSourceBackgroundStatus(sourceID: UUID) -> some View {
         if let epgStatus = state.liveSourceEPGStatuses[sourceID] {
             switch epgStatus {
             case .loading:
@@ -274,15 +337,19 @@ struct LiveView: View {
         .background(color.opacity(0.07))
     }
 
-    private var selectedSource: StoredLiveSource? {
+    private var selectedSource: LiveSourceDescriptor? {
         guard let selectedSourceID = session.selectedSourceID else { return nil }
-        return state.liveSources.first { $0.id == selectedSourceID }
+        return state.liveSourceDescriptors.first { $0.id == selectedSourceID }
+    }
+
+    private var selectedCatalog: LiveCatalogSnapshot? {
+        guard let selectedSourceID = session.selectedSourceID else { return nil }
+        return state.liveCatalog(for: selectedSourceID)
     }
 
     private func filteredChannels(
         _ channels: [LiveChannel],
-        sourceID: UUID,
-        sourceName: String
+        sourceID: LiveSourceID
     ) -> [LiveChannel] {
         let query = session.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         return channels.filter { channel in
@@ -290,10 +357,10 @@ struct LiveView: View {
                 sourceID: sourceID,
                 channel: channel
             )
-            let groupMatches = session.selectedGroupName == nil
-                || channel.groupName == session.selectedGroupName
+            let groupMatches = session.selectedGroupID == nil
+                || channel.groupID == session.selectedGroupID
             let favoriteMatches = !session.showsFavoritesOnly
-                || state.isLiveFavorite(sourceName: sourceName, channel: channel)
+                || state.isLiveFavorite(sourceID: sourceID, channel: channel)
             let queryMatches = query.isEmpty
                 || channel.name.localizedCaseInsensitiveContains(query)
                 || channel.groupName.localizedCaseInsensitiveContains(query)
@@ -307,11 +374,7 @@ struct LiveView: View {
     }
 
     private func selectFirstSourceIfNeeded() {
-        if let selectedSourceID = session.selectedSourceID,
-           state.liveSources.contains(where: { $0.id == selectedSourceID }) {
-            return
-        }
-        session.selectedSourceID = state.liveSources.first?.id
+        session.reconcileSources(state.liveSourceDescriptors)
     }
 
     private func updateActivation(for section: AppSection) {
@@ -327,10 +390,11 @@ struct LiveView: View {
 
     private func loadSelectedIfNeeded() async {
         guard let source = selectedSource,
-              state.loadedLivePlaylists[source.id] == nil else {
+              state.liveCatalog(for: source.id) == nil,
+              !state.isLiveCatalogLoading(source.id) else {
             return
         }
-        await state.loadLiveSource(source)
+        await state.loadLiveSource(source.id)
     }
 }
 
@@ -341,9 +405,11 @@ struct LiveToolbarView: View {
 
     var body: some View {
         Group {
-            if let source = selectedSource,
-               let playlist = state.loadedLivePlaylists[source.id] {
-                let groups = playlist.groups.filter { $0.password == nil }
+            if let source = selectedSource {
+                // Source selection and retry must survive an absent/failed
+                // catalog. Do not condition the toolbar on loading success.
+                let groups = (state.liveCatalog(for: source.id)?.groups ?? [])
+                    .filter { $0.password == nil }
                 let allChannels = groups.flatMap(\.channels)
                 let deletedChannels = allChannels.filter {
                     state.isLiveChannelDeleted(
@@ -358,16 +424,13 @@ struct LiveToolbarView: View {
                     deletedChannels: deletedChannels,
                     channelCount: channelCount
                 )
-            } else if state.isLoading {
-                AppActivityIndicator(size: .small)
-                    .help(L10n.string("live.loading-source", fallback: "Loading Live TV source…"))
             }
         }
     }
 
     @ViewBuilder
     private func toolbarControls(
-        source: StoredLiveSource,
+        source: LiveSourceDescriptor,
         groups: [LiveGroup],
         deletedChannels: [LiveChannel],
         channelCount: Int
@@ -438,7 +501,7 @@ struct LiveToolbarView: View {
         compact: Bool
     ) -> some View {
         Menu {
-            ForEach(state.liveSources) { source in
+            ForEach(state.liveSourceDescriptors) { source in
                 Button {
                     session.selectedSourceID = source.id
                 } label: {
@@ -458,24 +521,24 @@ struct LiveToolbarView: View {
         }
         .frame(maxWidth: compact ? 132 : 220)
         .controlSize(.regular)
-        .disabled(state.liveSources.count < 2)
+        .disabled(state.liveSourceDescriptors.count < 2)
         .help(L10n.string("live.current-source", fallback: "Current source: %@; %d channels", sourceName, channelCount))
     }
 
     private func groupMenu(_ groups: [LiveGroup], compact: Bool) -> some View {
         Menu {
             Button {
-                session.selectedGroupName = nil
+                session.selectedGroupID = nil
             } label: {
                 menuLabel(
                     L10n.string("live.all-channels", fallback: "All Channels"),
-                    selected: session.selectedGroupName == nil
+                    selected: session.selectedGroupID == nil
                 )
             }
             Divider()
             ForEach(groups) { group in
                 Button {
-                    session.selectedGroupName = group.name
+                    session.selectedGroupID = group.id
                 } label: {
                     menuLabel(
                         L10n.string(
@@ -484,15 +547,15 @@ struct LiveToolbarView: View {
                             group.name,
                             group.channels.count
                         ),
-                        selected: session.selectedGroupName == group.name
+                        selected: session.selectedGroupID == group.id
                     )
                 }
             }
         } label: {
             Label(
                 compact
-                    ? (session.selectedGroupName ?? L10n.string("common.all", fallback: "All"))
-                    : (session.selectedGroupName ?? L10n.string("live.all-channels", fallback: "All Channels")),
+                    ? (selectedGroupName(in: groups) ?? L10n.string("common.all", fallback: "All"))
+                    : (selectedGroupName(in: groups) ?? L10n.string("live.all-channels", fallback: "All Channels")),
                 systemImage: "rectangle.3.group"
             )
             .lineLimit(1)
@@ -502,8 +565,12 @@ struct LiveToolbarView: View {
         .help(L10n.string("live.filter-groups", fallback: "Filter Channel Groups"))
     }
 
+    private func selectedGroupName(in groups: [LiveGroup]) -> String? {
+        groups.first { $0.id == session.selectedGroupID }?.name
+    }
+
     private func condensedMenu(
-        source: StoredLiveSource,
+        source: LiveSourceDescriptor,
         groups: [LiveGroup],
         deletedChannels: [LiveChannel],
         channelCount: Int
@@ -548,7 +615,7 @@ struct LiveToolbarView: View {
 
     private func deletedChannelsMenu(
         _ channels: [LiveChannel],
-        sourceID: UUID
+        sourceID: LiveSourceID
     ) -> some View {
         Menu {
             ForEach(channels) { channel in
@@ -586,8 +653,8 @@ struct LiveToolbarView: View {
     }
 
     @ViewBuilder
-    private func refreshControl(sourceID: UUID) -> some View {
-        if state.isLoading {
+    private func refreshControl(sourceID: LiveSourceID) -> some View {
+        if state.isLiveCatalogLoading(sourceID) {
             AppActivityIndicator(size: .small)
                 .help(L10n.string("live.refreshing", fallback: "Refreshing Live TV source"))
         } else {
@@ -596,7 +663,7 @@ struct LiveToolbarView: View {
             } label: {
                 Label(L10n.string("live.refresh", fallback: "Refresh Live TV Source"), systemImage: "arrow.clockwise")
             }
-            .disabled(selectedSource?.sourceKind != .remote)
+            .disabled(selectedSource?.canRefresh != true)
             .help(L10n.string("live.refresh-current", fallback: "Refresh Current Live TV Source"))
         }
     }
@@ -610,27 +677,11 @@ struct LiveToolbarView: View {
         }
     }
 
-    private var selectedSource: StoredLiveSource? {
+    private var selectedSource: LiveSourceDescriptor? {
         guard let selectedSourceID = session.selectedSourceID else {
             return nil
         }
-        return state.liveSources.first { $0.id == selectedSourceID }
-    }
-
-    private func selectFirstSourceIfNeeded() {
-        if let selectedSourceID = session.selectedSourceID,
-           state.liveSources.contains(where: { $0.id == selectedSourceID }) {
-            return
-        }
-        session.selectedSourceID = state.liveSources.first?.id
-    }
-
-    private func loadSelectedIfNeeded() async {
-        guard let source = selectedSource,
-              state.loadedLivePlaylists[source.id] == nil else {
-            return
-        }
-        await state.loadLiveSource(source)
+        return state.liveSourceDescriptors.first { $0.id == selectedSourceID }
     }
 }
 
@@ -640,7 +691,7 @@ private struct LiveChannelCard: View {
     let channel: LiveChannel
     let artworkURLs: [URL]
     let navigationChannels: [LiveChannel]
-    let sourceID: UUID
+    let sourceID: LiveSourceID
     let sourceName: String
     let currentEPGProgramme: EPGProgramme?
     let nextEPGProgramme: EPGProgramme?
@@ -884,7 +935,7 @@ private struct LiveChannelCard: View {
     }
 
     private var isFavorite: Bool {
-        state.isLiveFavorite(sourceName: sourceName, channel: channel)
+        state.isLiveFavorite(sourceID: sourceID, channel: channel)
     }
 
     private var programmeSummary: String? {
@@ -927,7 +978,7 @@ private struct LiveChannelCard: View {
     private func toggleFavorite() {
         Task {
             await state.toggleLiveFavorite(
-                sourceName: sourceName,
+                sourceID: sourceID,
                 channel: channel
             )
         }
@@ -949,11 +1000,18 @@ enum LiveChannelLogoResolver {
         string: "https://upload.112114.xyz/logo/"
     )!
 
-    static func urls(for channel: LiveChannel) -> [URL] {
+    static func urls(
+        for channel: LiveChannel,
+        allowsFallback: Bool = true
+    ) -> [URL] {
         var values: [URL] = []
         if let explicit = channel.logoURL {
             values.append(explicit)
         }
+        // Provider catalogs already validate their explicit artwork URLs.
+        // Never disclose Xtream channel names to the imported-source fallback
+        // service or invent third-party artwork requests for these catalogs.
+        guard allowsFallback else { return values }
 
         let names = [channel.tvgID, channel.tvgName, channel.name]
             .compactMap { $0 }
@@ -1014,22 +1072,30 @@ final class LiveChannelLogoURLCache: ObservableObject {
         let tvgID: String?
         let tvgName: String?
         let name: String
+        let allowsFallback: Bool
     }
 
     private var values: [Key: [URL]] = [:]
     private(set) var computationCount = 0
 
-    func urls(for channel: LiveChannel) -> [URL] {
+    func urls(
+        for channel: LiveChannel,
+        allowsFallback: Bool = true
+    ) -> [URL] {
         let key = Key(
             logoURL: channel.logoURL,
             tvgID: channel.tvgID,
             tvgName: channel.tvgName,
-            name: channel.name
+            name: channel.name,
+            allowsFallback: allowsFallback
         )
         if let cached = values[key] {
             return cached
         }
-        let urls = LiveChannelLogoResolver.urls(for: channel)
+        let urls = LiveChannelLogoResolver.urls(
+            for: channel,
+            allowsFallback: allowsFallback
+        )
         values[key] = urls
         computationCount += 1
         return urls

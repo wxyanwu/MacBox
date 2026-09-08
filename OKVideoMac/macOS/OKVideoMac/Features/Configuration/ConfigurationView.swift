@@ -72,78 +72,65 @@ struct ImportURLTextField: NSViewRepresentable {
     }
 }
 
+/// Presentation labels follow the same URL rule as runtime routing. A file name
+/// ending in .js.md5 is not a supported local Node bundle import.
+enum ConfigurationPresentationKind: String {
+    case tvbox = "TVBox"
+    case catpaw = "CatPawOpen"
+    case xtream = "Xtream"
+
+    static func resolve(_ record: StoredConfiguration) -> Self {
+        if record.sourceKind == .xtream { return .xtream }
+        if record.sourceKind == .remote,
+           let value = record.sourceValue,
+           let url = URL(string: value),
+           NodeBundleRuntimeService.supports(url) { return .catpaw }
+        return .tvbox
+    }
+}
+
+private enum ConfigurationSheet: Identifiable {
+    case add
+    case details(StoredConfiguration)
+
+    var id: String {
+        switch self {
+        case .add: return "add"
+        case .details(let record): return record.id.uuidString
+        }
+    }
+}
+
 struct ConfigurationView: View {
     @EnvironmentObject private var state: AppState
     let embedded: Bool
-    @State private var showingImport = false
-    @State private var showingFileImporter = false
-    @State private var showingCatPawProfileImporter = false
+    @State private var sheet: ConfigurationSheet?
     @State private var pendingDelete: StoredConfiguration?
 
-    init(embedded: Bool = false) {
-        self.embedded = embedded
-    }
+    init(embedded: Bool = false) { self.embedded = embedded }
 
     var body: some View {
         Group {
             if embedded {
-                embeddedContent
+                content
             } else {
-                standaloneContent
+                ScrollView { VStack(alignment: .leading, spacing: 20) { content }.padding(24) }
             }
         }
-        .navigationTitle(
-            embedded
-                ? L10n.string(.sectionSettings)
-                : L10n.string("configuration.title", fallback: "Video Providers")
-        )
-        .sheet(isPresented: $showingImport) {
-            ConfigurationImportSheet(isPresented: $showingImport)
-                .environmentObject(state)
-                .frame(width: 620, height: 470)
-        }
-        .fileImporter(
-            isPresented: $showingFileImporter,
-            allowedContentTypes: [.json, .plainText],
-            allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case .success(let urls):
-                if let url = urls.first {
-                    Task {
-                        _ = await state.importConfiguration(
-                            source: .localFile(url),
-                            name: url.deletingPathExtension().lastPathComponent
-                        )
-                    }
-                }
-            case .failure(let error):
-                state.presentedError = UserFacingError(
-                    title: L10n.string("configuration.file-selection.failed", fallback: "Unable to Select File"),
-                    message: RuntimeUserFacingMessageMapper.message(for: error)
-                )
+        .navigationTitle(embedded ? L10n.string(.sectionSettings) : L10n.string("configuration.title", fallback: "Video Providers"))
+        .sheet(item: $sheet) { destination in
+            switch destination {
+            case .add:
+                ProviderAddSheet(isPresented: sheetBinding)
+                    .environmentObject(state)
+                    .frame(width: 620, height: 570)
+            case .details(let record):
+                ProviderDetailsSheet(record: record, isPresented: sheetBinding)
+                    .environmentObject(state)
+                    .frame(width: 620, height: 570)
             }
         }
-        .fileImporter(
-            isPresented: $showingCatPawProfileImporter,
-            allowedContentTypes: [.json],
-            allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case .success(let urls):
-                if let url = urls.first {
-                    Task { await state.importCatPawProfile(from: url) }
-                }
-            case .failure(let error):
-                state.presentedError = UserFacingError(
-                    title: L10n.string("configuration.catpaw-selection.failed", fallback: "Unable to Select CatPaw Configuration"),
-                    message: RuntimeUserFacingMessageMapper.message(for: error)
-                )
-            }
-        }
-        .alert(
-            item: $pendingDelete
-        ) { record in
+        .alert(item: $pendingDelete) { record in
             Alert(
                 title: Text(L10n.string("configuration.delete.title", fallback: "Delete “%@”?", record.name)),
                 message: Text(L10n.string("configuration.delete.message", fallback: "Favorites and history will not be deleted with the configuration.")),
@@ -155,244 +142,531 @@ struct ConfigurationView: View {
         }
     }
 
-    private var standaloneContent: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Button {
-                    showingImport = true
-                } label: {
-                    Label(L10n.string("configuration.import", fallback: "Import Video Provider Configuration"), systemImage: "plus")
-                }
-                Button {
-                    showingFileImporter = true
-                } label: {
-                    Label(L10n.string("configuration.choose-file", fallback: "Choose Video Provider Configuration File"), systemImage: "folder")
-                }
-                Button {
-                    showingCatPawProfileImporter = true
-                } label: {
-                    Label(L10n.string("configuration.import-catpaw", fallback: "Import CatPaw Configuration"), systemImage: "person.crop.circle.badge.plus")
-                }
-                .disabled(!state.canImportCatPawProfile)
-                Spacer()
-                Button {
-                    Task { await state.refreshActiveConfiguration() }
-                } label: {
-                    Label(L10n.string("configuration.refresh-current", fallback: "Refresh Current Video Provider Configuration"), systemImage: "arrow.clockwise")
-                }
-                .disabled(state.activeConfigurationRecord?.sourceKind != .remote)
+    private var sheetBinding: Binding<Bool> {
+        Binding(get: { sheet != nil }, set: { if !$0 { sheet = nil } })
+    }
+
+    @ViewBuilder private var content: some View {
+        SourceSwitchFeedbackView(feedback: state.configurationSwitchFeedback)
+        SettingsCard {
+            SettingsControlRow(
+                icon: "plus", color: .indigo,
+                title: L10n.string("providers.add", fallback: "Add Provider"),
+                subtitle: L10n.string("providers.add.subtitle", fallback: "Use a link, a TVBox configuration file, or an Xtream account.")
+            ) {
+                Button(L10n.string("common.add", fallback: "Add…")) { sheet = .add }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(state.isLoading)
+                    .accessibilityIdentifier("provider-add")
             }
-            .padding()
+        }
 
-            Divider()
-
-            SourceSwitchFeedbackView(
-                feedback: state.configurationSwitchFeedback
-            )
-            .padding(.horizontal)
-            .padding(.top, 8)
-
-            if state.configurations.isEmpty {
-                EmptyStateView(
-                    systemImage: "doc.badge.plus",
-                    title: L10n.string("configuration.empty.title", fallback: "No Video Provider Configurations"),
-                    message: L10n.string("configuration.empty.message", fallback: "Video provider configurations are managed here. Add Live TV sources separately in Settings → Live TV Sources.")
-                )
-            } else {
-                List {
-                    ForEach(state.configurations) { record in
-                        ConfigurationRow(record: record) {
-                            Task { await state.activateConfiguration(record.id) }
-                        } export: {
-                            export(record)
-                        } delete: {
-                            pendingDelete = record
+        if let active = state.activeConfigurationRecord {
+            SettingsSectionTitle(L10n.string("configuration.active", fallback: "Active"))
+            SettingsCard {
+                SettingsControlRow(
+                    icon: "checkmark.circle.fill", color: .green,
+                    title: active.name,
+                    subtitle: L10n.string("providers.current.subtitle", fallback: "%@ · Used for the video home page and search", ConfigurationPresentationKind.resolve(active).rawValue)
+                ) {
+                    if active.sourceKind == .remote {
+                        Button(L10n.string("providers.update", fallback: "Update")) {
+                            Task { await state.refreshActiveConfiguration() }
                         }
+                        .disabled(state.isLoading)
                     }
+                    Button(L10n.string("providers.details", fallback: "Details")) { sheet = .details(active) }
                 }
             }
         }
-    }
 
-    @ViewBuilder
-    private var embeddedContent: some View {
-        SourceSwitchFeedbackView(
-            feedback: state.configurationSwitchFeedback
-        )
-        .padding(.bottom, 4)
-
-        SettingsSectionTitle(L10n.string("configuration.import-update.section", fallback: "Import & Update"))
-        SettingsCard {
-            SettingsControlRow(
-                icon: "plus",
-                color: .indigo,
-                title: L10n.string("configuration.import", fallback: "Import Video Provider Configuration"),
-                subtitle: L10n.string("configuration.import.subtitle", fallback: "Import a video provider configuration from a URL or pasted content.")
-            ) {
-                Button(L10n.string("configuration.import.action", fallback: "Import…")) {
-                    showingImport = true
-                }
-            }
-
-            SettingsDivider()
-
-            SettingsControlRow(
-                icon: "person.crop.circle.badge.plus",
-                color: .orange,
-                title: L10n.string("configuration.import-catpaw", fallback: "Import CatPaw Configuration"),
-                subtitle: L10n.string("configuration.import-catpaw.subtitle", fallback: "Choose test0.db.json. Accounts and mounts are written only to the protected runtime profile.")
-            ) {
-                Button(L10n.string("common.choose", fallback: "Choose…")) {
-                    showingCatPawProfileImporter = true
-                }
-                .disabled(!state.canImportCatPawProfile)
-            }
-
-            SettingsDivider()
-
-            SettingsControlRow(
-                icon: "folder.fill",
-                color: .blue,
-                title: L10n.string("configuration.choose-file.title", fallback: "Choose a Configuration File"),
-                subtitle: L10n.string("configuration.choose-file.subtitle", fallback: "Import JSON or text configuration from this Mac")
-            ) {
-                Button(L10n.string("common.choose", fallback: "Choose…")) {
-                    showingFileImporter = true
-                }
-            }
-
-            SettingsDivider()
-
-            SettingsControlRow(
-                icon: "arrow.clockwise",
-                color: .teal,
-                title: L10n.string("configuration.refresh.title", fallback: "Refresh Current Configuration"),
-                subtitle: L10n.string("configuration.refresh.subtitle", fallback: "Download and load the current remote configuration again")
-            ) {
-                Button(L10n.string("common.refresh", fallback: "Refresh")) {
-                    Task { await state.refreshActiveConfiguration() }
-                }
-                .disabled(state.activeConfigurationRecord?.sourceKind != .remote)
-            }
-        }
-
-        SettingsSectionTitle(L10n.string("configuration.imported.section", fallback: "Imported Configurations"))
+        SettingsSectionTitle(L10n.string("configuration.imported.section", fallback: "My Providers"))
         SettingsCard {
             if state.configurations.isEmpty {
-                Label(
-                    L10n.string("configuration.imported.empty", fallback: "No video provider configurations yet. Import one above."),
-                    systemImage: "doc.badge.plus"
-                )
-                .foregroundColor(.secondary)
-                .padding(18)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                Text(L10n.string("providers.empty", fallback: "Add a provider above to start watching."))
+                    .foregroundColor(.secondary).padding(18)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                ForEach(Array(state.configurations.enumerated()), id: \.element.id) {
-                    index, record in
-                    ConfigurationRow(
-                        record: record,
-                        cardStyle: true
-                    ) {
-                        Task { await state.activateConfiguration(record.id) }
-                    } export: {
-                        export(record)
-                    } delete: {
-                        pendingDelete = record
+                ForEach(Array(state.configurations.enumerated()), id: \.element.id) { index, record in
+                    HStack(spacing: 12) {
+                        SettingsRowIcon(systemImage: record.isActive ? "checkmark.circle.fill" : "doc.text.fill", color: record.isActive ? .green : .indigo)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(record.name).font(.headline).lineLimit(2)
+                            Text(ConfigurationPresentationKind.resolve(record).rawValue)
+                                .font(.caption).foregroundColor(.secondary)
+                        }
+                        Spacer(minLength: 8)
+                        if record.isActive {
+                            Text(L10n.string("configuration.active", fallback: "Active"))
+                                .font(.caption).foregroundColor(.secondary)
+                        } else {
+                            Button(L10n.string("configuration.activate", fallback: "Use This Provider")) {
+                                Task { await state.activateConfiguration(record.id) }
+                            }
+                            .disabled(state.isLoading)
+                        }
+                        Button(L10n.string("providers.details", fallback: "Details")) { sheet = .details(record) }
+                        Menu {
+                            Button(L10n.string("common.export", fallback: "Export")) { exportConfiguration(record, state: state) }
+                            Button(role: .destructive) { pendingDelete = record } label: {
+                                Text(L10n.string("common.delete", fallback: "Delete"))
+                            }
+                            .disabled(state.isLoading)
+                        } label: { Image(systemName: "ellipsis") }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .accessibilityLabel(L10n.string("providers.more", fallback: "More Actions"))
                     }
-
-                    if index < state.configurations.count - 1 {
-                        SettingsDivider()
-                    }
+                    .padding(16)
+                    if index < state.configurations.count - 1 { SettingsDivider() }
                 }
             }
         }
-    }
-
-    private func export(_ record: StoredConfiguration) {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.json]
-        panel.canCreateDirectories = true
-        panel.nameFieldStringValue = "\(record.name).json"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            try state.exportData(for: record, to: url)
-        } catch {
-            state.presentedError = UserFacingError(
-                title: L10n.string("configuration.export.failed", fallback: "Export Failed"),
-                message: RuntimeUserFacingMessageMapper.message(for: error)
-            )
-        }
+        Text(L10n.string("providers.list.help", fallback: "Each provider may contain several sites. Choose a site on the video home page."))
+            .font(.caption).foregroundColor(.secondary)
     }
 }
 
-private struct ConfigurationRow: View {
-    let record: StoredConfiguration
-    var cardStyle = false
-    let activate: () -> Void
-    let export: () -> Void
-    let delete: () -> Void
+@MainActor
+private func exportConfiguration(_ record: StoredConfiguration, state: AppState) {
+    let panel = NSSavePanel()
+    panel.allowedContentTypes = [.json]
+    panel.canCreateDirectories = true
+    panel.nameFieldStringValue = "\(record.name).json"
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    do { try state.exportData(for: record, to: url) }
+    catch {
+        state.presentedError = UserFacingError(
+            title: L10n.string("configuration.export.failed", fallback: "Export Failed"),
+            message: RuntimeUserFacingMessageMapper.message(for: error)
+        )
+    }
+}
+
+private struct ProviderAddSheet: View {
+    private enum Method { case link, file, account }
+    @Binding var isPresented: Bool
+    @State private var method: Method?
 
     var body: some View {
-        HStack(spacing: 12) {
-            if cardStyle {
-                SettingsRowIcon(
-                    systemImage: record.isActive
-                        ? "checkmark.circle.fill"
-                        : "doc.text.fill",
-                    color: record.isActive ? .green : .indigo
-                )
-            } else {
-                Image(systemName: record.isActive ? "checkmark.circle.fill" : "circle")
-                    .foregroundColor(record.isActive ? .accentColor : .secondary)
+        Group {
+            switch method {
+            case .link:
+                ConfigurationImportSheet(isPresented: $isPresented, initialMode: .remote, onBack: { method = nil })
+            case .file:
+                ConfigurationImportSheet(isPresented: $isPresented, initialMode: .file, onBack: { method = nil })
+            case .account:
+                XtreamProviderEditorSheet(isPresented: $isPresented, record: nil, onBack: { method = nil })
+            case nil:
+                VStack(alignment: .leading, spacing: 18) {
+                    Text(L10n.string("providers.add", fallback: "Add Provider")).font(.title2.bold())
+                    Text(L10n.string("providers.choose-method", fallback: "Choose the information you received from your provider."))
+                        .foregroundColor(.secondary)
+                    SettingsCard {
+                        choice(.link, icon: "link", title: "providers.method.link", fallback: "Add Using a Link", subtitle: "providers.method.link.help", help: "TVBox / CatPawOpen · Paste a configuration link")
+                        SettingsDivider()
+                        choice(.file, icon: "folder", title: "providers.method.file", fallback: "Import a Configuration File", subtitle: "providers.method.file.help", help: "TVBox · Choose a JSON or text configuration from this Mac")
+                        SettingsDivider()
+                        choice(.account, icon: "person.crop.circle", title: "providers.method.account", fallback: "Sign In with an Account", subtitle: "providers.method.account.help", help: "Xtream · Server address, username, and password")
+                    }
+                    Spacer()
+                    HStack { Spacer(); Button(L10n.string(.commonCancel)) { isPresented = false } }
+                }.padding(22)
             }
-            VStack(alignment: .leading, spacing: 3) {
-                Text(record.name)
-                    .font(.headline)
-                Text(sourceDescription)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                Text(
-                    record.updatedAt.formatted(
-                        Date.FormatStyle(
-                            date: .abbreviated,
-                            time: .shortened,
-                            locale: L10n.locale
-                        )
-                    )
-                )
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-            Spacer()
-            if record.isActive, cardStyle {
-                Text(L10n.string("configuration.active", fallback: "Active"))
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            if !record.isActive {
-                Button(L10n.string("configuration.activate", fallback: "Activate"), action: activate)
-            }
-            Button(L10n.string("common.export", fallback: "Export"), action: export)
-            Button(role: .destructive, action: delete) {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.borderless)
         }
-        .padding(.horizontal, cardStyle ? 16 : 0)
-        .padding(.vertical, cardStyle ? 14 : 5)
+    }
+
+    private func choice(_ value: Method, icon: String, title: String, fallback: String, subtitle: String, help: String) -> some View {
+        Button { method = value } label: {
+            HStack(spacing: 14) {
+                Image(systemName: icon).font(.title2).foregroundColor(.accentColor).frame(width: 30)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(L10n.string(title, fallback: fallback)).font(.headline)
+                    Text(L10n.string(subtitle, fallback: help)).font(.callout).foregroundColor(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").foregroundColor(.secondary)
+            }
+            .padding(18).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+        }.buttonStyle(.plain)
+    }
+}
+
+private struct ProviderDetailsSheet: View {
+    @EnvironmentObject private var state: AppState
+    let record: StoredConfiguration
+    @Binding var isPresented: Bool
+    @State private var editingAccount = false
+    @State private var showingProfileImporter = false
+    @State private var supportsProfile = false
+    @State private var importingProfile = false
+    @State private var fileError: UserFacingError?
+
+    private var currentRecord: StoredConfiguration {
+        state.configurations.first(where: { $0.id == record.id }) ?? record
+    }
+    private var kind: ConfigurationPresentationKind { .resolve(currentRecord) }
+    private var isActive: Bool { state.activeConfigurationRecord?.id == record.id }
+
+    var body: some View {
+        Group {
+            if editingAccount {
+                XtreamProviderEditorSheet(isPresented: $isPresented, record: currentRecord, onBack: { editingAccount = false })
+            } else {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text(currentRecord.name).font(.title2.bold())
+                    Text(kind.rawValue).foregroundColor(.secondary)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            SettingsCard {
+                                SettingsControlRow(icon: "doc.text", color: .indigo,
+                                    title: L10n.string("providers.connection", fallback: "Connection"),
+                                    subtitle: sourceDescription) { EmptyView() }
+                            }
+                            if kind == .xtream {
+                                Button(L10n.string("providers.edit-account", fallback: "Edit Server and Account…")) { editingAccount = true }
+                                Text(L10n.string("xtream.security-note", fallback: "Credentials are stored only in this Mac’s Keychain. Configuration exports and portable backups never contain them."))
+                                    .font(.caption).foregroundColor(.secondary)
+                            } else if kind == .catpaw {
+                                Text(L10n.string("providers.catpaw.help", fallback: "When a site needs a cloud account, opening or playing it will guide you through sign-in."))
+                                    .foregroundColor(.secondary)
+                                if isActive && supportsProfile {
+                                    SettingsCard {
+                                        SettingsControlRow(icon: "person.crop.circle.badge.plus", color: .orange,
+                                            title: L10n.string("providers.catpaw.import", fallback: "Import CatPaw Settings"),
+                                            subtitle: L10n.string("providers.catpaw.import.help", fallback: "Use test0.db.json to replace this provider’s saved site, account, and cloud settings.")) {
+                                            Button(L10n.string("common.choose", fallback: "Choose…")) { showingProfileImporter = true }
+                                                .disabled(importingProfile || state.isLoading)
+                                        }
+                                    }
+                                } else {
+                                    Text(L10n.string(isActive ? "providers.catpaw.unavailable" : "providers.catpaw.activate-first",
+                                        fallback: isActive ? "Settings-file import is available when a compatible CatPaw runtime is ready." : "Use this provider first to manage its CatPaw settings."))
+                                        .font(.caption).foregroundColor(.secondary)
+                                    if isActive {
+                                        Button(L10n.string("providers.check-again", fallback: "Check Again")) {
+                                            Task { supportsProfile = await state.canImportCatPawSettings(for: record.id) }
+                                        }
+                                    }
+                                }
+                                if importingProfile { ProgressView() }
+                            } else if currentRecord.sourceKind != .remote {
+                                Text(L10n.string("providers.local.update-help", fallback: "To update this provider, add the new configuration file or text."))
+                                    .foregroundColor(.secondary)
+                            }
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    HStack {
+                        Button(L10n.string("common.export", fallback: "Export")) { exportConfiguration(currentRecord, state: state) }
+                        Spacer()
+                        Button(L10n.string("common.done", fallback: "Done")) { isPresented = false }
+                            .keyboardShortcut(.defaultAction).disabled(importingProfile)
+                    }
+                }.padding(22)
+            }
+        }
+        .interactiveDismissDisabled(importingProfile)
+        .task(id: state.activeConfigurationRecord?.id) {
+            supportsProfile = await state.canImportCatPawSettings(for: record.id)
+        }
+        // A single importer owned by this sheet; ordinary configuration files
+        // have a separate owner in ConfigurationImportSheet.
+        .fileImporter(isPresented: $showingProfileImporter, allowedContentTypes: [.json]) { result in
+            switch result {
+            case .success(let url):
+                guard isActive else { return }
+                importingProfile = true
+                Task {
+                    await state.importCatPawProfile(from: url)
+                    importingProfile = false
+                    supportsProfile = await state.canImportCatPawSettings(for: record.id)
+                }
+            case .failure(let error):
+                fileError = UserFacingError(title: L10n.string("configuration.file-selection.failed", fallback: "Unable to Select File"), message: RuntimeUserFacingMessageMapper.message(for: error))
+            }
+        }
+        .alert(item: $fileError) { error in
+            Alert(title: Text(error.title), message: Text(error.message), dismissButton: .default(Text(L10n.string(.commonOK))))
+        }
     }
 
     private var sourceDescription: String {
-        switch record.sourceKind {
-        case .remote:
-            guard let value = record.sourceValue,
-                  let url = URL(string: value) else {
-                return L10n.string("configuration.source.remote-url", fallback: "Remote URL")
+        if let value = currentRecord.sourceValue {
+            if currentRecord.sourceKind == .localFile { return URL(fileURLWithPath: value).lastPathComponent }
+            if let url = URL(string: value), ["http", "https"].contains(url.scheme ?? "") { return LogRedactor.url(url) }
+        }
+        return L10n.string("configuration.source.pasted", fallback: "Pasted Content")
+    }
+}
+
+private struct XtreamProviderEditorSheet: View {
+    private enum OperationStatus: Equatable {
+        case success(String)
+        case failure(String)
+    }
+
+    @EnvironmentObject private var state: AppState
+    @Binding var isPresented: Bool
+    let record: StoredConfiguration?
+    let onBack: (() -> Void)?
+    @State private var displayName: String
+    @State private var serverURL: String
+    @State private var username = ""
+    @State private var password = ""
+    @State private var operationTask: Task<Void, Never>?
+    @State private var status: OperationStatus?
+
+    init(
+        isPresented: Binding<Bool>,
+        record: StoredConfiguration?,
+        onBack: (() -> Void)? = nil
+    ) {
+        _isPresented = isPresented
+        self.record = record
+        self.onBack = onBack
+        let descriptor = record.flatMap {
+            try? XtreamProviderConfiguration(data: $0.rawData)
+        }
+        _displayName = State(initialValue: descriptor?.displayName ?? "")
+        _serverURL = State(
+            initialValue: descriptor?.serverBaseURL.absoluteString ?? ""
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(
+                record == nil
+                    ? L10n.string(
+                        "xtream.add.title",
+                        fallback: "Add Xtream Provider"
+                    )
+                    : L10n.string(
+                        "xtream.edit.title",
+                        fallback: "Edit Xtream Provider"
+                    )
+            )
+            .font(.title2)
+
+            Text(
+                L10n.string(
+                    "xtream.editor.subtitle",
+                    fallback: "Native Movies, Series, Search, and Basic Live TV."
+                )
+            )
+            .font(.callout)
+            .foregroundColor(.secondary)
+
+            VStack(alignment: .leading, spacing: 12) {
+                editorField(
+                    label: L10n.string("xtream.name", fallback: "Name")
+                ) {
+                    TextField(
+                        L10n.string(
+                            "xtream.name.placeholder",
+                            fallback: "My Xtream Provider"
+                        ),
+                        text: $displayName
+                    )
+                }
+                editorField(
+                    label: L10n.string(
+                        "xtream.server-url",
+                        fallback: "Server URL"
+                    )
+                ) {
+                    TextField(
+                        "https://provider.example:8443/iptv",
+                        text: $serverURL
+                    )
+                }
+                editorField(
+                    label: L10n.string(
+                        "xtream.username",
+                        fallback: "Username"
+                    )
+                ) {
+                    TextField("", text: $username)
+                        .textContentType(.username)
+                }
+                editorField(
+                    label: L10n.string(
+                        "xtream.password",
+                        fallback: "Password"
+                    )
+                ) {
+                    SecureField("", text: $password)
+                        .textContentType(.password)
+                }
             }
-            return LogRedactor.url(url)
-        case .localFile: return record.sourceValue ?? L10n.string("configuration.source.local-file", fallback: "Local File")
-        case .pasted: return L10n.string("configuration.source.pasted", fallback: "Pasted Content")
+
+            Text(
+                record == nil
+                    ? L10n.string(
+                        "xtream.security-note",
+                        fallback: "Credentials are stored only in this Mac’s Keychain. Configuration exports and portable backups never contain them."
+                    )
+                    : L10n.string(
+                        "xtream.edit.credentials-note",
+                        fallback: "For security, enter the username and password again before saving changes."
+                    )
+            )
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            if let status {
+                switch status {
+                case .success(let message):
+                    Label(message, systemImage: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                case .failure(let message):
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                }
+            }
+
+            Spacer()
+            HStack {
+                if let onBack {
+                    Button(L10n.string("providers.back", fallback: "Back"), action: onBack)
+                        .disabled(isBusy)
+                }
+                Spacer()
+                Button(L10n.string(.commonCancel)) {
+                    operationTask?.cancel()
+                    operationTask = nil
+                    isPresented = false
+                }
+                Button {
+                    testConnection()
+                } label: {
+                    if isBusy {
+                        HStack(spacing: 6) {
+                            AppActivityIndicator(size: .small)
+                            Text(L10n.string("xtream.testing", fallback: "Testing"))
+                        }
+                    } else {
+                        Text(
+                            L10n.string(
+                                "xtream.test-connection",
+                                fallback: "Test Connection"
+                            )
+                        )
+                    }
+                }
+                .disabled(!connectionFieldsAreValid || isBusy)
+                Button {
+                    save()
+                } label: {
+                    Text(record == nil ? L10n.string("providers.add-use", fallback: "Add and Use") : L10n.string("common.save", fallback: "Save"))
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!formIsValid || isBusy)
+            }
+        }
+        .padding(22)
+        .interactiveDismissDisabled(isBusy)
+        .onDisappear {
+            operationTask?.cancel()
+            operationTask = nil
+        }
+    }
+
+    private var isBusy: Bool { operationTask != nil }
+
+    private func editorField<Content: View>(
+        label: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(label)
+                .frame(width: 105, alignment: .trailing)
+            content()
+        }
+    }
+
+    private var connectionFieldsAreValid: Bool {
+        guard !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !password.isEmpty,
+              let url = URL(
+                string: serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+              ),
+              (try? XtreamEndpoint(serverURL: url)) != nil else {
+            return false
+        }
+        return true
+    }
+
+    private var formIsValid: Bool {
+        connectionFieldsAreValid
+    }
+
+    private func testConnection() {
+        guard operationTask == nil else { return }
+        status = nil
+        operationTask = Task {
+            do {
+                let account = try await state.testXtreamProviderConnection(
+                    serverURL: serverURL,
+                    username: username,
+                    password: password
+                )
+                guard !Task.isCancelled else { return }
+                let accountStatus = account.status?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if let accountStatus, !accountStatus.isEmpty {
+                    status = .success(
+                        L10n.string(
+                            "xtream.test.success-with-status",
+                            fallback: "Connection succeeded. Account status: %@.",
+                            accountStatus
+                        )
+                    )
+                } else {
+                    status = .success(
+                        L10n.string(
+                            "xtream.test.success",
+                            fallback: "Connection succeeded."
+                        )
+                    )
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                status = .failure(
+                    RuntimeUserFacingMessageMapper.message(for: error)
+                )
+            }
+            operationTask = nil
+        }
+    }
+
+    private func save() {
+        guard operationTask == nil else { return }
+        status = nil
+        operationTask = Task {
+            let succeeded = await state.saveXtreamProvider(
+                id: record?.id,
+                displayName: displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? (URL(string: serverURL.trimmingCharacters(in: .whitespacesAndNewlines))?.host ?? "Xtream")
+                    : displayName,
+                serverURL: serverURL,
+                username: username,
+                password: password
+            )
+            guard !Task.isCancelled else { return }
+            operationTask = nil
+            if succeeded {
+                isPresented = false
+            } else {
+                status = .failure(
+                    L10n.string(
+                        "xtream.save.failed.retry",
+                        fallback: "The provider could not be saved. Check the fields and try again."
+                    )
+                )
+            }
         }
     }
 }
@@ -400,13 +674,15 @@ private struct ConfigurationRow: View {
 private struct ConfigurationImportSheet: View {
     enum Mode: String, CaseIterable, Identifiable {
         case remote
+        case file
         case pasted
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
-            case .remote: return "URL"
+            case .remote: return L10n.string("providers.link", fallback: "Link")
+            case .file: return L10n.string("providers.file", fallback: "File")
             case .pasted:
                 return L10n.string("configuration.source.pasted", fallback: "Pasted Content")
             }
@@ -415,7 +691,16 @@ private struct ConfigurationImportSheet: View {
 
     @EnvironmentObject private var state: AppState
     @Binding var isPresented: Bool
-    @State private var mode: Mode = .remote
+    let onBack: () -> Void
+    @State private var mode: Mode
+    @State private var showingFileImporter = false
+    @State private var selectedFile: URL?
+
+    init(isPresented: Binding<Bool>, initialMode: Mode, onBack: @escaping () -> Void) {
+        _isPresented = isPresented
+        _mode = State(initialValue: initialMode)
+        self.onBack = onBack
+    }
     @State private var name = ""
     @State private var remoteURL = ""
     @State private var pastedText = ""
@@ -433,7 +718,7 @@ private struct ConfigurationImportSheet: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text(L10n.string("configuration.import", fallback: "Import Video Provider Configuration"))
                     .font(.title2)
-                Text(L10n.string("configuration.import.formats", fallback: "Supports JSON, limited JSONC, image, and Base64-wrapped formats. You can sync included Live TV lists after import."))
+                Text(L10n.string("providers.import.help", fallback: "Use a TVBox configuration link or file, or a CatPawOpen .js.md5 link."))
                     .font(.callout)
                     .foregroundColor(.secondary)
                 Picker(L10n.string("common.method", fallback: "Method"), selection: $mode) {
@@ -453,20 +738,38 @@ private struct ConfigurationImportSheet: View {
                     )
                     .frame(height: 22)
                     .disabled(isSubmitting)
-                    Text(L10n.string("configuration.remote.security-note", fallback: "Standard configurations allow HTTP and HTTPS. HTTPS is recommended for remote Node bundles. For an HTTP bundle, append #sha256=<64-character hash> to the .js.md5 URL; &source=<source ID>&version=<version> are optional."))
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    if let url = ImportURLInput.httpURL(from: remoteURL) {
+                        Text(L10n.string(NodeBundleRuntimeService.supports(url) ? "providers.link.catpaw" : "providers.link.tvbox",
+                            fallback: NodeBundleRuntimeService.supports(url) ? "CatPawOpen link · The app will check compatibility when adding." : "Configuration link · The app will read the TVBox configuration when adding."))
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                    DisclosureGroup(L10n.string("providers.advanced", fallback: "Advanced Options")) {
+                        Text(L10n.string("configuration.remote.security-note", fallback: "Standard configurations allow HTTP and HTTPS. HTTPS is recommended for remote Node bundles. For an HTTP bundle, append #sha256=<64-character hash> to the .js.md5 URL; &source=<source ID>&version=<version> are optional."))
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                } else if mode == .file {
+                    SettingsCard {
+                        SettingsControlRow(icon: "folder", color: .blue,
+                            title: selectedFile?.lastPathComponent ?? L10n.string("providers.file.select", fallback: "Choose a TVBox Configuration"),
+                            subtitle: L10n.string("providers.file.help", fallback: "JSON or text configuration. CatPaw settings files belong in the existing provider’s details.")) {
+                            Button(L10n.string("common.choose", fallback: "Choose…")) { showingFileImporter = true }
+                                .disabled(isSubmitting)
+                                .accessibilityIdentifier("provider-choose-file")
+                        }
+                    }
                 } else {
                     TextEditor(text: $pastedText)
                         .font(.system(.body, design: .monospaced))
-                        .frame(minHeight: 240)
+                        .frame(height: 130)
                         .overlay(
                             RoundedRectangle(cornerRadius: 4)
                                 .stroke(Color.secondary.opacity(0.3))
                         )
                         .disabled(isSubmitting)
-                    TextField(L10n.string("configuration.base-url.optional", fallback: "Relative Resource Base URL (Optional)"), text: $baseURL)
-                        .disabled(isSubmitting)
+                    DisclosureGroup(L10n.string("providers.advanced", fallback: "Advanced Options")) {
+                        TextField(L10n.string("configuration.base-url.optional", fallback: "Relative Resource Base URL (Optional)"), text: $baseURL)
+                            .disabled(isSubmitting)
+                    }
                 }
                 Spacer()
                 if let importPhase {
@@ -478,6 +781,8 @@ private struct ConfigurationImportSheet: View {
                     }
                 }
                 HStack {
+                    Button(L10n.string("providers.back", fallback: "Back"), action: onBack)
+                        .disabled(isSubmitting)
                     Spacer()
                     Button(L10n.string(.commonCancel)) {
                         cancelOrDismiss()
@@ -492,9 +797,10 @@ private struct ConfigurationImportSheet: View {
                                 Text(L10n.string("configuration.importing", fallback: "Importing"))
                             }
                         } else {
-                            Text(L10n.string("configuration.import.action-short", fallback: "Import"))
+                            Text(L10n.string("providers.add-use", fallback: "Add and Use"))
                         }
                     }
+                    .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(!canImport)
                 }
@@ -508,6 +814,20 @@ private struct ConfigurationImportSheet: View {
         }
         .padding(22)
         .interactiveDismissDisabled(isCommitInProgress)
+        .fileImporter(isPresented: $showingFileImporter, allowedContentTypes: [.json, .plainText]) { result in
+            switch result {
+            case .success(let url):
+                selectedFile = url
+                if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    name = url.deletingPathExtension().lastPathComponent
+                }
+            case .failure(let error):
+                importError = UserFacingError(
+                    title: L10n.string("configuration.file-selection.failed", fallback: "Unable to Select File"),
+                    message: RuntimeUserFacingMessageMapper.message(for: error)
+                )
+            }
+        }
         .onDisappear {
             detachActiveImport()
         }
@@ -525,6 +845,8 @@ private struct ConfigurationImportSheet: View {
         switch mode {
         case .remote:
             return ImportURLInput.httpURL(from: remoteURL) != nil
+        case .file:
+            return selectedFile != nil
         case .pasted:
             return !pastedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
@@ -548,6 +870,9 @@ private struct ConfigurationImportSheet: View {
             guard let url = ImportURLInput.httpURL(from: normalized) else { return }
             remoteURL = normalized
             source = .remote(url)
+        case .file:
+            guard let selectedFile else { return }
+            source = .localFile(selectedFile)
         case .pasted:
             let normalizedBaseURL = ImportURLInput.normalized(baseURL)
             source = .pasted(
@@ -560,6 +885,11 @@ private struct ConfigurationImportSheet: View {
         importError = nil
         importPhase = initialPhase(for: source)
         submissionTask = Task {
+            // Keep the file-picker grant alive for the entire asynchronous read.
+            let fileURL: URL?
+            if case .localFile(let url) = source { fileURL = url } else { fileURL = nil }
+            let scoped = fileURL?.startAccessingSecurityScopedResource() ?? false
+            defer { if scoped { fileURL?.stopAccessingSecurityScopedResource() } }
             let result = await state.importConfigurationForSheet(
                 source: source,
                 name: name,
@@ -629,6 +959,9 @@ private struct ConfigurationImportSheet: View {
                 .foregroundColor(.green)
             Text(summary.configurationName)
                 .font(.headline)
+            Text(L10n.string("providers.import.complete", fallback: "%d sites added. This provider is now in use.", summary.siteCount))
+                .fixedSize(horizontal: false, vertical: true)
+            DisclosureGroup(L10n.string("providers.compatibility-details", fallback: "Compatibility Details")) {
             Text(
                 L10n.string(
                     "configuration.import.summary",
@@ -640,6 +973,8 @@ private struct ConfigurationImportSheet: View {
                 )
             )
             .fixedSize(horizontal: false, vertical: true)
+
+            }
 
             if summary.androidBridgeUnavailable,
                summary.javaDexSiteCount > 0 {

@@ -1,0 +1,9 @@
+{
+  "info": {"series_id": "800", "name": "Flat Fixture Series"},
+  "seasons": [],
+  "episodes": [
+    {"id": 8001, "episode_num": 1, "title": "S1E1", "season": "1", "container_extension": "mp4"},
+    {"id": "8101", "episode_num": "1", "title": "S2E1", "season": 2, "container_extension": "mp4"},
+    {"id": "8102", "episode_num": 2, "title": "S2E2", "season": "2", "container_extension": "mp4"}
+  ]
+}

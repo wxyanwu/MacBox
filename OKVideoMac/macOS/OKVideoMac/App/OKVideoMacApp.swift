@@ -788,13 +788,8 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
                 width: CGFloat(ratio),
                 height: 1
             )
-            window.contentMinSize = NSSize(
-                width: CGFloat(
-                    PlayerWindowPreferencePolicy.minimumContentWidth
-                ),
-                height: CGFloat(
-                    PlayerWindowPreferencePolicy.minimumContentWidth / ratio
-                )
+            window.contentMinSize = PlayerWindowPreferencePolicy.minimumContentSize(
+                aspectRatio: ratio
             )
         }
 
@@ -1303,7 +1298,7 @@ enum PlayerWindowFrameVisibilityPolicy {
     }
 }
 
-private struct PlayerPlaybackWindowRoot: View {
+struct PlayerPlaybackWindowRoot: View {
     @ObservedObject var appState: AppState
 
     var body: some View {
@@ -1345,7 +1340,7 @@ private struct PlayerPlaybackWindowRoot: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(minWidth: 800, minHeight: 450)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
         .alert(item: $appState.playerPresentedError) { error in
             Alert(

@@ -383,7 +383,7 @@ enum BrowserEscapeRoutePolicy {
 
 struct ShortcutLiveSourceSelection: Equatable {
     let requestID: UUID
-    let sourceID: UUID
+    let sourceID: LiveSourceID
 }
 
 /// Keeps high-frequency page navigation separate from the much larger app
@@ -4162,12 +4162,18 @@ struct LivePlaybackCandidate: Equatable {
     }
 }
 
+enum LivePlaybackRecoveryScope: Equatable {
+    case entireSource
+    case currentChannel
+}
+
 enum LivePlaybackRecoveryPolicy {
     static func candidates(
         channels: [LiveChannel],
         startingChannel: LiveChannel,
         startingStream: LiveStream,
-        excluding attemptedIdentifiers: Set<String> = []
+        excluding attemptedIdentifiers: Set<String> = [],
+        scope: LivePlaybackRecoveryScope = .entireSource
     ) -> [LivePlaybackCandidate] {
         let normalized = LiveChannelNavigationPolicy.normalizedChannels(
             channels,
@@ -4179,8 +4185,14 @@ enum LivePlaybackRecoveryPolicy {
             return []
         }
 
-        let orderedChannels = Array(normalized[startingIndex...])
-            + Array(normalized[..<startingIndex])
+        let orderedChannels: [LiveChannel]
+        switch scope {
+        case .entireSource:
+            orderedChannels = Array(normalized[startingIndex...])
+                + Array(normalized[..<startingIndex])
+        case .currentChannel:
+            orderedChannels = [startingChannel]
+        }
         var seenStreamURLs = Set<String>()
         var values: [LivePlaybackCandidate] = []
         for channel in orderedChannels {
@@ -4207,6 +4219,34 @@ enum LivePlaybackRecoveryPolicy {
             }
         }
         return values
+    }
+}
+
+enum XtreamLivePlaybackFailurePolicy {
+    static func permitsFormatFallback(after message: String) -> Bool {
+        let normalized = message.lowercased()
+        let terminalMarkers = [
+            "401", "403", "unauthorized", "forbidden", "disabled",
+            "expired", "credential", "account"
+        ]
+        return !terminalMarkers.contains { normalized.contains($0) }
+    }
+}
+
+private enum XtreamLivePlaybackError: LocalizedError {
+    case staleRequest
+    case unavailableAccount
+    case invalidReference
+
+    var errorDescription: String? {
+        switch self {
+        case .staleRequest:
+            return "The Xtream Live playback request is no longer current."
+        case .unavailableAccount:
+            return "The Xtream account is unavailable. Check its credentials in Settings."
+        case .invalidReference:
+            return "The Xtream Live channel reference is invalid."
+        }
     }
 }
 
@@ -4282,7 +4322,7 @@ enum LiveSourceEPGStatus: Equatable {
     case failed(String)
 }
 
-private actor LiveStreamAvailabilityProber {
+actor LiveStreamAvailabilityProber {
     private let httpClient: URLSessionHTTPClient
 
     init() {
@@ -4294,16 +4334,17 @@ private actor LiveStreamAvailabilityProber {
     }
 
     func result(for stream: LiveStream) async -> LiveStreamProbeResult {
-        if stream.needsParsing {
+        guard case .direct(let url) = stream.target, !stream.needsParsing else {
+            // Provider targets are metadata, never streams to pre-open.
             return .inconclusive
         }
-        if stream.url.isFileURL {
-            return FileManager.default.fileExists(atPath: stream.url.path)
+        if url.isFileURL {
+            return FileManager.default.fileExists(atPath: url.path)
                 ? .reachable
                 : .definitivelyUnavailable
         }
         guard ["http", "https"].contains(
-            stream.url.scheme?.lowercased() ?? ""
+            url.scheme?.lowercased() ?? ""
         ) else {
             return .inconclusive
         }
@@ -4322,12 +4363,13 @@ private actor LiveStreamAvailabilityProber {
     }
 
     private func probeOnce(_ stream: LiveStream) async -> LiveStreamProbeResult {
+        guard case .direct(let url) = stream.target else { return .inconclusive }
         var headers = HTTPHeaders(stream.headers)
         headers["Range"] = "bytes=0-1023"
         do {
             let response = try await httpClient.send(
                 HTTPRequest(
-                    url: stream.url,
+                    url: url,
                     headers: headers,
                     timeout: 6,
                     maximumResponseBytes: 256 * 1_024,
@@ -4350,7 +4392,7 @@ private actor LiveStreamAvailabilityProber {
 }
 
 private struct LivePlaybackNavigationContext {
-    let sourceID: UUID
+    let sourceID: LiveSourceID
     let channels: [LiveChannel]
 }
 
@@ -4658,6 +4700,7 @@ private struct PreparedConfigurationActivation {
     let configuration: FongMiConfiguration
     let nodeRuntimeEndpoint: URL?
     let nodeRuntimeSourceURL: URL?
+    let xtreamCredentials: XtreamCredentials?
 
     var usesNodeRuntime: Bool {
         nodeRuntimeSourceURL != nil
@@ -4766,6 +4809,11 @@ final class AppState: ObservableObject {
     @Published private(set) var historyPlaybackChoices: [HistoryPlaybackChoice] = []
     @Published private(set) var liveSources: [StoredLiveSource] = []
     @Published private(set) var loadedLivePlaylists: [UUID: LivePlaylist] = [:]
+    @Published private(set) var nativeLiveCatalog: LiveCatalogSnapshot?
+    @Published private(set) var nativeLiveCatalogError: String?
+    @Published private(set) var liveCatalogLoadingSourceIDs = Set<LiveSourceID>()
+    @Published private(set) var nativeLiveFavorites = StoredLiveChannelReferenceEnvelope(setting: nil)
+    @Published private(set) var nativeLiveHiddenChannels = StoredLiveChannelReferenceEnvelope(setting: nil)
     @Published private(set) var loadedEPGGuides: [UUID: XMLTVGuide] = [:]
     private var loadedEPGScheduleIndexes: [UUID: XMLTVScheduleIndex] = [:]
     @Published private(set) var epgFailures: [UUID: String] = [:]
@@ -4773,7 +4821,7 @@ final class AppState: ObservableObject {
         [UUID: LiveSourceEPGStatus] = [:]
     @Published private(set) var livePlaybackChannel: LiveChannel?
     @Published private(set) var livePlaybackStream: LiveStream?
-    @Published private(set) var livePlaybackSourceID: UUID?
+    @Published private(set) var livePlaybackSourceID: LiveSourceID?
     @Published private(set) var isRecoveringLivePlayback = false
     @Published private(set) var hasExhaustedLivePlayback = false
     @Published private(set) var livePlaybackNotice: String?
@@ -4901,8 +4949,11 @@ final class AppState: ObservableObject {
     }
 
     private let environment: AppEnvironment?
+    private let liveReferenceStore: SQLiteStore?
+    private let liveCredentialStore: (any XtreamCredentialStoring)?
     private let playerRenderSurfaceGate = PlayerRenderSurfaceReadinessGate()
     private var configurationImportOperationID: UUID?
+    private var xtreamProviderOperationID: UUID?
     private var configurationActivationTracker =
         ConfigurationActivationRequestTracker()
     private var configurationActivationTask: Task<Void, Never>?
@@ -4910,6 +4961,13 @@ final class AppState: ObservableObject {
     private var configurationPostActivationSessionID = UUID()
     private var configurationSwitchFeedbackDismissTask: Task<Void, Never>?
     private var providers: [String: SiteProvider] = [:]
+    private var activeXtreamCredentials: XtreamCredentials?
+    private var nativeLiveGeneration = UUID()
+    private var nativeLiveAccountMutationIDs = Set<UUID>()
+    private var nativeLiveCatalogRequestID: UUID?
+    private var nativeLiveCatalogTask: Task<LiveCatalogSnapshot, Error>?
+    private var nativeLiveReferenceWriteTask: Task<Void, Never>?
+    private var nativeLiveReferenceWriteID: UUID?
     private var searchTask: Task<Void, Never>?
     private var searchSessionGate = SearchSessionGate()
     private var detailLoadSessionID = UUID()
@@ -4993,6 +5051,7 @@ final class AppState: ObservableObject {
     private var hasCompletedShutdown = false
     private var shouldResumeAfterWake = false
     private var isClosingPlayer = false
+    private var playerCloseWaiters: [CheckedContinuation<Void, Never>] = []
     private var prefersPlayerSubtitlesEnabled = false
     private var preferredPlayerSubtitleTrack: PlayerSubtitleTrackPreference?
     private var lastAutomaticConfigurationRefreshAttemptAt: Date?
@@ -5030,9 +5089,16 @@ final class AppState: ObservableObject {
 
     init(
         environment: AppEnvironment?,
-        startupError: UserFacingError? = nil
+        startupError: UserFacingError? = nil,
+        initialProviders: [String: SiteProvider] = [:],
+        liveReferenceStore: SQLiteStore? = nil,
+        liveCredentialStore: (any XtreamCredentialStoring)? = nil
     ) {
         self.environment = environment
+        self.liveReferenceStore = liveReferenceStore ?? environment?.database
+        self.liveCredentialStore = liveCredentialStore
+            ?? environment?.xtreamCredentialStore
+        providers = initialProviders
         playerRenderClient = environment?.player.renderPlayer
         presentedError = startupError
         environment?.player.onRenderClientChanged = { [weak self] player in
@@ -5070,6 +5136,13 @@ final class AppState: ObservableObject {
             // performing any remote Node bundle work. This keeps startup
             // useful offline and prevents a misleading "no configuration"
             // screen while a remote script is downloading.
+            activeXtreamCredentials = try? await xtreamCredentials(
+                for: activeConfigurationRecord
+            )
+            try await validateXtreamAccountIfNeeded(
+                record: activeConfigurationRecord,
+                credentials: activeXtreamCredentials
+            )
             try loadActiveConfigurationContent()
             try await loadSettings()
             await prepareActiveConfigurationHome(
@@ -5129,6 +5202,246 @@ final class AppState: ObservableObject {
             presentedError = error
             return false
         }
+    }
+
+    func testXtreamProviderConnection(
+        serverURL: String,
+        username: String,
+        password: String
+    ) async throws -> XtreamAccount {
+        guard let environment else {
+            throw AppError.configuration(
+                L10n.string(
+                    "app.environment.not-initialized",
+                    fallback: "The app environment has not been initialized"
+                )
+            )
+        }
+        let endpoint = try Self.xtreamEndpoint(serverURL)
+        let credentials = try Self.xtreamCredentials(
+            username: username,
+            password: password
+        )
+        return try await XtreamClient(
+            endpoint: endpoint,
+            credentials: credentials,
+            httpClient: environment.xtreamHTTPClient,
+            userAgent: Self.xtreamUserAgent
+        ).authenticate()
+    }
+
+    @discardableResult
+    func saveXtreamProvider(
+        id: UUID?,
+        displayName: String,
+        serverURL: String,
+        username: String,
+        password: String
+    ) async -> Bool {
+        guard let environment else { return false }
+        guard xtreamProviderOperationID == nil,
+              configurationImportOperationID == nil,
+              requestedConfigurationID == nil else {
+            show(
+                AppError.configuration(
+                    L10n.string(
+                        "xtream.operation.in-progress",
+                        fallback: "Another provider operation is already in progress."
+                    )
+                ),
+                title: L10n.string(
+                    "xtream.save.failed",
+                    fallback: "Unable to Save Xtream Provider"
+                )
+            )
+            return false
+        }
+        let operationID = UUID()
+        xtreamProviderOperationID = operationID
+        isLoading = true
+        defer {
+            if xtreamProviderOperationID == operationID {
+                xtreamProviderOperationID = nil
+                isLoading = false
+            }
+        }
+
+        var previousCredentials: XtreamCredentials?
+        var targetProviderID: UUID?
+        var didWriteCredentials = false
+        var didCommitDatabase = false
+        do {
+            let existing: StoredConfiguration?
+            if let id {
+                guard let record = configurations.first(where: { $0.id == id }),
+                      record.sourceKind == .xtream else {
+                    throw AppError.configuration(
+                        L10n.string(
+                            "xtream.edit.missing",
+                            fallback: "The Xtream provider no longer exists."
+                        )
+                    )
+                }
+                existing = record
+            } else {
+                existing = nil
+            }
+            let providerID = existing?.id ?? UUID()
+            targetProviderID = providerID
+            let endpoint = try Self.xtreamEndpoint(serverURL)
+            let credentials = try Self.xtreamCredentials(
+                username: username,
+                password: password
+            )
+            let descriptor = try XtreamProviderConfiguration(
+                providerID: providerID,
+                displayName: displayName,
+                serverBaseURL: endpoint.serverURL
+            )
+
+            // Authentication is a hard pre-commit gate. Neither the Keychain
+            // nor SQLite changes when the account is rejected.
+            _ = try await XtreamClient(
+                endpoint: endpoint,
+                credentials: credentials,
+                httpClient: environment.xtreamHTTPClient,
+                userAgent: Self.xtreamUserAgent
+            ).authenticate()
+            try Task.checkCancellation()
+
+            nativeLiveAccountMutationIDs.insert(providerID)
+            if existing == nil || activeConfigurationRecord?.id == providerID {
+                invalidateXtreamLiveCatalog()
+            }
+            defer { nativeLiveAccountMutationIDs.remove(providerID) }
+            await closeXtreamLivePlaybackIfNeeded(
+                providerID: existing == nil ? nil : providerID
+            )
+            guard xtreamProviderOperationID == operationID else {
+                throw CancellationError()
+            }
+            previousCredentials = try await environment.xtreamCredentialStore
+                .credentials(for: providerID)
+            try await environment.xtreamCredentialStore.save(
+                credentials,
+                for: providerID
+            )
+            didWriteCredentials = true
+            try Task.checkCancellation()
+
+            let record = StoredConfiguration(
+                id: providerID,
+                name: descriptor.displayName,
+                sourceKind: .xtream,
+                sourceValue: descriptor.serverBaseURL.absoluteString,
+                baseURL: descriptor.serverBaseURL,
+                rawData: try descriptor.encoded(),
+                updatedAt: Date(),
+                isActive: existing?.isActive ?? true
+            )
+            let shouldPublish = existing == nil || record.isActive
+            if existing == nil {
+                configurations = try await environment.database
+                    .commitImportedConfiguration(record)
+                didCommitDatabase = true
+            } else {
+                try await environment.database.saveConfiguration(record)
+                didCommitDatabase = true
+                configurations = configurations.map {
+                    $0.id == record.id ? record : $0
+                }.sorted {
+                    if $0.isActive != $1.isActive {
+                        return $0.isActive && !$1.isActive
+                    }
+                    return $0.updatedAt > $1.updatedAt
+                }
+            }
+
+            if shouldPublish {
+                configurationPostActivationSessionID = UUID()
+                configurationPostActivationTask?.cancel()
+                configurationPostActivationTask = nil
+                commitConfigurationActivation(
+                    PreparedConfigurationActivation(
+                        record: record,
+                        configuration: descriptor.providerConfiguration,
+                        nodeRuntimeEndpoint: nil,
+                        nodeRuntimeSourceURL: nil,
+                        xtreamCredentials: credentials
+                    )
+                )
+                scheduleNodeRuntimeStop(for: record.id)
+                await loadSearchSiteScope()
+                _ = await prepareActiveConfigurationHome(
+                    reportLoadErrors: false,
+                    loadBehavior: .background,
+                    entryReason: .configurationSwitch
+                )
+                try? await reloadHistory()
+            }
+            return true
+        } catch {
+            if didWriteCredentials && !didCommitDatabase {
+                if let previousCredentials, let targetProviderID {
+                    try? await environment.xtreamCredentialStore.save(
+                        previousCredentials,
+                        for: targetProviderID
+                    )
+                } else if let targetProviderID {
+                    try? await environment.xtreamCredentialStore
+                        .deleteCredentials(for: targetProviderID)
+                }
+            }
+            if !AsyncCancellationPolicy.isCancellation(error) {
+                show(
+                    error,
+                    title: L10n.string(
+                        "xtream.save.failed",
+                        fallback: "Unable to Save Xtream Provider"
+                    )
+                )
+            }
+            return false
+        }
+    }
+
+    private static func xtreamEndpoint(_ rawValue: String) throws
+        -> XtreamEndpoint {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: value) else {
+            throw XtreamProviderConfigurationError.invalidServerURL
+        }
+        return try XtreamEndpoint(serverURL: url)
+    }
+
+    private static func xtreamCredentials(
+        username: String,
+        password: String
+    ) throws -> XtreamCredentials {
+        let normalizedUsername = username.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !normalizedUsername.isEmpty,
+              !password.isEmpty,
+              normalizedUsername.utf8.count <= 1_024,
+              password.utf8.count <= 1_024,
+              !normalizedUsername.unicodeScalars.contains(where: {
+                CharacterSet.controlCharacters.contains($0)
+              }),
+              !password.unicodeScalars.contains(where: {
+                CharacterSet.controlCharacters.contains($0)
+              }) else {
+            throw AppError.configuration(
+                L10n.string(
+                    "xtream.credentials.invalid",
+                    fallback: "Enter a valid Xtream username and password."
+                )
+            )
+        }
+        return XtreamCredentials(
+            username: normalizedUsername,
+            password: password
+        )
     }
 
     func importConfigurationForSheet(
@@ -5200,6 +5513,11 @@ final class AppState: ObservableObject {
             )
             progress(.saving)
             try ensureConfigurationImportIsActive(operationID)
+            if livePlaybackSourceID?.isXtream == true {
+                invalidateXtreamLiveCatalog()
+                await closeXtreamLivePlaybackIfNeeded()
+                try ensureConfigurationImportIsActive(operationID)
+            }
             onCommitStarted()
             try ensureConfigurationImportIsActive(operationID)
             let committedConfigurations = try await environment.database
@@ -5222,6 +5540,7 @@ final class AppState: ObservableObject {
             lastAutomaticConfigurationRefreshAttemptAt = payload.loaded.loadedAt
             activeConfigurationRecord = record
             activeConfiguration = payload.loaded.configuration
+            activeXtreamCredentials = nil
             let importedUsesNodeRuntime: Bool
             if case .remote(let url) = source {
                 importedUsesNodeRuntime = NodeBundleRuntimeService.supports(url)
@@ -5293,6 +5612,15 @@ final class AppState: ObservableObject {
     var canImportCatPawProfile: Bool {
         activeConfigurationUsesNodeRuntime
             && activeConfigurationRecord?.id != nil
+    }
+
+    func canImportCatPawSettings(for configurationID: UUID) async -> Bool {
+        guard canImportCatPawProfile,
+              activeConfigurationRecord?.id == configurationID,
+              let environment else { return false }
+        let supported = await environment.nodeBundleRuntime
+            .supportsProfileImport(configurationID: configurationID)
+        return supported && activeConfigurationRecord?.id == configurationID
     }
 
     func importCatPawProfile(from fileURL: URL) async {
@@ -5465,6 +5793,8 @@ final class AppState: ObservableObject {
     /// surface an error.
     func activateConfiguration(_ id: UUID) async {
         guard environment != nil,
+              configurationImportOperationID == nil,
+              xtreamProviderOperationID == nil,
               let record = configurations.first(where: { $0.id == id }) else {
             return
         }
@@ -5516,6 +5846,12 @@ final class AppState: ObservableObject {
 
             if prepared.record != record {
                 try await environment.database.saveConfiguration(prepared.record)
+                try ensureConfigurationActivationIsCurrent(token)
+            }
+
+            if livePlaybackSourceID?.isXtream == true {
+                invalidateXtreamLiveCatalog()
+                await closeXtreamLivePlaybackIfNeeded()
                 try ensureConfigurationActivationIsCurrent(token)
             }
 
@@ -5636,14 +5972,26 @@ final class AppState: ObservableObject {
                 record: record,
                 configuration: try ConfigurationParser().parse(record.rawData),
                 nodeRuntimeEndpoint: nil,
-                nodeRuntimeSourceURL: sourceURL
+                nodeRuntimeSourceURL: sourceURL,
+                xtreamCredentials: nil
             )
         }
+        let configuration = try Self.configurationContent(for: record)
+        let credentials = try await xtreamCredentials(for: record)
+        // An explicitly selected Xtream provider must pass the same account
+        // gate as Test Connection and Save. This also prevents a previously
+        // saved account whose exp_date has elapsed from being committed as the
+        // active provider.
+        try await validateXtreamAccountIfNeeded(
+            record: record,
+            credentials: credentials
+        )
         return PreparedConfigurationActivation(
             record: record,
-            configuration: try ConfigurationParser().parse(record.rawData),
+            configuration: configuration,
             nodeRuntimeEndpoint: nil,
-            nodeRuntimeSourceURL: nil
+            nodeRuntimeSourceURL: nil,
+            xtreamCredentials: credentials
         )
     }
 
@@ -5680,6 +6028,7 @@ final class AppState: ObservableObject {
         }
         activeConfigurationRecord = activeRecord
         activeConfiguration = prepared.configuration
+        activeXtreamCredentials = prepared.xtreamCredentials
         lastAutomaticConfigurationRefreshAttemptAt = activeRecord.updatedAt
         activeNodeRuntimeEndpoint = prepared.nodeRuntimeEndpoint
         nodeRuntimeUnavailableReason = prepared.usesNodeRuntime
@@ -5930,8 +6279,29 @@ final class AppState: ObservableObject {
         guard let environment else { return }
         clearConfigurationSwitchFeedback()
         let deletingActiveConfiguration = activeConfigurationRecord?.id == id
+        let deletingXtream = configurations.first(where: { $0.id == id })?
+            .sourceKind == .xtream
+        if deletingXtream {
+            nativeLiveAccountMutationIDs.insert(id)
+            if deletingActiveConfiguration { invalidateXtreamLiveCatalog() }
+        }
+        defer { nativeLiveAccountMutationIDs.remove(id) }
+        if deletingXtream {
+            await closeXtreamLivePlaybackIfNeeded(providerID: id)
+        }
+        var deletedXtreamCredentials: XtreamCredentials?
+        var didDeleteXtreamCredentials = false
+        var didDeleteConfiguration = false
         do {
+            if deletingXtream {
+                deletedXtreamCredentials = try await environment
+                    .xtreamCredentialStore.credentials(for: id)
+                try await environment.xtreamCredentialStore
+                    .deleteCredentials(for: id)
+                didDeleteXtreamCredentials = true
+            }
             try await environment.database.deleteConfiguration(id: id)
+            didDeleteConfiguration = true
             if deletingActiveConfiguration {
                 resetSearchForConfigurationChange()
             }
@@ -5939,6 +6309,9 @@ final class AppState: ObservableObject {
             if activeConfigurationRecord?.id == id {
                 activeConfigurationRecord = try await environment.database.activeConfiguration()
                 selectedSiteKey = nil
+                activeXtreamCredentials = try? await xtreamCredentials(
+                    for: activeConfigurationRecord
+                )
                 try loadActiveConfigurationContent()
                 if let record = activeConfigurationRecord,
                    let sourceURL = activeNodeRuntimeSourceURL {
@@ -5963,6 +6336,14 @@ final class AppState: ObservableObject {
                 try await reloadHistory()
             }
         } catch {
+            if didDeleteXtreamCredentials,
+               !didDeleteConfiguration,
+               let deletedXtreamCredentials {
+                try? await environment.xtreamCredentialStore.save(
+                    deletedXtreamCredentials,
+                    for: id
+                )
+            }
             show(error, title: L10n.string("configuration.delete.failed", fallback: "Configuration Deletion Failed"))
         }
     }
@@ -6854,8 +7235,9 @@ final class AppState: ObservableObject {
         detailLoadSessionID = sessionID
         selectedDetail = nil
         pendingDetailSummary = summary
-        isLoading = true
-        defer { isLoading = false }
+        // The pending summary owns the detail page's loading presentation.
+        // Do not share the home/configuration loading flag: a dismissed
+        // provider request may finish after another page has started loading.
         do {
             performanceTrace?.markProviderStart(searchActive: isSearching)
             if let performanceTrace, let environment {
@@ -9978,13 +10360,15 @@ final class AppState: ObservableObject {
             requestID: owningPreparationID
         )
         do {
+            guard activePlayerRequestID == sessionID,
+                  playbackSessionID == sessionID else { return false }
             try await environment.player.prepareForPlayback(
                 requestID: sessionID
             )
             guard isCurrentHistoryPreparation(owningPreparationID),
                   playbackSessionID == sessionID else { return false }
             isPlayerRenderSurfaceMountEnabled = true
-            await environment.player.stop()
+            await environment.player.stop(ifOwnedBy: sessionID)
             guard isCurrentHistoryPreparation(owningPreparationID),
                   playbackSessionID == sessionID else { return false }
             // A provider-owned media session is already the authoritative
@@ -10050,13 +10434,15 @@ final class AppState: ObservableObject {
             requestID: owningPreparationID
         )
         do {
+            guard activePlayerRequestID == sessionID,
+                  playbackSessionID == sessionID else { return false }
             try await environment.player.prepareForPlayback(
                 requestID: sessionID
             )
             guard isCurrentHistoryPreparation(owningPreparationID),
                   playbackSessionID == sessionID else { return false }
             isPlayerRenderSurfaceMountEnabled = true
-            await environment.player.stop()
+            await environment.player.stop(ifOwnedBy: sessionID)
             guard isCurrentHistoryPreparation(owningPreparationID),
                   playbackSessionID == sessionID else { return false }
             try await loadResolvedPlayback(
@@ -10356,9 +10742,18 @@ final class AppState: ObservableObject {
     }
 
     func searchFromSidebar(_ keyword: String) {
+        guard !keyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
         let returnSection = isHomeSearchPresented
             ? (homeSearchReturnSection ?? .home)
             : selectedSection
+        // Details take precedence over the search page. Dismiss first to
+        // invalidate pending provider work and consume its old return snapshot
+        // before the new search resets filters and results.
+        if isDetailPagePresented {
+            dismissDetail()
+        }
         presentHomeSearch(returnSection: returnSection)
         search(keyword)
     }
@@ -10381,6 +10776,9 @@ final class AppState: ObservableObject {
     }
 
     private func dismissHomeSearch(returningTo section: AppSection) {
+        if isDetailPagePresented {
+            dismissDetail()
+        }
         discoverySearchReturnSnapshot = nil
         cancelSearch()
         searchDraftKeyword = ""
@@ -10480,6 +10878,10 @@ final class AppState: ObservableObject {
     }
 
     func requestLiveSourceSelection(_ sourceID: UUID) {
+        requestLiveSourceSelection(.imported(sourceID))
+    }
+
+    func requestLiveSourceSelection(_ sourceID: LiveSourceID) {
         shortcutLiveSourceSelection = ShortcutLiveSourceSelection(
             requestID: UUID(),
             sourceID: sourceID
@@ -11001,6 +11403,8 @@ final class AppState: ObservableObject {
             )
         }
         do {
+            guard activePlayerRequestID == sessionID,
+                  playbackSessionID == sessionID else { return }
             try await environment.player.prepareForPlayback(
                 requestID: sessionID
             )
@@ -11016,7 +11420,7 @@ final class AppState: ObservableObject {
         // resolved. MPV's later loadfile/replace event, not the click, proves
         // that the old media has been released.
         if transferMediaLeases.isEmpty {
-            await environment.player.stop()
+            await environment.player.stop(ifOwnedBy: sessionID)
         }
         guard playbackSessionID == sessionID else { return }
 
@@ -11951,10 +12355,169 @@ final class AppState: ObservableObject {
         )
     }
 
+    var liveSourceDescriptors: [LiveSourceDescriptor] {
+        var sources = liveSources.map {
+            LiveSourceDescriptor(
+                id: .imported($0.id), name: $0.name,
+                canRefresh: $0.sourceKind == .remote,
+                canExport: true, supportsEPG: true
+            )
+        }
+        if let record = activeConfigurationRecord,
+           record.sourceKind == .xtream,
+           let configuration = try? XtreamProviderConfiguration(data: record.rawData),
+           configuration.providerID == record.id {
+            sources.append(LiveSourceDescriptor(
+                id: .xtream(record.id), name: record.name,
+                canRefresh: true, canExport: false, supportsEPG: false
+            ))
+        }
+        return sources
+    }
+
+    func liveCatalog(for sourceID: LiveSourceID) -> LiveCatalogSnapshot? {
+        switch sourceID {
+        case .imported(let id):
+            guard liveSources.contains(where: { $0.id == id }),
+                  let playlist = loadedLivePlaylists[id] else { return nil }
+            return LiveCatalogSnapshot(sourceID: sourceID, groups: playlist.groups, epgURL: playlist.epgURL)
+        case .xtream:
+            guard liveSourceDescriptors.contains(where: { $0.id == sourceID }),
+                  nativeLiveCatalog?.sourceID == sourceID else { return nil }
+            return nativeLiveCatalog
+        }
+    }
+
+    func isLiveCatalogLoading(_ sourceID: LiveSourceID) -> Bool {
+        liveCatalogLoadingSourceIDs.contains(sourceID)
+    }
+
+    func liveCatalogError(for sourceID: LiveSourceID) -> String? {
+        guard case .xtream = sourceID,
+              liveSourceDescriptors.contains(where: { $0.id == sourceID }) else { return nil }
+        return nativeLiveCatalogError
+    }
+
+    func loadLiveSource(_ sourceID: LiveSourceID) async {
+        switch sourceID {
+        case .imported(let id):
+            guard let source = liveSources.first(where: { $0.id == id }),
+                  loadedLivePlaylists[id] == nil else { return }
+            await loadLiveSource(source)
+        case .xtream:
+            guard liveCatalog(for: sourceID) == nil,
+                  !isLiveCatalogLoading(sourceID) else { return }
+            await loadXtreamLiveCatalog(sourceID)
+        }
+    }
+
+    func refreshLiveSource(_ sourceID: LiveSourceID) async {
+        switch sourceID {
+        case .imported(let id): await refreshLiveSource(id)
+        case .xtream: await loadXtreamLiveCatalog(sourceID)
+        }
+    }
+
+    private func loadXtreamLiveCatalog(_ sourceID: LiveSourceID) async {
+        guard !isShutdownRequested,
+              case .xtream(let id) = sourceID,
+              !nativeLiveAccountMutationIDs.contains(id),
+              let record = activeConfigurationRecord, record.id == id,
+              record.sourceKind == .xtream,
+              let descriptor = try? XtreamProviderConfiguration(data: record.rawData),
+              descriptor.providerID == id else { return }
+        nativeLiveCatalogTask?.cancel()
+        nativeLiveCatalogError = nil
+        guard let provider = providers[descriptor.siteKey] as? XtreamSiteProvider else {
+            nativeLiveCatalogRequestID = nil
+            nativeLiveCatalogTask = nil
+            liveCatalogLoadingSourceIDs.remove(sourceID)
+            nativeLiveCatalogError = L10n.string(
+                "xtream.live.credentials-unavailable",
+                fallback: "This provider is unavailable. Check its account credentials in Settings."
+            )
+            return
+        }
+        let requestID = UUID()
+        let generation = nativeLiveGeneration
+        nativeLiveCatalogRequestID = requestID
+        liveCatalogLoadingSourceIDs = liveCatalogLoadingSourceIDs.filter {
+            if case .xtream = $0 { return false }; return true
+        }
+        liveCatalogLoadingSourceIDs.insert(sourceID)
+        let task = Task { try await provider.liveCatalog() }
+        nativeLiveCatalogTask = task
+        defer {
+            if nativeLiveCatalogRequestID == requestID {
+                nativeLiveCatalogRequestID = nil
+                nativeLiveCatalogTask = nil
+                liveCatalogLoadingSourceIDs.remove(sourceID)
+            }
+        }
+        do {
+            let catalog = try await task.value
+            guard !Task.isCancelled, !isShutdownRequested,
+                  nativeLiveGeneration == generation,
+                  nativeLiveCatalogRequestID == requestID,
+                  activeConfigurationRecord?.id == id,
+                  catalog.sourceID == sourceID else { return }
+            nativeLiveCatalog = catalog
+        } catch {
+            guard nativeLiveGeneration == generation,
+                  nativeLiveCatalogRequestID == requestID,
+                  activeConfigurationRecord?.id == id,
+                  !AsyncCancellationPolicy.isCancellation(error) else { return }
+            // Do not retain URLSession errors or credential-bearing request URLs
+            // in published browser state. A prior safe snapshot can still be used.
+            nativeLiveCatalogError = L10n.string(
+                "xtream.live.catalog-failed",
+                fallback: "Unable to load Live TV. Check the account and connection, then refresh."
+            )
+        }
+    }
+
+    private func invalidateXtreamLiveCatalog() {
+        nativeLiveGeneration = UUID()
+        nativeLiveCatalogTask?.cancel()
+        nativeLiveCatalogTask = nil
+        nativeLiveCatalogRequestID = nil
+        nativeLiveCatalog = nil
+        nativeLiveCatalogError = nil
+        liveCatalogLoadingSourceIDs = liveCatalogLoadingSourceIDs.filter {
+            if case .xtream = $0 { return false }; return true
+        }
+    }
+
+    /// Account/configuration mutations must not race a player that still owns
+    /// a credential-bearing Xtream URL. `closePlayer` is itself ownership-safe
+    /// and waits for an already-running close transition to finish.
+    private func closeXtreamLivePlaybackIfNeeded(
+        providerID: UUID? = nil
+    ) async {
+        guard case .xtream(let activeProviderID) = livePlaybackSourceID,
+              providerID == nil || providerID == activeProviderID else {
+            return
+        }
+        await closePlayer()
+    }
+
+    #if DEBUG
+    func setLiveConfigurationForTesting(_ record: StoredConfiguration?, providers: [String: SiteProvider]) {
+        invalidateXtreamLiveCatalog()
+        activeConfigurationRecord = record
+        activeConfiguration = record.flatMap { try? XtreamProviderConfiguration(data: $0.rawData).providerConfiguration }
+        self.providers = providers
+    }
+    #endif
+
     func loadLiveSource(_ source: StoredLiveSource) async {
         guard environment != nil else { return }
+        liveCatalogLoadingSourceIDs.insert(.imported(source.id))
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            isLoading = false
+            liveCatalogLoadingSourceIDs.remove(.imported(source.id))
+        }
         do {
             let playlist = try LiveSourceParser().parse(
                 source.rawData,
@@ -11981,8 +12544,12 @@ final class AppState: ObservableObject {
             )
             return
         }
+        liveCatalogLoadingSourceIDs.insert(.imported(id))
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            isLoading = false
+            liveCatalogLoadingSourceIDs.remove(.imported(id))
+        }
         do {
             let loaded = try await environment.liveSourceLoader.load(.remote(url))
             let updated = StoredLiveSource(
@@ -12204,11 +12771,32 @@ final class AppState: ObservableObject {
     func playLive(
         channel: LiveChannel,
         stream: LiveStream,
-        sourceID: UUID,
+        sourceID: LiveSourceID,
         navigationChannels: [LiveChannel]? = nil,
         windowActivation: PlayerWindowActivationPolicy = .userInitiated
     ) async {
         guard !isShutdownRequested, let environment else { return }
+        if case .xtream(let providerID) = sourceID {
+            guard xtreamProviderOperationID == nil,
+                  configurationImportOperationID == nil,
+                  requestedConfigurationID == nil,
+                  !nativeLiveAccountMutationIDs.contains(providerID),
+                  let record = activeConfigurationRecord,
+                  record.id == providerID,
+                  record.sourceKind == .xtream,
+                  let descriptor = try? XtreamProviderConfiguration(
+                    data: record.rawData
+                  ),
+                  descriptor.providerID == providerID else {
+                show(
+                    XtreamLivePlaybackError.unavailableAccount,
+                    title: L10n.string(
+                        "player.stage.failed", fallback: "Playback Failed"
+                    )
+                )
+                return
+            }
+        }
         historyPlaybackTask?.cancel()
         historyPlaybackTask = nil
         historyPlaybackPreparationID = UUID()
@@ -12298,7 +12886,7 @@ final class AppState: ObservableObject {
     private func attemptLivePlaybackCandidates(
         startingChannel: LiveChannel,
         startingStream: LiveStream,
-        sourceID: UUID,
+        sourceID: LiveSourceID,
         isAutomaticRecovery: Bool,
         initialRequestID: UUID? = nil
     ) async {
@@ -12313,7 +12901,8 @@ final class AppState: ObservableObject {
             channels: context.channels,
             startingChannel: startingChannel,
             startingStream: startingStream,
-            excluding: livePlaybackAttemptedIdentifiers
+            excluding: livePlaybackAttemptedIdentifiers,
+            scope: sourceID.isXtream ? .currentChannel : .entireSource
         )
         var skippedCount = 0
         var pendingInitialRequestID = initialRequestID
@@ -12338,15 +12927,73 @@ final class AppState: ObservableObject {
             activePlayerRequestID = requestID
             livePlaybackChannel = candidate.channel
             livePlaybackStream = candidate.stream
-            let media = ResolvedMedia(
-                url: candidate.stream.url,
-                headers: HTTPHeaders(candidate.stream.headers),
-                format: candidate.stream.format,
-                siteKey: "live",
-                sourceName: candidate.channel.name,
-                episodeName: candidate.stream.name
-            )
             do {
+                var media: ResolvedMedia
+                switch (sourceID, candidate.stream.target) {
+                case (.imported, .direct(let streamURL)):
+                    media = ResolvedMedia(
+                        url: streamURL,
+                        headers: HTTPHeaders(candidate.stream.headers),
+                        format: candidate.stream.format,
+                        siteKey: "live",
+                        sourceName: candidate.channel.name,
+                        episodeName: candidate.stream.name
+                    )
+                case (.xtream, .provider(let reference)):
+                    // Xtream URLs contain account secrets. Release the prior
+                    // media/client before reading Keychain and materializing a
+                    // fresh URL, then keep that URL only in this stack frame.
+                    _ = try await environment.player.prepareForPlayback(
+                        requestID: requestID,
+                        releasePolicy: .destroyBeforeLoad,
+                        compatibilityPolicy: NativeXtreamCompatibility.policy
+                    )
+                    guard playbackSessionID == requestID,
+                          activePlayerRequestID == requestID,
+                          livePlaybackSourceID == sourceID,
+                          isPlayerPresented else {
+                        throw CancellationError()
+                    }
+                    media = try await resolveXtreamLiveMedia(
+                        reference: reference,
+                        sourceID: sourceID,
+                        channel: candidate.channel,
+                        stream: candidate.stream,
+                        requestID: requestID
+                    )
+                default:
+                    throw XtreamLivePlaybackError.invalidReference
+                }
+                // A bounded replacement within the existing second-format attempt.
+                // Successful native loads never make an extra manifest request.
+                if skippedCount > 0, media.compatibilityPolicy == .nativeXtreamLive,
+                   NativeXtreamCompatibility.hlsFallbackEnabled, media.format == "m3u8" {
+                    let preparationStarted = ProcessInfo.processInfo.systemUptime
+                    do {
+                        let response = try await NativeXtreamHLSPreparation.response(
+                            client: environment.xtreamHTTPClient, request: HTTPRequest(
+                            url: media.url, headers: media.headers, timeout: 10,
+                            maximumResponseBytes: 256 * 1024,
+                            earlyResponseLimitBytes: 256 * 1024,
+                            maximumRedirects: 5, redirectPolicy: .follow,
+                            retryPolicy: .none
+                        ))
+                        try Task.checkCancellation()
+                        guard playbackSessionID == requestID,
+                              activePlayerRequestID == requestID,
+                              livePlaybackSourceID == sourceID, isPlayerPresented else {
+                            throw CancellationError()
+                        }
+                        media.hlsStartupSelection = HLSStartupSelection.select(
+                            from: response.body, baseURL: response.url
+                        )
+                    } catch {
+                        if AsyncCancellationPolicy.isCancellation(error) { throw error }
+                        // Unknown/oversized manifests keep the ordinary candidate.
+                    }
+                    let preparationSeconds = Int(ceil(max(0, ProcessInfo.processInfo.systemUptime - preparationStarted)))
+                    media.nativeStartupBudgetSeconds = max(1, 60 - preparationSeconds)
+                }
                 try await loadPlayerAfterRenderSurfaceReady(
                     media,
                     startPosition: nil,
@@ -12364,13 +13011,117 @@ final class AppState: ObservableObject {
             } catch {
                 PlayerStartupTraceStore.shared.cancel(requestID: requestID)
                 guard playbackSessionID == requestID else { return }
+                if AsyncCancellationPolicy.isCancellation(error) {
+                    isRecoveringLivePlayback = false
+                    return
+                }
                 skippedCount += 1
+                if sourceID.isXtream,
+                   !XtreamLivePlaybackFailurePolicy.permitsFormatFallback(
+                    after: error.localizedDescription
+                   ) {
+                    finishExhaustedLivePlayback()
+                    show(
+                        error,
+                        title: L10n.string(
+                            "player.stage.failed", fallback: "Playback Failed"
+                        ),
+                        target: .player
+                    )
+                    return
+                }
             }
         }
         finishExhaustedLivePlayback()
     }
 
-    private func recoverLivePlaybackAfterFailure(requestID: UUID?) {
+    private func resolveXtreamLiveMedia(
+        reference: PlaybackResourceReference,
+        sourceID: LiveSourceID,
+        channel: LiveChannel,
+        stream: LiveStream,
+        requestID: UUID
+    ) async throws -> ResolvedMedia {
+        guard let environment,
+              let liveCredentialStore,
+              case .xtream(let providerID) = sourceID,
+              !nativeLiveAccountMutationIDs.contains(providerID),
+              requestedConfigurationID == nil,
+              configurationImportOperationID == nil,
+              xtreamProviderOperationID == nil,
+              activePlayerRequestID == requestID,
+              playbackSessionID == requestID,
+              livePlaybackSourceID == sourceID,
+              let record = activeConfigurationRecord,
+              record.id == providerID,
+              record.sourceKind == .xtream,
+              let descriptor = try? XtreamProviderConfiguration(
+                data: record.rawData
+              ),
+              descriptor.providerID == providerID else {
+            throw XtreamLivePlaybackError.staleRequest
+        }
+        let generation = nativeLiveGeneration
+        guard let credentials = try await liveCredentialStore.credentials(
+            for: providerID
+        ) else {
+            throw XtreamLivePlaybackError.unavailableAccount
+        }
+        try Task.checkCancellation()
+        guard nativeLiveGeneration == generation,
+              !nativeLiveAccountMutationIDs.contains(providerID),
+              requestedConfigurationID == nil,
+              configurationImportOperationID == nil,
+              xtreamProviderOperationID == nil,
+              activePlayerRequestID == requestID,
+              playbackSessionID == requestID,
+              livePlaybackSourceID == sourceID,
+              activeConfigurationRecord?.id == providerID else {
+            throw XtreamLivePlaybackError.staleRequest
+        }
+        let provider = try XtreamSiteProvider(
+            configuration: descriptor,
+            credentials: credentials,
+            httpClient: environment.xtreamHTTPClient,
+            userAgent: Self.xtreamUserAgent
+        )
+        try await provider.validateLivePlaybackAccount()
+        try Task.checkCancellation()
+        guard nativeLiveGeneration == generation,
+              !nativeLiveAccountMutationIDs.contains(providerID),
+              activePlayerRequestID == requestID,
+              playbackSessionID == requestID,
+              livePlaybackSourceID == sourceID,
+              activeConfigurationRecord?.id == providerID else {
+            throw XtreamLivePlaybackError.staleRequest
+        }
+        let result = try provider.resolveLivePlayback(reference)
+        guard let url = URL(string: result.url),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+            throw XtreamLivePlaybackError.invalidReference
+        }
+        guard nativeLiveGeneration == generation,
+              activePlayerRequestID == requestID,
+              playbackSessionID == requestID,
+              livePlaybackSourceID == sourceID,
+              activeConfigurationRecord?.id == providerID else {
+            throw XtreamLivePlaybackError.staleRequest
+        }
+        return ResolvedMedia(
+            url: url,
+            headers: result.headers,
+            format: result.format,
+            siteKey: "xtream-live",
+            sourceName: channel.name,
+            episodeName: stream.name,
+            compatibilityPolicy: NativeXtreamCompatibility.policy
+        )
+    }
+
+    private func recoverLivePlaybackAfterFailure(
+        requestID: UUID?,
+        message: String? = nil
+    ) {
         guard !isShutdownRequested,
               isPlayerPresented,
               !isRecoveringLivePlayback,
@@ -12382,6 +13133,21 @@ final class AppState: ObservableObject {
               let channel = livePlaybackChannel,
               let stream = livePlaybackStream,
               let sourceID = livePlaybackSourceID else {
+            return
+        }
+        if sourceID.isXtream,
+           let message,
+           !XtreamLivePlaybackFailurePolicy.permitsFormatFallback(
+            after: message
+           ) {
+            finishExhaustedLivePlayback()
+            show(
+                AppError.playback(message),
+                title: L10n.string(
+                    "player.error.title", fallback: "Player Error"
+                ),
+                target: .player
+            )
             return
         }
         livePlaybackRecoveryTask = Task { @MainActor [weak self] in
@@ -12413,6 +13179,137 @@ final class AppState: ObservableObject {
             self?.livePlaybackNotice = nil
             self?.livePlaybackNoticeTask = nil
         }
+    }
+
+    private func nativeChannelLocator(sourceID: LiveSourceID, channel: LiveChannel) -> XtreamLivePlaybackLocator? {
+        guard case .xtream(let id) = sourceID else { return nil }
+        return channel.streams.compactMap { stream -> XtreamLivePlaybackLocator? in
+            guard case .provider(let reference) = stream.target,
+                  let locator = reference.xtreamLiveLocator,
+                  locator.providerID == id else { return nil }
+            return locator
+        }.first
+    }
+
+    func isLiveFavorite(sourceID: LiveSourceID, channel: LiveChannel) -> Bool {
+        switch sourceID {
+        case .imported(let id):
+            guard let source = liveSources.first(where: { $0.id == id }) else { return false }
+            return isLiveFavorite(sourceName: source.name, channel: channel)
+        case .xtream:
+            guard let locator = nativeChannelLocator(sourceID: sourceID, channel: channel) else { return false }
+            return nativeLiveFavorites.containsXtream(providerID: locator.providerID, streamID: locator.streamID)
+        }
+    }
+
+    func toggleLiveFavorite(sourceID: LiveSourceID, channel: LiveChannel) async {
+        switch sourceID {
+        case .imported(let id):
+            guard let source = liveSources.first(where: { $0.id == id }) else { return }
+            await toggleLiveFavorite(sourceName: source.name, channel: channel)
+        case .xtream:
+            guard let locator = nativeChannelLocator(sourceID: sourceID, channel: channel) else { return }
+            await editNativeLiveReferences(hidden: false) { references in
+                try references.setXtream(
+                    providerID: locator.providerID, streamID: locator.streamID,
+                    isIncluded: !references.containsXtream(providerID: locator.providerID, streamID: locator.streamID)
+                )
+            }
+        }
+    }
+
+    func isLiveChannelDeleted(sourceID: LiveSourceID, channel: LiveChannel) -> Bool {
+        switch sourceID {
+        case .imported(let id): return isLiveChannelDeleted(sourceID: id, channel: channel)
+        case .xtream:
+            guard let locator = nativeChannelLocator(sourceID: sourceID, channel: channel) else { return false }
+            return nativeLiveHiddenChannels.containsXtream(providerID: locator.providerID, streamID: locator.streamID)
+        }
+    }
+
+    func deleteLiveChannel(sourceID: LiveSourceID, sourceName: String, channel: LiveChannel) async {
+        switch sourceID {
+        case .imported(let id): await deleteLiveChannel(sourceID: id, sourceName: sourceName, channel: channel)
+        case .xtream:
+            guard let locator = nativeChannelLocator(sourceID: sourceID, channel: channel) else { return }
+            // Hiding a native channel preserves its stable favorite reference.
+            await editNativeLiveReferences(hidden: true) { references in
+                try references.setXtream(providerID: locator.providerID, streamID: locator.streamID, isIncluded: true)
+            }
+        }
+    }
+
+    func restoreDeletedLiveChannel(sourceID: LiveSourceID, channel: LiveChannel) async {
+        switch sourceID {
+        case .imported(let id): await restoreDeletedLiveChannel(sourceID: id, channel: channel)
+        case .xtream:
+            guard let locator = nativeChannelLocator(sourceID: sourceID, channel: channel) else { return }
+            await editNativeLiveReferences(hidden: true) { references in
+                try references.setXtream(providerID: locator.providerID, streamID: locator.streamID, isIncluded: false)
+            }
+        }
+    }
+
+    func restoreAllDeletedLiveChannels(sourceID: LiveSourceID) async {
+        switch sourceID {
+        case .imported(let id): await restoreAllDeletedLiveChannels(sourceID: id)
+        case .xtream(let id):
+            await editNativeLiveReferences(hidden: true) { references in
+                for reference in references.references {
+                    if case .xtream(let providerID, let streamID) = reference, providerID == id {
+                        try references.setXtream(providerID: id, streamID: streamID, isIncluded: false)
+                    }
+                }
+            }
+        }
+    }
+
+    private func editNativeLiveReferences(
+        hidden: Bool,
+        edit: @escaping (inout StoredLiveChannelReferenceEnvelope) throws -> Void
+    ) async {
+        guard let liveReferenceStore else { return }
+        // Serialize writes and publish only after SQLite succeeds. A late
+        // failed save cannot roll back a more recent membership change.
+        let previous = nativeLiveReferenceWriteTask
+        let operationID = UUID()
+        nativeLiveReferenceWriteID = operationID
+        let task = Task { @MainActor [weak self] in
+            await previous?.value
+            guard let self, !self.isShutdownRequested else { return }
+            do {
+                var references = hidden ? self.nativeLiveHiddenChannels : self.nativeLiveFavorites
+                try edit(&references)
+                try await liveReferenceStore.setSetting(
+                    references.setting,
+                    forKey: hidden ? "live.hiddenReferences.v1" : "live.favoriteReferences.v1"
+                )
+                if hidden { self.nativeLiveHiddenChannels = references }
+                else { self.nativeLiveFavorites = references }
+            } catch {
+                self.show(error, title: L10n.string("live.reference.save-failed", fallback: "Unable to Save Channel Preferences"))
+            }
+        }
+        nativeLiveReferenceWriteTask = task
+        await task.value
+        if nativeLiveReferenceWriteID == operationID {
+            nativeLiveReferenceWriteTask = nil
+            nativeLiveReferenceWriteID = nil
+        }
+    }
+
+    func playLive(
+        channel: LiveChannel, stream: LiveStream, sourceID: UUID,
+        navigationChannels: [LiveChannel]? = nil,
+        windowActivation: PlayerWindowActivationPolicy = .userInitiated
+    ) async {
+        await playLive(
+            channel: channel,
+            stream: stream,
+            sourceID: .imported(sourceID),
+            navigationChannels: navigationChannels,
+            windowActivation: windowActivation
+        )
     }
 
     func isLiveFavorite(sourceName: String, channel: LiveChannel) -> Bool {
@@ -12564,8 +13461,8 @@ final class AppState: ObservableObject {
         let decoded = try await Task.detached(priority: .userInitiated) {
             try PortableBackupCodec.decode(data)
         }.value
-        _ = try ConfigurationParser().parse(
-            decoded.payload.configuration.rawData
+        _ = try Self.configurationContent(
+            for: decoded.payload.configuration.storedConfiguration
         )
         return PortableBackupPreview(
             fileURL: url,
@@ -12583,17 +13480,44 @@ final class AppState: ObservableObject {
         guard let environment else {
             throw AppError.configuration(L10n.string("app.environment.not-initialized", fallback: "The app environment has not been initialized"))
         }
+        guard configurationImportOperationID == nil,
+              xtreamProviderOperationID == nil,
+              requestedConfigurationID == nil else {
+            throw AppError.configuration(
+                L10n.string(
+                    "configuration.import.in-progress",
+                    fallback: "Another configuration is already being imported. Wait for it to finish."
+                )
+            )
+        }
+        let operationID = UUID()
+        configurationImportOperationID = operationID
+        defer {
+            if configurationImportOperationID == operationID {
+                configurationImportOperationID = nil
+            }
+        }
         let data = try readPortableBackupData(from: url)
         let decoded = try await Task.detached(priority: .userInitiated) {
             try PortableBackupCodec.decode(data)
         }.value
-        _ = try ConfigurationParser().parse(
-            decoded.payload.configuration.rawData
+        _ = try Self.configurationContent(
+            for: decoded.payload.configuration.storedConfiguration
         )
 
         // A failed or unwanted merge must always have a user-owned recovery
         // point. This backup is written before the database transaction.
         let safetyBackupURL = try await createPreImportSafetyBackup()
+        guard configurationImportOperationID == operationID else {
+            throw CancellationError()
+        }
+        if livePlaybackSourceID?.isXtream == true {
+            invalidateXtreamLiveCatalog()
+            await closeXtreamLivePlaybackIfNeeded()
+            guard configurationImportOperationID == operationID else {
+                throw CancellationError()
+            }
+        }
         let result = try await environment.database
             .restoreConfigurationAndHistory(
                 configuration: decoded.payload.configuration.storedConfiguration,
@@ -12607,6 +13531,9 @@ final class AppState: ObservableObject {
         configurationRefreshTask = nil
         configurations = result.configurations
         activeConfigurationRecord = result.configuration
+        activeXtreamCredentials = try? await xtreamCredentials(
+            for: result.configuration
+        )
         activeNodeRuntimeEndpoint = nil
         nodeRuntimeUnavailableReason = L10n.string("node.runtime.prepares-on-demand", fallback: "Node Runtime will be prepared when the configuration is used")
         try loadActiveConfigurationContent()
@@ -12944,6 +13871,7 @@ final class AppState: ObservableObject {
         }
 
         isShutdownRequested = true
+        invalidateXtreamLiveCatalog()
         playerRenderSurfaceGate.reset()
         automaticEpisodeAdvanceController.cancel()
         invalidateCatPawHomeLoads()
@@ -13069,7 +13997,12 @@ final class AppState: ObservableObject {
 
     func closePlayer() async {
         guard !isShutdownRequested else { return }
-        guard !isClosingPlayer else { return }
+        if isClosingPlayer {
+            await withCheckedContinuation { continuation in
+                playerCloseWaiters.append(continuation)
+            }
+            return
+        }
         guard isPlayerPresented
                 || activePlayback != nil
                 || pendingPlayback != nil
@@ -13094,8 +14027,14 @@ final class AppState: ObservableObject {
             nodeWebPresentation = nil
         }
         isClosingPlayer = true
-        defer { isClosingPlayer = false }
+        defer {
+            isClosingPlayer = false
+            let waiters = playerCloseWaiters
+            playerCloseWaiters.removeAll()
+            for waiter in waiters { waiter.resume() }
+        }
         let closingRequestID = activePlayerRequestID
+        let closingTransitionID = UUID()
         let shouldRetainTVBoxPlayerWarm = activePlayback?.media.transportProfile
             == .tvBox
         playerRenderSurfaceGate.reset()
@@ -13109,8 +14048,8 @@ final class AppState: ObservableObject {
         historyPlaybackRequestedItem = nil
         historyPlaybackChoices = []
         activeSeekConfirmationID = nil
-        playbackSessionID = UUID()
-        activePlayerRequestID = UUID()
+        playbackSessionID = closingTransitionID
+        activePlayerRequestID = closingTransitionID
         playbackQualitySwitchSessionID = UUID()
         livePlaybackRecoveryTask?.cancel()
         livePlaybackRecoveryTask = nil
@@ -13123,6 +14062,8 @@ final class AppState: ObservableObject {
         pendingNodePlaybackConfigurationFallback = nil
         // Capture the final position before stop resets the player snapshot.
         await persistPlaybackProgress()
+        guard activePlayerRequestID == closingTransitionID,
+              playbackSessionID == closingTransitionID else { return }
         // Ignore the stop event for history purposes. It otherwise publishes a
         // second, zeroed history update while the player is being dismissed.
         activePlayback = nil
@@ -13134,6 +14075,12 @@ final class AppState: ObservableObject {
         playbackQualities = []
         selectedPlaybackQualityID = nil
         isSwitchingPlaybackQuality = false
+        let closingPreparedReceipts = preparedTransferReceipts
+        preparedTransferReceipts.removeAll()
+        let closingTransferLeases = transferMediaLeases
+        transferMediaLeases.removeAll()
+        let closingNodeLease = activeNodePlaybackLease
+        activeNodePlaybackLease = nil
         await environment?.player.closeAfterPlayback(
             requestID: closingRequestID,
             // `stop` releases the active demux/cache state immediately. Keep
@@ -13142,13 +14089,23 @@ final class AppState: ObservableObject {
             // existing immediate full-destroy behavior.
             warmRetentionSeconds: shouldRetainTVBoxPlayerWarm ? 45 : 0
         )
-        await cleanupPreparedTransferReceipts(reason: .playerClosed)
-        await releaseAllTransferMediaLeases(reason: .playerClosed)
-        if let lease = activeNodePlaybackLease {
-            activeNodePlaybackLease = nil
+        for receipt in closingPreparedReceipts.values {
+            await cleanupTransferReceipt(receipt, reason: .playerClosed)
+        }
+        for lease in closingTransferLeases.values {
+            _ = await environment?.nodeBundleRuntime.releaseTransferLease(
+                receiptID: lease.receipt.receiptID,
+                reason: .playerClosed
+            )
+        }
+        if let lease = closingNodeLease {
             await environment?.nodeBundleRuntime.releasePlaybackLease(lease)
         }
+        guard activePlayerRequestID == closingTransitionID,
+              playbackSessionID == closingTransitionID else { return }
         await dismissPlayerSurfaceAndRestoreWindow()
+        guard activePlayerRequestID == closingTransitionID,
+              playbackSessionID == closingTransitionID else { return }
         playbackResolutionState = .idle
         currentPlaybackAttempt = nil
         playbackFailureSummary = nil
@@ -14173,6 +15130,15 @@ final class AppState: ObservableObject {
             return (nil, nil)
         }
         return liveProgrammes(for: channel, sourceID: sourceID, at: Date())
+    }
+
+    func liveProgrammes(
+        for channel: LiveChannel,
+        sourceID: LiveSourceID,
+        at date: Date
+    ) -> (current: EPGProgramme?, next: EPGProgramme?) {
+        guard case .imported(let id) = sourceID else { return (nil, nil) }
+        return liveProgrammes(for: channel, sourceID: id, at: date)
     }
 
     func liveProgrammes(
@@ -15241,13 +16207,61 @@ final class AppState: ObservableObject {
             return
         }
         lastAutomaticConfigurationRefreshAttemptAt = record.updatedAt
-        activeConfiguration = try ConfigurationParser().parse(record.rawData)
+        activeConfiguration = try Self.configurationContent(for: record)
         rebuildProviders()
         if !supportedSites.contains(where: { $0.key == selectedSiteKey }) {
             selectedSiteKey = HomeLandingSitePolicy.defaultSiteKey(
                 from: supportedSites
             )
         }
+    }
+
+    static func configurationContent(
+        for record: StoredConfiguration
+    ) throws -> FongMiConfiguration {
+        guard record.sourceKind == .xtream else {
+            return try ConfigurationParser().parse(record.rawData)
+        }
+        let descriptor = try XtreamProviderConfiguration(data: record.rawData)
+        guard descriptor.providerID == record.id else {
+            throw XtreamProviderConfigurationError.invalidProviderID
+        }
+        return descriptor.providerConfiguration
+    }
+
+    private func xtreamCredentials(
+        for record: StoredConfiguration?
+    ) async throws -> XtreamCredentials? {
+        guard let environment, let record, record.sourceKind == .xtream else {
+            return nil
+        }
+        return try await environment.xtreamCredentialStore.credentials(
+            for: record.id
+        )
+    }
+
+    private func validateXtreamAccountIfNeeded(
+        record: StoredConfiguration?,
+        credentials: XtreamCredentials?
+    ) async throws {
+        guard let record, record.sourceKind == .xtream else { return }
+        guard let environment, let credentials else {
+            throw AppError.configuration(
+                L10n.string(
+                    "xtream.live.credentials-unavailable",
+                    fallback: "This provider is unavailable. Check its account credentials in Settings."
+                )
+            )
+        }
+        let descriptor = try XtreamProviderConfiguration(data: record.rawData)
+        _ = try await XtreamClient(
+            endpoint: try XtreamEndpoint(
+                serverURL: descriptor.serverBaseURL
+            ),
+            credentials: credentials,
+            httpClient: environment.xtreamHTTPClient,
+            userAgent: Self.xtreamUserAgent
+        ).authenticate()
     }
 
     private func loadConfiguration(
@@ -16136,6 +17150,7 @@ final class AppState: ObservableObject {
     }
 
     private func rebuildProviders() {
+        invalidateXtreamLiveCatalog()
         guard let environment else {
             providers = [:]
             return
@@ -16160,6 +17175,11 @@ final class AppState: ObservableObject {
         )
         let nodeBundleRuntime = environment.nodeBundleRuntime
         let activeConfigurationID = activeConfigurationRecord?.id
+        let activeXtreamConfiguration: XtreamProviderConfiguration? = {
+            guard let record = activeConfigurationRecord,
+                  record.sourceKind == .xtream else { return nil }
+            return try? XtreamProviderConfiguration(data: record.rawData)
+        }()
         let activeConfigurationSemanticRevision = activeConfigurationRecord
             .flatMap(NodeConfigurationSemanticRevision.make)
         providers = Dictionary(
@@ -16171,7 +17191,40 @@ final class AppState: ObservableObject {
                     for: site,
                     baseURL: baseURL
                 )
-                if nodeOwned {
+                if site.type == XtreamProviderConfiguration.nativeSiteType,
+                   site.api == XtreamProviderConfiguration.nativeAPIIdentifier,
+                   let activeXtreamConfiguration,
+                   activeXtreamConfiguration.siteKey == site.key,
+                   let activeXtreamCredentials {
+                    provider = (try? XtreamSiteProvider(
+                        configuration: activeXtreamConfiguration,
+                        credentials: activeXtreamCredentials,
+                        httpClient: environment.xtreamHTTPClient,
+                        userAgent: Self.xtreamUserAgent,
+                        movieSourceName: L10n.string(
+                            "xtream.source.movie",
+                            fallback: "Movie"
+                        ),
+                        episodesSourceName: L10n.string(
+                            "xtream.source.episodes",
+                            fallback: "Episodes"
+                        ),
+                        seasonSourceName: { season in
+                            L10n.string(
+                                "xtream.source.season",
+                                fallback: "Season %lld",
+                                season
+                            )
+                        },
+                        episodeName: { episode in
+                            L10n.string(
+                                "xtream.episode.fallback",
+                                fallback: "Episode %lld",
+                                episode
+                            )
+                        }
+                    )) ?? UnsupportedSiteProvider(site: site)
+                } else if nodeOwned {
                     if usesNodeRuntime,
                        let nodeSourceURL,
                        NodeHTTPSpiderSiteProvider.canHandle(
@@ -16270,6 +17323,18 @@ final class AppState: ObservableObject {
             base: environment.httpClient,
             rules: activeConfiguration?.headers ?? []
         )
+    }
+
+    static var xtreamUserAgent: String {
+        let version = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String
+        let normalizedVersion = version?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let normalizedVersion, !normalizedVersion.isEmpty {
+            return "OKVideoMac/\(normalizedVersion)"
+        }
+        return "OKVideoMac"
     }
 
     private func configuredAggregateSearchHTTPClient(
@@ -16427,12 +17492,23 @@ final class AppState: ObservableObject {
         ), case .array(let identifiers) = value {
             deletedLiveChannelIDs = Set(identifiers.compactMap(\.stringValue))
         }
+        try await loadNativeLiveReferences()
         if let value = try await environment.database.setting(
             forKey: CloudAccountStatusStore.settingKey
         ), let stored = CloudAccountStatusStore(setting: value) {
             cloudAccountStatusStore = stored
         }
         await loadSearchSiteScope()
+    }
+
+    func loadNativeLiveReferences() async throws {
+        guard let liveReferenceStore else { return }
+        nativeLiveFavorites = StoredLiveChannelReferenceEnvelope(setting:
+            try await liveReferenceStore.setting(forKey: "live.favoriteReferences.v1")
+        )
+        nativeLiveHiddenChannels = StoredLiveChannelReferenceEnvelope(setting:
+            try await liveReferenceStore.setting(forKey: "live.hiddenReferences.v1")
+        )
     }
 
     private func persistCloudAccountStatusStore() async {
@@ -16704,7 +17780,10 @@ final class AppState: ObservableObject {
         requestID: UUID?
     ) {
         if livePlaybackChannel != nil {
-            recoverLivePlaybackAfterFailure(requestID: requestID)
+            recoverLivePlaybackAfterFailure(
+                requestID: requestID,
+                message: message
+            )
             return
         }
         if let requestID,
@@ -17046,7 +18125,7 @@ final class AppState: ObservableObject {
             if didReachFileLoaded {
                 // The replacement is now the native active media. Stop waits
                 // for its actual unload boundary before the fallback release.
-                await environment.player.stop()
+                await environment.player.stop(ifOwnedBy: sessionID)
                 await releaseTransferMediaLease(
                     requestID: sessionID,
                     reason: .playerLoadFailed
@@ -17348,6 +18427,10 @@ final class AppState: ObservableObject {
             throw AppError.playback(
                 L10n.string("app.environment.uninitialized", fallback: "The application environment has not been initialized.")
             )
+        }
+        guard isPlayerPresented,
+              activePlayerRequestID == requestID else {
+            throw CancellationError()
         }
         try await environment.player.load(
             media,

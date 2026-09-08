@@ -4,12 +4,14 @@ import Darwin
 import Foundation
 import OKVideoCore
 import OKVideoPersistence
+import Security
 
 struct AppEnvironment {
     let directories: AppDirectories
     let applicationInstanceLease: ApplicationInstanceLease
     let httpClient: URLSessionHTTPClient
     let aggregateSearchHTTPClient: URLSessionHTTPClient
+    let xtreamHTTPClient: URLSessionHTTPClient
     let configurationLoader: ConfigurationLoader
     let liveSourceLoader: LiveSourceLoader
     let database: SQLiteStore
@@ -22,6 +24,7 @@ struct AppEnvironment {
     let androidDexBridge: AndroidDexBridgeClient
     let player: PlayerLifecycleController
     let imageRepository: ImageRepository
+    let xtreamCredentialStore: KeychainXtreamCredentialStore
 
     @MainActor
     static func live() throws -> AppEnvironment {
@@ -45,6 +48,7 @@ struct AppEnvironment {
         )
         let interactiveHTTPClient = URLSessionHTTPClient()
         let aggregateSearchHTTPClient = URLSessionHTTPClient()
+        let xtreamHTTPClient = URLSessionHTTPClient.isolatedEphemeral()
         let imageConfiguration = URLSessionConfiguration.default
         imageConfiguration.httpMaximumConnectionsPerHost = 12
         imageConfiguration.timeoutIntervalForRequest = 15
@@ -114,6 +118,7 @@ struct AppEnvironment {
             applicationInstanceLease: applicationInstanceLease,
             httpClient: interactiveHTTPClient,
             aggregateSearchHTTPClient: aggregateSearchHTTPClient,
+            xtreamHTTPClient: xtreamHTTPClient,
             configurationLoader: ConfigurationLoader(
                 httpClient: interactiveHTTPClient
             ),
@@ -145,7 +150,8 @@ struct AppEnvironment {
                     ),
                     httpClient: imageHTTPClient
                 )
-            )
+            ),
+            xtreamCredentialStore: KeychainXtreamCredentialStore()
         )
     }
 
@@ -181,6 +187,153 @@ struct AppEnvironment {
     static func isXCTestHost(environment: [String: String]) -> Bool {
         environment["XCTestConfigurationFilePath"] != nil
             || environment["XCTestBundlePath"] != nil
+    }
+}
+
+struct KeychainXtreamCredentialStore: XtreamCredentialStoring {
+    static let defaultService = "com.okvideomac.OKVideoMac.xtream.credentials.v1"
+
+    let service: String
+
+    init(service: String = Self.defaultService) {
+        self.service = service
+    }
+
+    func credentials(for providerID: UUID) async throws -> XtreamCredentials? {
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(
+            itemQuery(
+                providerID: providerID,
+                additional: [
+                    kSecReturnData as String: true,
+                    kSecMatchLimit as String: kSecMatchLimitOne
+                ]
+            ) as CFDictionary,
+            &result
+        )
+        if status == errSecItemNotFound {
+            return nil
+        }
+        guard status == errSecSuccess else {
+            throw XtreamCredentialStoreError.keychain(
+                operation: "read",
+                status: status
+            )
+        }
+        guard let data = result as? Data else {
+            throw XtreamCredentialStoreError.invalidStoredCredential
+        }
+        return try XtreamCredentialKeychainCodec.decode(data)
+    }
+
+    func save(
+        _ credentials: XtreamCredentials,
+        for providerID: UUID
+    ) async throws {
+        let data = try XtreamCredentialKeychainCodec.encode(credentials)
+        let query = itemQuery(providerID: providerID)
+        let updateStatus = SecItemUpdate(
+            query as CFDictionary,
+            [kSecValueData as String: data] as CFDictionary
+        )
+        if updateStatus == errSecSuccess {
+            return
+        }
+        guard updateStatus == errSecItemNotFound else {
+            throw XtreamCredentialStoreError.keychain(
+                operation: "update",
+                status: updateStatus
+            )
+        }
+
+        var attributes = query
+        attributes[kSecValueData as String] = data
+        attributes[kSecAttrAccessible as String] =
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        attributes[kSecAttrLabel as String] = "OKVideoMac Xtream account"
+        let addStatus = SecItemAdd(attributes as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            throw XtreamCredentialStoreError.keychain(
+                operation: "create",
+                status: addStatus
+            )
+        }
+    }
+
+    func deleteCredentials(for providerID: UUID) async throws {
+        let status = SecItemDelete(itemQuery(providerID: providerID) as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw XtreamCredentialStoreError.keychain(
+                operation: "delete",
+                status: status
+            )
+        }
+    }
+
+    private func itemQuery(
+        providerID: UUID,
+        additional: [String: Any] = [:]
+    ) -> [String: Any] {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: Self.account(for: providerID),
+            kSecAttrSynchronizable as String: kCFBooleanFalse as Any
+        ]
+        query.merge(additional) { _, new in new }
+        return query
+    }
+
+    static func account(for providerID: UUID) -> String {
+        providerID.uuidString.lowercased()
+    }
+}
+
+enum XtreamCredentialStoreError: Error, Equatable, LocalizedError {
+    case keychain(operation: String, status: OSStatus)
+    case invalidStoredCredential
+
+    var errorDescription: String? {
+        switch self {
+        case .keychain(let operation, let status):
+            return "The Xtream credential Keychain \(operation) failed (OSStatus \(status))."
+        case .invalidStoredCredential:
+            return "The saved Xtream credential is invalid."
+        }
+    }
+}
+
+enum XtreamCredentialKeychainCodec {
+    private struct Payload: Codable {
+        let version: Int
+        let username: String
+        let password: String
+    }
+
+    static func encode(_ credentials: XtreamCredentials) throws -> Data {
+        try PropertyListEncoder().encode(
+            Payload(
+                version: 1,
+                username: credentials.username,
+                password: credentials.password
+            )
+        )
+    }
+
+    static func decode(_ data: Data) throws -> XtreamCredentials {
+        let payload: Payload
+        do {
+            payload = try PropertyListDecoder().decode(Payload.self, from: data)
+        } catch {
+            throw XtreamCredentialStoreError.invalidStoredCredential
+        }
+        guard payload.version == 1 else {
+            throw XtreamCredentialStoreError.invalidStoredCredential
+        }
+        return XtreamCredentials(
+            username: payload.username,
+            password: payload.password
+        )
     }
 }
 

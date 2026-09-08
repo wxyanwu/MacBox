@@ -1,0 +1,19 @@
+{
+  "user_info": {
+    "auth": "1",
+    "status": "Active",
+    "exp_date": 1900000000,
+    "is_trial": 0,
+    "active_cons": "1",
+    "max_connections": 3,
+    "allowed_output_formats": ["m3u8", "ts"]
+  },
+  "server_info": {
+    "url": "example.invalid",
+    "port": "8080",
+    "https_port": 8443,
+    "server_protocol": "https",
+    "timezone": "UTC",
+    "timestamp": "1800000000"
+  }
+}

@@ -45,6 +45,20 @@ UI 不持有 URLSession、SQL、JavaScript Context 或 mpv handle。所有这些
 OpenGL Render Context 由 `MPVOpenGLView` 创建和销毁，普通 mpv 命令不会在
 Render 回调或 OpenGL 绘制线程执行。
 
+## Native Xtream 与语言
+
+Native Xtream 通过 `XtreamClient` 和无共享 Cookie/URL 凭据缓存的 API session
+加载目录，使用 `XtreamSiteProvider` 映射 Movies/Series/Search。账号按 Provider UUID
+保存在 Keychain；数据库、历史和备份保存描述符与不透明资源引用，播放前才生成 URL。
+Basic Live 使用独立 catalog 与频道引用，恢复只在当前频道格式候选之间进行。
+
+`ResolvedMedia.compatibilityPolicy` 默认保持既有行为。Native Live 显式选择独立
+mpv 实例的网络策略；跨策略切换先释放旧实例，请求代际约束异步加载、关闭和事件。
+受控 HLS master 只在内存中存在，不改变其他 Provider 的媒体解析、代理或超时。
+
+UI 使用 `AppLocalizer` 和 String Catalog，持久化稳定语言值，重启后选定语言 bundle。
+翻译不参与站点、频道、影片、历史或搜索会话的身份判定。
+
 ## Android Runtime 边界
 
 Android 安装与 Emulator Session 是两套独立状态机：

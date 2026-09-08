@@ -7,3 +7,5 @@ Application-owned copy lives in `Resources/Localizable.xcstrings` and is loaded 
 Persisted identities and business logic must not use translated labels. Store stable IDs and derive display text separately. Provider-supplied titles, people, channel names, stream names, brands, and server content remain unchanged. Common runtime failures are mapped to localized user-facing categories; redacted original details remain available to diagnostics.
 
 Before shipping localization changes, verify both language bundles, placeholder parity, English singular/plural behavior, language preference isolation, Debug tests, and the packaged Release app in System, Simplified Chinese, and English modes.
+
+First launch defaults to System. Only the first preferred language is inspected: `zh-Hans`, `zh-CN`, and `zh-SG` select Simplified Chinese; other values (including Traditional Chinese) select English. Returning to System recomputes this choice at the next restart. The relaunch helper waits for the old process to exit and prevents duplicate application instances.

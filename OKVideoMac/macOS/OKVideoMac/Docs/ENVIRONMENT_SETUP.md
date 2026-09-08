@@ -1,7 +1,7 @@
 # 本机开发环境记录
 
 > **Historical environment snapshot（历史环境快照）**：本文只记录
-> 2026-07-30 当时的开发机状态，不是当前 0.5.0 的安装指南或发布验证结论。
+> 2026-07-30 当时的开发机状态，不是当前 0.6.0 的安装指南或发布验证结论。
 > 当前构建流程请以 `BUILDING.md` 为准；最终用户的 Android 环境请以
 > `ANDROID_BRIDGE_SETUP.md` / `ANDROID_BRIDGE_SETUP_zh-CN.md` 为准。
 

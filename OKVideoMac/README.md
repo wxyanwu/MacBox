@@ -2,7 +2,7 @@
 
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
 配置格式、站点类型和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
-等生态名称判断。当前正式版本为 **0.5.0（Build 99）**，支持
+等生态名称判断。当前正式版本为 **0.6.0（Build 100）**，支持
 **arm64**，最低系统为 **macOS 12.0**，通过 Developer ID 签名、Apple 公证、
 Staple 和 Gatekeeper 验证后通过 GitHub Release 分发。
 
@@ -11,7 +11,7 @@ Staple 和 Gatekeeper 验证后通过 GitHub Release 分发。
 
 ## 当前版本
 
-- 当前版本：0.5.0（Build 99）
+- 当前版本：0.6.0（Build 100）
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
 - 播放历史按点播配置源分组；切换同一配置内的站点不会隐藏历史，历史项仍保留
@@ -23,14 +23,31 @@ Staple 和 Gatekeeper 验证后通过 GitHub Release 分发。
 - 左侧导航改用 AppKit 原生 Source List 与 Sidebar 材质，统一 App Store 风格的
   字号、间距、蓝色语义图标、选中状态和窗口激活状态；搜索框支持两段式 Esc
 - 搜索框有文字时第一次 Esc 只清空并保持焦点，空框再次 Esc 才退出搜索
-- Xcode：649 total / 643 passed / 6 intentionally skipped / 0 failed
-- OKVideoKit：173 passed / 0 failed
+- Xcode：719 total / 713 passed / 6 intentionally skipped / 0 failed
+- 另行执行的 4 项真实 Android 生命周期测试：全部通过；API 35 隔离矩阵：通过
+- OKVideoKit：261 passed / 0 failed
 - Node / CatPaw / Quark：30 passed / 0 failed
 - Android Release assemble 与 lint：通过；Android JVM unit tests：NO-SOURCE
-- 正式 Release packaging 会验证 28 个 Mach-O 的架构、部署目标、依赖闭包、
+- 正式 Release packaging 会验证 29 个 Mach-O 的架构、部署目标、依赖闭包、
   Developer ID 签名和 Hardened Runtime，并生成 DMG、SBOM 与对应源码集
-- 对外分发：0.5.0 Build 99 已完成 Developer ID signing、Apple notarization、
+- 对外分发：0.6.0 Build 100 已完成 Developer ID signing、Apple notarization、
   staple、`stapler validate` 和 Gatekeeper 实物验收
+
+## 0.6.0 新增内容
+
+- **Native Xtream-compatible API**：账号接入、电影/剧集分类与详情、季集导航、
+  电影和剧集搜索，以及 Basic Live 分类、频道和播放。凭据保存到 macOS Keychain；
+  导出配置不携带凭据，恢复后需要重新输入。
+- **Native Live 兼容性**：独立的静态 HTTP 代理/HTTPS CONNECT 处理、媒体重定向、
+  有界 TS/HLS 回退、取消与请求所有权保护。普通导入直播与点播保留原有加载策略。
+- **简体中文 / English**：String Catalog、持久语言选择和重启切换。首次启动读取
+  系统首选语言的第一项；其他语言（含繁体中文）默认显示英语。
+- **来源设置与播放器面板**：整合配置入口，选集、音轨、字幕和设置面板按内容高度显示，
+  适应普通窗口、缩放窗口和全屏。
+
+Native Xtream 当前不提供 Xtream EPG、回看/时移或 `direct_source`。
+代理处理不等于完整支持 PAC、SOCKS、认证代理和逐 CDN 动态路由；复杂 HLS 仍可能
+较慢，受控回退只处理已识别的保守子集。详见[发布说明](../Docs/RELEASE_NOTES_0.6.0.md)。
 
 ## 0.5.0 Android Runtime 模式与生命周期
 
@@ -95,20 +112,20 @@ Staple 和 Gatekeeper 验证后通过 GitHub Release 分发。
 
 正式版本安装：
 
-1. 只从本仓库 [v0.5.0 GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.5.0) 下载 macOS arm64 发布包；
-2. 打开 `OKVideoMac-0.5.0.dmg`；
+1. 只从本仓库 [v0.6.0 GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.6.0) 下载 macOS arm64 发布包；
+2. 打开 `OKVideoMac-0.6.0.dmg`；
 3. 将 `OKVideoMac.app` 移入 `/Applications`；
 4. 从 Applications 或 Finder 正常启动。
 
 不要使用来源不明或无法与本仓库发布哈希对应的第三方二进制。
 
-0.5.0（Build 99）的 DMG 与 Source Release 绑定到 tag `v0.5.0` 指向的 exact
+0.6.0（Build 100）的 DMG 与 Source Release 绑定到 tag `v0.6.0` 指向的 exact
 commit。最终公证并 Staple 后的 DMG SHA-256 由 GitHub Release 同名 `.sha256`
 文件提供。
 
 ### Gatekeeper 与 macOS 安全
 
-0.5.0（Build 99）正式 DMG 使用 Developer ID Application: Yao Lin
+0.6.0（Build 100）正式 DMG 使用 Developer ID Application: Yao Lin
 （KGG363ABK9）签名，启用 Hardened Runtime，并通过 Apple notarization、staple
 和 Gatekeeper 验证。安装和运行不需要关闭任何 macOS 安全机制。
 
@@ -193,8 +210,8 @@ Runtime，或选择并确认 External SDK。历史上由 OKVideoMac 明确保存
 
 功能级别状态与证据见
 [`macOS/OKVideoMac/Docs/COMPATIBILITY.md`](macOS/OKVideoMac/Docs/COMPATIBILITY.md)。
-0.5.0 面向用户的变更摘要见
-[`Docs/RELEASE_NOTES_0.5.0.md`](../Docs/RELEASE_NOTES_0.5.0.md)。
+0.6.0 面向用户的变更摘要见
+[`Docs/RELEASE_NOTES_0.6.0.md`](../Docs/RELEASE_NOTES_0.6.0.md)。
 
 ## 当前已知限制与风险
 
@@ -212,7 +229,7 @@ Build 62 阶段留存的历史工程准备记录见
 [`Docs/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md`](../Docs/ENGINEERING_OPEN_SOURCE_READINESS_PHASE4.md)，
 同期 juniversalchardet 兼容性审计见
 [`Docs/JUNIVERSALCHARDET_ELIMINATION_AUDIT.md`](../Docs/JUNIVERSALCHARDET_ELIMINATION_AUDIT.md)。
-这些材料保留为历史工程证据；Build 62/63/64/65 均不是当前 Build 99 的发布状态，
+这些材料保留为历史工程证据；Build 62/63/64/65 均不是当前 Build 100 的发布状态，
 也不构成法律意见
 或“无风险”保证。
 
@@ -239,24 +256,24 @@ Git tag 指向的 exact release commit 才是项目源码基准；不要把移�
 `master` 或 `latest` 当作对应源码。正式 Release 应同时提供并由统一
 `SHA256SUMS` 绑定：
 
-- source release index：`OKVideoMac-0.5.0-build99-SOURCE_RELEASE_INDEX.json`；
+- source release index：`OKVideoMac-0.6.0-build100-SOURCE_RELEASE_INDEX.json`；
 - binary-to-source mapping：
   [`Docs/BINARY_SOURCE_MAPPING.md`](../Docs/BINARY_SOURCE_MAPPING.md)；
 - binary/source manifest：
-  `OKVideoMac-0.5.0-build99-SOURCE_RELEASE_MANIFEST.json`；
-- hashes：`OKVideoMac-0.5.0-build99-SHA256SUMS`；
+  `OKVideoMac-0.6.0-build100-SOURCE_RELEASE_MANIFEST.json`；
+- hashes：`OKVideoMac-0.6.0-build100-SHA256SUMS`；
 - macOS SPDX / CycloneDX：`OKVideoMac-macOS.spdx.json`、
   `OKVideoMac-macOS.cdx.json`；
 - Android SPDX / CycloneDX：`OKVideoMac-Android.spdx.json`、
   `OKVideoMac-Android.cdx.json`；
-- exact APK：`OKVideoMac-0.5.0-AndroidDexBridge-release.apk`；
-- exact project source：`OKVideoMac-0.5.0-build99-source.tar.gz`；
+- exact APK：`OKVideoMac-0.6.0-AndroidDexBridge-release.apk`；
+- exact project source：`OKVideoMac-0.6.0-build100-source.tar.gz`；
 - third-party source package：
-  `OKVideoMac-0.5.0-build99-third-party-source.tar.gz`；
-- license package：`OKVideoMac-0.5.0-build99-licenses.tar.gz`；
-- macOS artifact：`OKVideoMac-0.5.0.dmg`。
+  `OKVideoMac-0.6.0-build100-third-party-source.tar.gz`；
+- license package：`OKVideoMac-0.6.0-build100-licenses.tar.gz`；
+- macOS artifact：`OKVideoMac-0.6.0.dmg`。
 
-0.5.0 Build 99 文件清单与生成规则见
+0.6.0 Build 100 文件清单与生成规则见
 [`Docs/SOURCE_RELEASE_PROCESS.md`](../Docs/SOURCE_RELEASE_PROCESS.md)。Build 62/63
 发布准备阶段的历史工程状态保留在
 [Historical Build 62 Release Readiness Record](../Docs/IMMUTABLE_RELEASE_READINESS.md)。

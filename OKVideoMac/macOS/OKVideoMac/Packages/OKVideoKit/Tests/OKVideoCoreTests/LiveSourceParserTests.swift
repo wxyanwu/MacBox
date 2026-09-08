@@ -44,7 +44,7 @@ final class LiveSourceParserTests: XCTestCase {
         let channels = try XCTUnwrap(playlist.groups.first?.channels)
         XCTAssertEqual(channels.map(\.name), ["RTSP", "RTMP", "UDP"])
         XCTAssertEqual(
-            channels.compactMap { $0.streams.first?.url.scheme },
+            channels.compactMap { $0.streams.first?.url?.scheme },
             ["rtsp", "rtmp", "udp"]
         )
     }
@@ -66,11 +66,11 @@ final class LiveSourceParserTests: XCTestCase {
             "Repeated Percent"
         ])
         XCTAssertEqual(
-            channels[0].streams.first?.url.absoluteString,
+            channels[0].streams.first?.url?.absoluteString,
             "rtsp://192.0.2.1/live?token=%250%2CEND"
         )
         XCTAssertEqual(
-            channels[1].streams.first?.url.absoluteString,
+            channels[1].streams.first?.url?.absoluteString,
             "rtsp://192.0.2.2/live?token=%25%252%20value"
         )
     }

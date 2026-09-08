@@ -1,6 +1,29 @@
 # Building OKVideoMac
 
-## Supported / verified environment
+## 0.6.0 release verification
+
+The 0.6.0 (Build 100) source baseline executes 719 App tests (713 passed,
+6 external-fixture/Android E2E tests not enabled), 261 OKVideoKit tests,
+36 AndroidRuntimeKit tests (35 passed, 1 online-install test not enabled),
+and 30 Node/CatPaw/Quark tests. External and installed-DMG smoke gates are
+recorded separately and may not be inferred from these unit-test counts. The four
+real Android lifecycle tests skipped by the default run were then executed in
+separate processes and all passed. The isolated API 35 runtime matrix also passed.
+See [release validation](../../../../Docs/RELEASE_VALIDATION_0.6.0.md) for the boundary.
+Xcode build-for-testing succeeds; on the current host, LaunchServices cannot
+launch its test runner. The full suite is executed using the same built module,
+bundled libraries and XCTest engine in an isolated CLI host with AppKit initialized.
+
+Formal distribution uses the existing command below. The default invocation is
+local ad-hoc packaging and is not a formal Release substitute:
+
+```sh
+DEVELOPER_ID_APPLICATION='<Developer ID identity>' \
+OKVIDEOMAC_NOTARY_PROFILE='OKVideoMac-Notary' \
+  ./Scripts/package-app.sh --mode distribution --notarize
+```
+
+## Historical supported / verified environments
 
 2026-09-07 的 0.5.0（Build 99）正式发布源码门禁基线为：649 项 Xcode
 测试中 643 项通过、6 项按设计跳过；36 项 AndroidRuntimeKit 测试中 35 项

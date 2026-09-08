@@ -20,7 +20,7 @@ QuickJS/Node Spider · 可选 Java/Dex 兼容**
 
 ### [下载最新稳定版本 →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-当前正式版本为 **0.5.0（Build 99）** · macOS 12.0+ · 仅支持 Apple Silicon
+当前正式版本为 **0.6.0（Build 100）** · macOS 12.0+ · 仅支持 Apple Silicon
 （`arm64`）· Developer ID 签名 · Apple 公证并已 Staple。
 
 打开 DMG，将 `OKVideoMac.app` 拖入“应用程序”即可。无需关闭 Gatekeeper 或 SIP。
@@ -29,7 +29,25 @@ QuickJS/Node Spider · 可选 Java/Dex 兼容**
 > OKVideoMac 是播放器与 Provider 客户端，不内置第三方影视源、账号、Cookie、
 > 解析服务或 DRM 密钥。
 
+## 0.6.0 新增内容
+
+- **Native Xtream-compatible API**：账号接入、电影/剧集分类与详情、季集导航、
+  电影和剧集搜索，以及 Basic Live 分类、频道和播放。凭据保存到 macOS Keychain；
+  导出配置不携带凭据，恢复后需要重新输入。
+- **Native Live 兼容性**：独立的静态 HTTP 代理/HTTPS CONNECT 处理、媒体重定向、
+  有界 TS/HLS 回退、取消与请求所有权保护。普通导入直播与点播保留原有加载策略。
+- **简体中文 / English**：String Catalog、持久语言选择和重启切换。首次启动读取
+  系统首选语言的第一项；其他语言（含繁体中文）默认显示英语。
+- **来源设置与播放器面板**：整合配置入口，选集、音轨、字幕和设置面板按内容高度显示，
+  适应普通窗口、缩放窗口和全屏。
+
+Native Xtream 当前不提供 Xtream EPG、回看/时移或 `direct_source`。
+代理处理不等于完整支持 PAC、SOCKS、认证代理和逐 CDN 动态路由；复杂 HLS 仍可能
+较慢，受控回退只处理已识别的保守子集。详见[发布说明](Docs/RELEASE_NOTES_0.6.0.md)。
+
 ## 软件截图
+
+以下为 0.4.0 的历史截图，尚未反映新版来源和语言设置。
 
 <p align="center">
   <img src="Docs/Media/v0.4.0/home.png" alt="OKVideoMac 原生 macOS 首页" width="100%">
@@ -76,6 +94,7 @@ QuickJS/Node Spider · 可选 Java/Dex 兼容**
 | Apple Silicon | 支持 | `arm64`，macOS 12.0 或更高版本 |
 | 点播与 libmpv 播放 | 支持 | 实际媒体行为仍取决于源和服务器 |
 | 直播与 XMLTV EPG | 支持 | M3U、TXT、JSON 独立导入路径 |
+| Native Xtream | 支持 | 账号认证、Movies、Series、电影/剧集搜索和 Basic Live；不同服务端仍有差异 |
 | Native CMS JSON | 支持 | 首页、分类、筛选、详情、搜索与播放地址交接 |
 | QuickJS Spider | 部分兼容 | 符合当前接口的 selected scripts |
 | Node Spider | 部分兼容 | CatVod/CatPaw 风格视频接口子集 |
@@ -117,6 +136,7 @@ Managed 安装事务与 Emulator Session 生命周期互相独立。存储、修
 
 | 源 / 运行时 | 级别 | 当前范围 |
 | --- | --- | --- |
+| Native Xtream | 支持 | 账号认证、Movies、Series、电影/剧集搜索和 Basic Live；不同服务端仍有差异 |
 | Native CMS JSON | 支持 | 主要 Provider 路径 |
 | CMS XML / Native type 4 | 部分支持 | 覆盖窄于 CMS JSON |
 | TVBox/CatVod 风格 QuickJS | 部分兼容 | `home`、`category`、`detail`、`search`、`play` 与部分辅助接口 |
@@ -206,9 +226,9 @@ Managed Runtime 安装与 Android Emulator Session 分开；安装和 Session �
 
 ## 发布完整性
 
-公开的 **0.5.0（Build 99）** 资产来自 Tag `v0.5.0`。签名、公证并已 Staple 的
+公开的 **0.6.0（Build 100）** 资产来自 Tag `v0.6.0`。签名、公证并已 Staple 的
 DMG 随附 SHA-256、对应源码、SBOM、Notices 与发布 Manifest。详见
-[0.5.0 发布说明](Docs/RELEASE_NOTES_0.5.0.md)、
+[0.6.0 发布说明](Docs/RELEASE_NOTES_0.6.0.md)、
 [源码发布流程](Docs/SOURCE_RELEASE_PROCESS.md)与
 [DMG 发布流程](Docs/DMG_RELEASE_PROCESS.md)。
 

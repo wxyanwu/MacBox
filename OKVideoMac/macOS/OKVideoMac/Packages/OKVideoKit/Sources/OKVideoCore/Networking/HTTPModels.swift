@@ -76,6 +76,15 @@ public struct HTTPRetryPolicy: Equatable, Sendable {
     public static let standard = HTTPRetryPolicy()
 }
 
+public enum HTTPRedirectPolicy: Equatable, Sendable {
+    /// Preserve the existing provider behavior and follow redirects up to the
+    /// request's redirect-count limit.
+    case follow
+    /// Restrict redirects to the original scheme, host, and effective port.
+    /// This also prevents an HTTPS-to-HTTP downgrade.
+    case sameOriginNoDowngrade
+}
+
 public struct HTTPRequest: Equatable, Sendable {
     public var url: URL
     public var method: HTTPMethod
@@ -83,7 +92,12 @@ public struct HTTPRequest: Equatable, Sendable {
     public var body: Data?
     public var timeout: TimeInterval
     public var maximumResponseBytes: Int
+    /// When set, the URLSession transport stops receiving as soon as this many
+    /// bytes are exceeded. `nil` deliberately retains the established buffered
+    /// request path used by existing providers.
+    public var earlyResponseLimitBytes: Int?
     public var maximumRedirects: Int
+    public var redirectPolicy: HTTPRedirectPolicy
     /// Header fields that must be explicitly reapplied to redirected
     /// requests. URLSession may discard provider-required fields such as
     /// Range, Referer, or User-Agent when a download crosses hosts.
@@ -100,7 +114,9 @@ public struct HTTPRequest: Equatable, Sendable {
         body: Data? = nil,
         timeout: TimeInterval = 30,
         maximumResponseBytes: Int = 16 * 1_024 * 1_024,
+        earlyResponseLimitBytes: Int? = nil,
         maximumRedirects: Int = 10,
+        redirectPolicy: HTTPRedirectPolicy = .follow,
         redirectedHeaderFields: Set<String> = [],
         retryPolicy: HTTPRetryPolicy = .standard,
         allowsNonSuccessfulStatus: Bool = false
@@ -111,7 +127,11 @@ public struct HTTPRequest: Equatable, Sendable {
         self.body = body
         self.timeout = timeout
         self.maximumResponseBytes = maximumResponseBytes
+        self.earlyResponseLimitBytes = earlyResponseLimitBytes.map {
+            max(1, $0)
+        }
         self.maximumRedirects = maximumRedirects
+        self.redirectPolicy = redirectPolicy
         self.redirectedHeaderFields = redirectedHeaderFields
         self.retryPolicy = retryPolicy
         self.allowsNonSuccessfulStatus = allowsNonSuccessfulStatus
@@ -284,6 +304,7 @@ public enum HTTPClientError: Error, Equatable, LocalizedError, Sendable {
     case statusCode(Int)
     case responseTooLarge(limit: Int, actual: Int)
     case tooManyRedirects(Int)
+    case redirectRejected
     case invalidResponse
     case timeout
     case transport(String)
@@ -296,6 +317,7 @@ public enum HTTPClientError: Error, Equatable, LocalizedError, Sendable {
         case .responseTooLarge(let limit, let actual):
             return "响应大小 \(actual) 字节超过 \(limit) 字节限制"
         case .tooManyRedirects(let count): return "重定向次数超过 \(count)"
+        case .redirectRejected: return "服务器重定向到了不允许的地址"
         case .invalidResponse: return "服务器返回了无效响应"
         case .timeout: return "请求超时"
         case .transport(let message): return "传输失败：\(message)"

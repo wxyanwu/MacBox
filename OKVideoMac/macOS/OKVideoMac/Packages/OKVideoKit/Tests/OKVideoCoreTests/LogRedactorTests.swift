@@ -29,6 +29,48 @@ final class LogRedactorTests: XCTestCase {
         XCTAssertTrue(redacted.contains("mode=full"))
     }
 
+    func testURLRedactsXtreamQueryCredentials() throws {
+        let url = try XCTUnwrap(
+            URL(
+                string: "https://example.invalid/player_api.php"
+                    + "?username=account-name&password=secret&action=get_vod_streams"
+            )
+        )
+
+        let redacted = LogRedactor.url(url)
+
+        XCTAssertFalse(redacted.contains("account-name"))
+        XCTAssertFalse(redacted.contains("secret"))
+        XCTAssertTrue(redacted.contains("action=get_vod_streams"))
+    }
+
+    func testURLRedactsXtreamPlaybackPathCredentials() throws {
+        for route in ["live", "movie", "series", "timeshift"] {
+            let url = try XCTUnwrap(
+                URL(
+                    string: "https://example.invalid/prefix/\(route)"
+                        + "/account-name/secret/12345.m3u8"
+                )
+            )
+
+            let redacted = LogRedactor.url(url)
+
+            XCTAssertFalse(redacted.contains("account-name"), route)
+            XCTAssertFalse(redacted.contains("secret"), route)
+            XCTAssertTrue(redacted.contains("12345.m3u8"), route)
+        }
+    }
+
+    func testTextRedactsStandaloneXtreamCredentialAssignments() {
+        let redacted = LogRedactor.text(
+            "username=account-name password=secret-value action=auth"
+        )
+
+        XCTAssertFalse(redacted.contains("account-name"))
+        XCTAssertFalse(redacted.contains("secret-value"))
+        XCTAssertTrue(redacted.contains("action=auth"))
+    }
+
     func testHeadersRedactAuthenticationAndCookieValues() {
         let redacted = LogRedactor.headers([
             "Authorization": "Bearer super-secret",

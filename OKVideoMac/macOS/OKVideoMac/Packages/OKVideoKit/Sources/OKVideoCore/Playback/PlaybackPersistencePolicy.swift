@@ -66,6 +66,14 @@ public enum PlaybackPersistencePolicy {
     public static func sanitizedProviderResourceReference(
         _ reference: PlaybackResourceReference?
     ) -> PlaybackResourceReference? {
+        if let reference, reference.resourceKind == .live {
+            guard reference.xtreamLiveLocator != nil,
+                  sanitizedOpaqueLocator(reference.stableResourceLocator)
+                    == reference.stableResourceLocator else {
+                return nil
+            }
+            return reference
+        }
         guard let reference,
               reference.stability == .providerStable,
               reference.expiresAt == nil,

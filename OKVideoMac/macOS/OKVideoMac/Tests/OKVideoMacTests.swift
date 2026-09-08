@@ -1,4 +1,5 @@
 import AppKit
+import Network
 import Combine
 import CryptoKit
 import SwiftUI
@@ -7,6 +8,17 @@ import AndroidRuntimeKit
 import OKVideoCore
 import OKVideoPersistence
 @testable import OKVideoMac
+
+private extension AndroidRuntimeStartupSingleFlight {
+    func ensureRuntimeForConcurrentTest(
+        admitted: XCTestExpectation,
+        operation: @escaping @Sendable () async throws -> Void
+    ) async throws {
+        // Fulfill inside the startup actor, immediately before joining its flight.
+        admitted.fulfill()
+        try await ensureRuntime(operation)
+    }
+}
 
 @MainActor
 private final class AppRelaunchHelperLauncherSpy: AppRelaunchHelperLaunching {
@@ -528,6 +540,717 @@ final class OKVideoMacTests: XCTestCase {
                 environment: ["XCTestBundlePath": "/tmp/OKVideoMacTests.xctest"]
             )
         )
+    }
+
+    func testXtreamCredentialKeychainCodecRoundTripsWithoutCodableCredentials() throws {
+        let credentials = XtreamCredentials(
+            username: "fixture-user",
+            password: "test"
+        )
+
+        let data = try XtreamCredentialKeychainCodec.encode(credentials)
+
+        XCTAssertEqual(
+            try XtreamCredentialKeychainCodec.decode(data),
+            credentials
+        )
+    }
+
+    func testXtreamCredentialKeychainCodecRejectsMalformedPayload() {
+        XCTAssertThrowsError(
+            try XtreamCredentialKeychainCodec.decode(Data("not-a-plist".utf8))
+        ) {
+            XCTAssertEqual(
+                $0 as? XtreamCredentialStoreError,
+                .invalidStoredCredential
+            )
+        }
+    }
+
+    func testXtreamCredentialKeychainAccountUsesStableProviderIdentity() {
+        let providerID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+
+        XCTAssertEqual(
+            KeychainXtreamCredentialStore.account(for: providerID),
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        )
+    }
+
+    @MainActor
+    func testXtreamUserAgentUsesHonestProductIdentity() {
+        let value = AppState.xtreamUserAgent
+
+        XCTAssertTrue(value == "OKVideoMac" || value.hasPrefix("OKVideoMac/"))
+        XCTAssertFalse(value.localizedCaseInsensitiveContains("Mozilla"))
+        XCTAssertFalse(value.localizedCaseInsensitiveContains("Safari"))
+    }
+
+    @MainActor
+    func testXtreamConfigurationContentUsesNativeSiteAndRejectsIDMismatch()
+        throws {
+        let providerID = UUID()
+        let descriptor = try XtreamProviderConfiguration(
+            providerID: providerID,
+            displayName: "Xtream Fixture",
+            serverBaseURL: XCTUnwrap(URL(string: "https://example.invalid"))
+        )
+        let record = StoredConfiguration(
+            id: providerID,
+            name: descriptor.displayName,
+            sourceKind: .xtream,
+            sourceValue: descriptor.serverBaseURL.absoluteString,
+            baseURL: descriptor.serverBaseURL,
+            rawData: try descriptor.encoded(),
+            isActive: true
+        )
+
+        let content = try AppState.configurationContent(for: record)
+
+        XCTAssertEqual(content.sites.count, 1)
+        XCTAssertEqual(content.sites.first?.name, "Xtream Fixture")
+        XCTAssertEqual(content.sites.first?.type, -100)
+
+        var mismatched = record
+        mismatched.id = UUID()
+        XCTAssertThrowsError(
+            try AppState.configurationContent(for: mismatched)
+        ) {
+            XCTAssertEqual(
+                $0 as? XtreamProviderConfigurationError,
+                .invalidProviderID
+            )
+        }
+    }
+
+    private actor LiveCatalogFixtureHTTPClient: HTTPClient {
+        private struct PendingRequest {
+            let request: HTTPRequest
+            let continuation: CheckedContinuation<HTTPResponse, Error>
+        }
+
+        private let suspendsStreams: Bool
+        private var recordedRequests: [HTTPRequest] = []
+        private var streamRequestCount = 0
+        private var pending: [Int: PendingRequest] = [:]
+        private var requestTimeouts: [Int: Task<Void, Never>] = [:]
+        private var isClosed = false
+
+        init(suspendsStreams: Bool = false) {
+            self.suspendsStreams = suspendsStreams
+        }
+
+        func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+            guard !isClosed else { throw CancellationError() }
+            recordedRequests.append(request)
+            let action = URLComponents(url: request.url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "action" })?.value
+            switch action {
+            case "get_live_categories":
+                return response(request, body: Data(#"[{"category_id":"7","category_name":"Fixture Group"}]"#.utf8))
+            case "get_live_streams":
+                streamRequestCount += 1
+                let requestNumber = streamRequestCount
+                if suspendsStreams {
+                    // Deliberately ignore cancellation until the test releases
+                    // this request, exercising late transport completion.
+                    return try await withCheckedThrowingContinuation { continuation in
+                        pending[requestNumber] = PendingRequest(
+                            request: request, continuation: continuation
+                        )
+                        requestTimeouts[requestNumber] = Task { [weak self] in
+                            do {
+                                try await Task.sleep(nanoseconds: 10_000_000_000)
+                            } catch {
+                                return
+                            }
+                            guard !Task.isCancelled else { return }
+                            await self?.timeoutRequest(requestNumber)
+                        }
+                    }
+                }
+                return response(request, body: Self.streamsBody(name: "Fixture Channel"))
+            default:
+                throw HTTPClientError.transport("Unexpected request outside the Live catalog fixture")
+            }
+        }
+
+        func requests() -> [HTTPRequest] { recordedRequests }
+
+        func waitUntilStreamRequest(_ number: Int) async throws {
+            do {
+                for _ in 0..<250 {
+                    if streamRequestCount >= number { return }
+                    try await Task.sleep(nanoseconds: 20_000_000)
+                }
+            } catch {
+                close()
+                throw error
+            }
+            // A failing test must also release already-suspended requests;
+            // there is no uncancellable task-group race or unbounded waiter.
+            close()
+            throw HTTPClientError.transport("Live catalog fixture did not start within 5 seconds")
+        }
+
+        func finishStreamRequest(
+            _ number: Int, name: String = "Fixture Channel",
+            error: HTTPClientError? = nil
+        ) {
+            guard let request = pending.removeValue(forKey: number) else { return }
+            requestTimeouts.removeValue(forKey: number)?.cancel()
+            if let error {
+                request.continuation.resume(throwing: error)
+            } else {
+                request.continuation.resume(returning: response(
+                    request.request, body: Self.streamsBody(name: name)
+                ))
+            }
+        }
+
+        private func close() {
+            isClosed = true
+            let requests = Array(pending.values)
+            pending.removeAll()
+            requestTimeouts.values.forEach { $0.cancel() }
+            requestTimeouts.removeAll()
+            requests.forEach { $0.continuation.resume(throwing: CancellationError()) }
+        }
+
+        private func timeoutRequest(_ number: Int) {
+            guard let request = pending.removeValue(forKey: number) else { return }
+            requestTimeouts.removeValue(forKey: number)
+            request.continuation.resume(throwing: HTTPClientError.transport(
+                "Live catalog fixture was not released within 10 seconds"
+            ))
+        }
+
+        private func response(_ request: HTTPRequest, body: Data) -> HTTPResponse {
+            HTTPResponse(
+                url: request.url, statusCode: 200,
+                headers: ["Content-Type": "application/json"], body: body
+            )
+        }
+
+        private static func streamsBody(name: String) -> Data {
+            // All callers use fixed fixture names, not untrusted JSON text.
+            Data("[{\"stream_id\":701,\"name\":\"\(name)\",\"category_id\":\"7\",\"container_extension\":\"ts\"}]".utf8)
+        }
+    }
+
+    @MainActor
+    private func nativeLiveCatalogFixture(
+        name: String = "Live Fixture", client: LiveCatalogFixtureHTTPClient
+    ) throws -> (StoredConfiguration, XtreamSiteProvider) {
+        let descriptor = try XtreamProviderConfiguration(
+            providerID: UUID(), displayName: name,
+            serverBaseURL: XCTUnwrap(URL(string: "https://live-catalog.invalid"))
+        )
+        let record = StoredConfiguration(
+            id: descriptor.providerID, name: name, sourceKind: .xtream,
+            sourceValue: descriptor.serverBaseURL.absoluteString,
+            baseURL: descriptor.serverBaseURL, rawData: try descriptor.encoded(),
+            isActive: true
+        )
+        let provider = try XtreamSiteProvider(
+            configuration: descriptor,
+            credentials: XtreamCredentials(username: "fixture-user", password: "fixture"),
+            httpClient: client, userAgent: "OKVideoMac/LiveCatalogTests"
+        )
+        return (record, provider)
+    }
+
+    @MainActor
+    func testNativeLiveDescriptorTracksOnlyActiveProviderWithoutEagerRequests() async throws {
+        let client = LiveCatalogFixtureHTTPClient()
+        let (first, firstProvider) = try nativeLiveCatalogFixture(client: client)
+        let (second, secondProvider) = try nativeLiveCatalogFixture(name: "Second Fixture", client: client)
+        let providers: [String: SiteProvider] = [
+            firstProvider.site.key: firstProvider, secondProvider.site.key: secondProvider
+        ]
+        let state = AppState(environment: nil, initialProviders: providers)
+        XCTAssertTrue(state.liveSourceDescriptors.isEmpty)
+
+        state.setLiveConfigurationForTesting(first, providers: providers)
+
+        XCTAssertEqual(state.liveSourceDescriptors, [LiveSourceDescriptor(
+            id: .xtream(first.id), name: first.name,
+            canRefresh: true, canExport: false, supportsEPG: false
+        )])
+        XCTAssertNil(state.liveCatalog(for: .xtream(first.id)))
+        XCTAssertFalse(state.isLiveCatalogLoading(.xtream(first.id)))
+        state.setLiveConfigurationForTesting(second, providers: providers)
+        XCTAssertEqual(state.liveSourceDescriptors.map(\.id), [.xtream(second.id)])
+        XCTAssertNil(state.liveCatalog(for: .xtream(first.id)))
+
+        var importedConfiguration = first
+        importedConfiguration.sourceKind = .pasted
+        state.setLiveConfigurationForTesting(importedConfiguration, providers: providers)
+        XCTAssertTrue(state.liveSourceDescriptors.isEmpty)
+        state.setLiveConfigurationForTesting(nil, providers: providers)
+        XCTAssertTrue(state.liveSourceDescriptors.isEmpty)
+        let requests = await client.requests()
+        XCTAssertTrue(requests.isEmpty, "Describing active sources must not fetch catalog, artwork, EPG or media")
+    }
+
+    @MainActor
+    func testNativeLiveCatalogUsesProviderReferencesWithoutImportedOrVODSideEffects() async throws {
+        let client = LiveCatalogFixtureHTTPClient()
+        let (record, provider) = try nativeLiveCatalogFixture(client: client)
+        let state = AppState(environment: nil)
+        state.setLiveConfigurationForTesting(record, providers: [provider.site.key: provider])
+        let sourceID = LiveSourceID.xtream(record.id)
+
+        await state.loadLiveSource(sourceID)
+
+        let catalog = try XCTUnwrap(state.liveCatalog(for: sourceID))
+        XCTAssertEqual(catalog.sourceID, sourceID)
+        XCTAssertNil(catalog.epgURL)
+        let channels = catalog.groups.flatMap(\.channels)
+        XCTAssertEqual(channels.map(\.name), ["Fixture Channel"])
+        let stream = try XCTUnwrap(channels.first?.streams.first)
+        XCTAssertNil(stream.url)
+        guard case .provider(let reference) = stream.target else {
+            return XCTFail("A native catalog must retain a formal provider target")
+        }
+        XCTAssertEqual(reference.xtreamLiveLocator?.providerID, record.id)
+        XCTAssertEqual(reference.xtreamLiveLocator?.streamID, "701")
+        let encoded = String(decoding: try JSONEncoder().encode(catalog.groups), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("fixture-user"))
+        XCTAssertFalse(encoded.contains("fixture"))
+        XCTAssertFalse(encoded.contains("live-catalog.invalid"))
+        XCTAssertFalse(state.isLiveCatalogLoading(sourceID))
+        XCTAssertNil(state.liveCatalogError(for: sourceID))
+        XCTAssertFalse(state.isLoading)
+        XCTAssertTrue(state.liveSources.isEmpty)
+        XCTAssertTrue(state.loadedLivePlaylists.isEmpty)
+        XCTAssertTrue(state.loadedEPGGuides.isEmpty)
+        XCTAssertTrue(state.liveSourceValidationStatuses.isEmpty)
+        XCTAssertTrue(state.favoriteLiveChannelIDs.isEmpty)
+        XCTAssertTrue(state.deletedLiveChannelIDs.isEmpty)
+        XCTAssertNil(state.livePlaybackChannel)
+        XCTAssertNil(state.siteHome)
+        XCTAssertNil(state.selectedDetail)
+        XCTAssertTrue(state.searchResults.isEmpty)
+        let requests = await client.requests()
+        XCTAssertEqual(requests.count, 2)
+        let actions = Set(requests.compactMap {
+            URLComponents(url: $0.url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "action" })?.value
+        })
+        XCTAssertEqual(actions, ["get_live_categories", "get_live_streams"])
+        XCTAssertTrue(requests.allSatisfy { $0.url.path == "/player_api.php" })
+        XCTAssertTrue(requests.allSatisfy { $0.earlyResponseLimitBytes != nil })
+
+        await state.loadLiveSource(sourceID)
+        let requestsAfterCachedLoad = await client.requests()
+        XCTAssertEqual(requestsAfterCachedLoad.count, 2)
+    }
+
+    @MainActor
+    func testNativeLiveRefreshRejectsLateSuccessAndFailureWithoutClearingNewLoading() async throws {
+        for oldRequestFails in [false, true] {
+            let client = LiveCatalogFixtureHTTPClient(suspendsStreams: true)
+            let (record, provider) = try nativeLiveCatalogFixture(client: client)
+            let state = AppState(environment: nil)
+            state.setLiveConfigurationForTesting(record, providers: [provider.site.key: provider])
+            let sourceID = LiveSourceID.xtream(record.id)
+            let oldLoad = Task { await state.loadLiveSource(sourceID) }
+            try await client.waitUntilStreamRequest(1)
+            let newLoad = Task { await state.refreshLiveSource(sourceID) }
+            try await client.waitUntilStreamRequest(2)
+
+            await client.finishStreamRequest(
+                1, name: "Stale Channel", error: oldRequestFails ? .statusCode(503) : nil
+            )
+            await oldLoad.value
+
+            XCTAssertNil(state.liveCatalog(for: sourceID))
+            XCTAssertTrue(state.isLiveCatalogLoading(sourceID))
+            XCTAssertNil(state.liveCatalogError(for: sourceID))
+            XCTAssertNil(state.presentedError)
+            await client.finishStreamRequest(2, name: "Latest Channel")
+            await newLoad.value
+            XCTAssertEqual(state.liveCatalog(for: sourceID)?.groups.flatMap(\.channels).map(\.name), ["Latest Channel"])
+            XCTAssertFalse(state.isLiveCatalogLoading(sourceID))
+        }
+    }
+
+    @MainActor
+    func testNativeLiveOlderRefreshCannotReplaceAlreadyCompletedNewCatalog() async throws {
+        let client = LiveCatalogFixtureHTTPClient(suspendsStreams: true)
+        let (record, provider) = try nativeLiveCatalogFixture(client: client)
+        let state = AppState(environment: nil)
+        state.setLiveConfigurationForTesting(record, providers: [provider.site.key: provider])
+        let sourceID = LiveSourceID.xtream(record.id)
+        let oldLoad = Task { await state.loadLiveSource(sourceID) }
+        try await client.waitUntilStreamRequest(1)
+        let newLoad = Task { await state.refreshLiveSource(sourceID) }
+        try await client.waitUntilStreamRequest(2)
+        await client.finishStreamRequest(2, name: "Latest Channel")
+        await newLoad.value
+        let latestCatalog = state.liveCatalog(for: sourceID)
+        XCTAssertNotNil(latestCatalog)
+
+        await client.finishStreamRequest(1, name: "Stale Channel")
+        await oldLoad.value
+
+        XCTAssertEqual(state.liveCatalog(for: sourceID), latestCatalog)
+        XCTAssertFalse(state.isLiveCatalogLoading(sourceID))
+        XCTAssertNil(state.liveCatalogError(for: sourceID))
+    }
+
+    @MainActor
+    func testNativeLiveProviderSwitchRejectsPriorCatalogAndPreservesNewLoading() async throws {
+        for oldRequestFails in [false, true] {
+            let firstClient = LiveCatalogFixtureHTTPClient(suspendsStreams: true)
+            let secondClient = LiveCatalogFixtureHTTPClient(suspendsStreams: true)
+            let (first, firstProvider) = try nativeLiveCatalogFixture(client: firstClient)
+            let (second, secondProvider) = try nativeLiveCatalogFixture(name: "Second Fixture", client: secondClient)
+            let providers: [String: SiteProvider] = [
+                firstProvider.site.key: firstProvider, secondProvider.site.key: secondProvider
+            ]
+            let state = AppState(environment: nil)
+            state.setLiveConfigurationForTesting(first, providers: providers)
+            let oldLoad = Task { await state.loadLiveSource(.xtream(first.id)) }
+            try await firstClient.waitUntilStreamRequest(1)
+
+            state.setLiveConfigurationForTesting(second, providers: providers)
+            XCTAssertEqual(state.liveSourceDescriptors.map(\.id), [.xtream(second.id)])
+            XCTAssertFalse(state.isLiveCatalogLoading(.xtream(first.id)))
+            let newLoad = Task { await state.loadLiveSource(.xtream(second.id)) }
+            try await secondClient.waitUntilStreamRequest(1)
+            await firstClient.finishStreamRequest(
+                1, name: "Previous Provider", error: oldRequestFails ? .statusCode(503) : nil
+            )
+            await oldLoad.value
+
+            XCTAssertNil(state.liveCatalog(for: .xtream(first.id)))
+            XCTAssertNil(state.liveCatalog(for: .xtream(second.id)))
+            XCTAssertTrue(state.isLiveCatalogLoading(.xtream(second.id)))
+            XCTAssertNil(state.liveCatalogError(for: .xtream(second.id)))
+            XCTAssertNil(state.presentedError)
+            await secondClient.finishStreamRequest(1, name: "Current Provider")
+            await newLoad.value
+            XCTAssertEqual(state.liveCatalog(for: .xtream(second.id))?.groups.flatMap(\.channels).map(\.name), ["Current Provider"])
+            XCTAssertFalse(state.isLiveCatalogLoading(.xtream(second.id)))
+        }
+    }
+
+    @MainActor
+    func testNativeLiveCatalogFailureIsBoundedRedactedAndCanBeRetried() async throws {
+        let client = LiveCatalogFixtureHTTPClient(suspendsStreams: true)
+        let (record, provider) = try nativeLiveCatalogFixture(client: client)
+        let state = AppState(environment: nil)
+        state.setLiveConfigurationForTesting(record, providers: [provider.site.key: provider])
+        let sourceID = LiveSourceID.xtream(record.id)
+        let failedLoad = Task { await state.loadLiveSource(sourceID) }
+        try await client.waitUntilStreamRequest(1)
+        await client.finishStreamRequest(1, error: .transport(
+            "https://live-catalog.invalid/player_api.php?username=fixture-user&password=fixture"
+        ))
+        await failedLoad.value
+        let message = try XCTUnwrap(state.liveCatalogError(for: sourceID))
+        XCTAssertFalse(message.isEmpty)
+        XCTAssertFalse(message.contains("fixture-user"))
+        XCTAssertFalse(message.contains("fixture"))
+        XCTAssertFalse(message.contains("live-catalog.invalid"))
+        XCTAssertNil(state.liveCatalog(for: sourceID))
+        XCTAssertFalse(state.isLiveCatalogLoading(sourceID))
+        XCTAssertNil(state.presentedError)
+
+        let retry = Task { await state.refreshLiveSource(sourceID) }
+        try await client.waitUntilStreamRequest(2)
+        XCTAssertNil(state.liveCatalogError(for: sourceID))
+        await client.finishStreamRequest(2, name: "Recovered Channel")
+        await retry.value
+        XCTAssertEqual(state.liveCatalog(for: sourceID)?.groups.flatMap(\.channels).map(\.name), ["Recovered Channel"])
+        XCTAssertFalse(state.isLiveCatalogLoading(sourceID))
+    }
+
+    @MainActor
+    func testNativeLiveWithoutAvailableProviderFailsWithoutLoadingForever() async throws {
+        let client = LiveCatalogFixtureHTTPClient()
+        let (record, _) = try nativeLiveCatalogFixture(client: client)
+        let state = AppState(environment: nil)
+        state.setLiveConfigurationForTesting(record, providers: [:])
+        XCTAssertEqual(state.liveSourceDescriptors.map(\.id), [.xtream(record.id)])
+        await state.loadLiveSource(.xtream(record.id))
+        XCTAssertFalse(state.isLiveCatalogLoading(.xtream(record.id)))
+        XCTAssertNotNil(state.liveCatalogError(for: .xtream(record.id)))
+        XCTAssertNil(state.liveCatalog(for: .xtream(record.id)))
+        let requests = await client.requests()
+        XCTAssertTrue(requests.isEmpty)
+    }
+
+    private func nativeLiveReferenceStore() throws -> SQLiteStore {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "OKVideoMac-LiveReferenceTests-\(UUID().uuidString)", isDirectory: true
+        )
+        let store = try SQLiteStore(databaseURL: directory.appendingPathComponent("fixture.sqlite3"))
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        return store
+    }
+
+    private func nativeLiveChannelFixture(
+        providerID: UUID, streamID: String = "701", name: String = "Fixture Channel",
+        format: XtreamLiveOutputFormat = .ts
+    ) throws -> LiveChannel {
+        let locator = try XtreamLivePlaybackLocator(
+            providerID: providerID, streamID: streamID, outputFormat: format
+        )
+        return LiveChannel(
+            groupName: "Fixture Group", name: name,
+            streams: [try LiveStream(name: format.rawValue, target: .provider(.xtreamLive(locator)))],
+            explicitID: "channel-\(providerID.uuidString)-\(streamID)",
+            explicitGroupID: "group-\(providerID.uuidString)-7"
+        )
+    }
+
+    @MainActor
+    func testNativeLiveFavoriteReferencesSurviveRenameFormatAndProviderSwitch() async throws {
+        let store = try nativeLiveReferenceStore()
+        let legacyFavorites = JSONValue.array([.string(" Source::Group::Channel \n"), .string("")])
+        let legacyHidden = JSONValue.array([.string("opaque::legacy::hidden")])
+        try await store.setSetting(legacyFavorites, forKey: "live.favoriteChannels")
+        try await store.setSetting(legacyHidden, forKey: "live.deletedChannels")
+        let (first, firstProvider) = try nativeLiveCatalogFixture(client: LiveCatalogFixtureHTTPClient())
+        let (second, secondProvider) = try nativeLiveCatalogFixture(client: LiveCatalogFixtureHTTPClient())
+        let providers: [String: SiteProvider] = [
+            firstProvider.site.key: firstProvider, secondProvider.site.key: secondProvider
+        ]
+        let state = AppState(environment: nil, liveReferenceStore: store)
+        try await state.loadNativeLiveReferences()
+        state.setLiveConfigurationForTesting(first, providers: providers)
+        let original = try nativeLiveChannelFixture(providerID: first.id)
+
+        await state.toggleLiveFavorite(sourceID: .xtream(first.id), channel: original)
+
+        var renamed = try nativeLiveChannelFixture(
+            providerID: first.id, name: "Renamed Channel", format: .m3u8
+        )
+        renamed.groupName = "Moved Group"
+        renamed.explicitGroupID = "new-group"
+        XCTAssertTrue(state.isLiveFavorite(sourceID: .xtream(first.id), channel: renamed))
+        state.setLiveConfigurationForTesting(second, providers: providers)
+        let secondChannel = try nativeLiveChannelFixture(providerID: second.id)
+        XCTAssertFalse(state.isLiveFavorite(sourceID: .xtream(second.id), channel: secondChannel))
+        XCTAssertFalse(state.isLiveFavorite(sourceID: .xtream(second.id), channel: original))
+        await state.toggleLiveFavorite(sourceID: .xtream(second.id), channel: secondChannel)
+        XCTAssertTrue(state.isLiveFavorite(sourceID: .xtream(second.id), channel: secondChannel))
+        state.setLiveConfigurationForTesting(first, providers: providers)
+        XCTAssertTrue(state.isLiveFavorite(sourceID: .xtream(first.id), channel: renamed))
+
+        let restarted = AppState(environment: nil, liveReferenceStore: store)
+        try await restarted.loadNativeLiveReferences()
+        XCTAssertTrue(restarted.isLiveFavorite(sourceID: .xtream(first.id), channel: renamed))
+        XCTAssertTrue(restarted.isLiveFavorite(sourceID: .xtream(second.id), channel: secondChannel))
+        let favoriteSetting = try await store.setting(forKey: "live.favoriteChannels")
+        let hiddenSetting = try await store.setting(forKey: "live.deletedChannels")
+        XCTAssertEqual(favoriteSetting, legacyFavorites)
+        XCTAssertEqual(hiddenSetting, legacyHidden)
+        XCTAssertNil(state.presentedError)
+    }
+
+    @MainActor
+    func testNativeLiveConcurrentFavoriteTogglesSerializeWithoutLosingOpaqueMembers() async throws {
+        let store = try nativeLiveReferenceStore()
+        let opaque = JSONValue.object(["version": .integer(99), "future": .array([.string("kept"), .null])])
+        let legacy = JSONValue.string("  source::group::name  ")
+        try await store.setSetting(.array([opaque, legacy]), forKey: "live.favoriteReferences.v1")
+        let state = AppState(environment: nil, liveReferenceStore: store)
+        try await state.loadNativeLiveReferences()
+        let providerID = UUID()
+        let channel = try nativeLiveChannelFixture(providerID: providerID)
+        let firstPair = (0..<2).map { _ in
+            Task { await state.toggleLiveFavorite(sourceID: .xtream(providerID), channel: channel) }
+        }
+        for task in firstPair { await task.value }
+        XCTAssertFalse(state.isLiveFavorite(sourceID: .xtream(providerID), channel: channel))
+
+        let toggles = (0..<21).map { _ in
+            Task { await state.toggleLiveFavorite(sourceID: .xtream(providerID), channel: channel) }
+        }
+        for task in toggles { await task.value }
+
+        XCTAssertTrue(state.isLiveFavorite(sourceID: .xtream(providerID), channel: channel))
+        XCTAssertNil(state.presentedError)
+        let stored = try await store.setting(forKey: "live.favoriteReferences.v1")
+        guard case .array(let members) = stored else {
+            return XCTFail("Native favorites must remain a versioned reference collection")
+        }
+        XCTAssertEqual(Array(members.prefix(2)), [opaque, legacy])
+        XCTAssertEqual(members.count, 3)
+        let persisted = StoredLiveChannelReferenceEnvelope(setting: stored)
+        XCTAssertTrue(persisted.containsXtream(providerID: providerID, streamID: "701"))
+        XCTAssertEqual(persisted, state.nativeLiveFavorites)
+    }
+
+    @MainActor
+    func testNativeLiveHidePreservesFavoriteAndRestoreAllIsProviderScoped() async throws {
+        let store = try nativeLiveReferenceStore()
+        let legacyHidden = JSONValue.array([.string("old::hidden::identifier")])
+        try await store.setSetting(legacyHidden, forKey: "live.deletedChannels")
+        let state = AppState(environment: nil, liveReferenceStore: store)
+        try await state.loadNativeLiveReferences()
+        let firstID = UUID()
+        let secondID = UUID()
+        let first = try nativeLiveChannelFixture(providerID: firstID)
+        let second = try nativeLiveChannelFixture(providerID: secondID)
+        await state.toggleLiveFavorite(sourceID: .xtream(firstID), channel: first)
+        await state.deleteLiveChannel(sourceID: .xtream(firstID), sourceName: "First", channel: first)
+        await state.deleteLiveChannel(sourceID: .xtream(secondID), sourceName: "Second", channel: second)
+        XCTAssertTrue(state.isLiveFavorite(sourceID: .xtream(firstID), channel: first))
+        XCTAssertTrue(state.isLiveChannelDeleted(sourceID: .xtream(firstID), channel: first))
+        XCTAssertTrue(state.isLiveChannelDeleted(sourceID: .xtream(secondID), channel: second))
+
+        await state.restoreAllDeletedLiveChannels(sourceID: .xtream(firstID))
+
+        XCTAssertFalse(state.isLiveChannelDeleted(sourceID: .xtream(firstID), channel: first))
+        XCTAssertTrue(state.isLiveChannelDeleted(sourceID: .xtream(secondID), channel: second))
+        XCTAssertTrue(state.isLiveFavorite(sourceID: .xtream(firstID), channel: first))
+        await state.restoreDeletedLiveChannel(sourceID: .xtream(secondID), channel: second)
+        XCTAssertFalse(state.isLiveChannelDeleted(sourceID: .xtream(secondID), channel: second))
+        let restarted = AppState(environment: nil, liveReferenceStore: store)
+        try await restarted.loadNativeLiveReferences()
+        XCTAssertTrue(restarted.isLiveFavorite(sourceID: .xtream(firstID), channel: first))
+        XCTAssertFalse(restarted.isLiveChannelDeleted(sourceID: .xtream(firstID), channel: first))
+        XCTAssertFalse(restarted.isLiveChannelDeleted(sourceID: .xtream(secondID), channel: second))
+        let unchangedLegacy = try await store.setting(forKey: "live.deletedChannels")
+        XCTAssertEqual(unchangedLegacy, legacyHidden)
+    }
+
+    @MainActor
+    func testNativeLiveUnknownReferenceRootsRejectWritesAndLeaveLegacySettingsUntouched() async throws {
+        let store = try nativeLiveReferenceStore()
+        let futureRoot = JSONValue.object([
+            "version": .integer(2), "channels": .array([.object(["future": .string("preserve exactly")])])
+        ])
+        let legacy = JSONValue.array([.string(" :: source::name:: \n")])
+        for key in ["live.favoriteReferences.v1", "live.hiddenReferences.v1"] {
+            try await store.setSetting(futureRoot, forKey: key)
+        }
+        for key in ["live.favoriteChannels", "live.deletedChannels"] {
+            try await store.setSetting(legacy, forKey: key)
+        }
+        let state = AppState(environment: nil, liveReferenceStore: store)
+        try await state.loadNativeLiveReferences()
+        let providerID = UUID()
+        let channel = try nativeLiveChannelFixture(providerID: providerID)
+
+        await state.toggleLiveFavorite(sourceID: .xtream(providerID), channel: channel)
+        await state.deleteLiveChannel(sourceID: .xtream(providerID), sourceName: "Fixture", channel: channel)
+
+        XCTAssertTrue(state.nativeLiveFavorites.isReadOnly)
+        XCTAssertTrue(state.nativeLiveHiddenChannels.isReadOnly)
+        XCTAssertEqual(state.nativeLiveFavorites.setting, futureRoot)
+        XCTAssertEqual(state.nativeLiveHiddenChannels.setting, futureRoot)
+        XCTAssertFalse(state.isLiveFavorite(sourceID: .xtream(providerID), channel: channel))
+        XCTAssertFalse(state.isLiveChannelDeleted(sourceID: .xtream(providerID), channel: channel))
+        XCTAssertNotNil(state.presentedError)
+        for key in ["live.favoriteReferences.v1", "live.hiddenReferences.v1"] {
+            let unchanged = try await store.setting(forKey: key)
+            XCTAssertEqual(unchanged, futureRoot)
+        }
+        for key in ["live.favoriteChannels", "live.deletedChannels"] {
+            let unchanged = try await store.setting(forKey: key)
+            XCTAssertEqual(unchanged, legacy)
+        }
+    }
+
+    @MainActor
+    func testLiveBrowserSourceReconciliationPreservesNamespacedSelection() {
+        let identifier = UUID()
+        let imported = LiveSourceDescriptor(
+            id: .imported(identifier), name: "Imported", canRefresh: true,
+            canExport: true, supportsEPG: true
+        )
+        let native = LiveSourceDescriptor(
+            id: .xtream(identifier), name: "Native", canRefresh: true,
+            canExport: false, supportsEPG: false
+        )
+        let session = LiveBrowserSession()
+        session.reconcileSources([imported, native])
+        XCTAssertEqual(session.selectedSourceID, imported.id)
+        session.selectedSourceID = native.id
+        session.reconcileSources([imported, native])
+        XCTAssertEqual(session.selectedSourceID, native.id)
+        session.reconcileSources([imported])
+        XCTAssertEqual(session.selectedSourceID, imported.id)
+        session.reconcileSources([])
+        XCTAssertNil(session.selectedSourceID)
+    }
+
+    @MainActor
+    func testLiveBrowserGroupReconciliationUsesStableIdentityNotDisplayName() {
+        let session = LiveBrowserSession()
+        session.selectedGroupID = "xtream-group-7"
+        session.reconcileGroups([
+            LiveGroup(name: "Original Name", explicitID: "xtream-group-7")
+        ])
+        XCTAssertEqual(session.selectedGroupID, "xtream-group-7")
+        session.reconcileGroups([
+            LiveGroup(name: "Renamed Group", explicitID: "xtream-group-7")
+        ])
+        XCTAssertEqual(session.selectedGroupID, "xtream-group-7")
+        session.reconcileGroups([
+            LiveGroup(name: "Renamed Group", explicitID: "xtream-group-8")
+        ])
+        XCTAssertNil(session.selectedGroupID)
+        session.selectedGroupID = "Legacy Group"
+        session.reconcileGroups([LiveGroup(name: "Legacy Group")])
+        XCTAssertEqual(session.selectedGroupID, "Legacy Group")
+        session.reconcileGroups([])
+        XCTAssertNil(session.selectedGroupID)
+    }
+
+    func testNativeLiveLogoPolicyDoesNotReuseImportedFallbackCache() throws {
+        let explicit = try XCTUnwrap(URL(string: "https://logo-fixture.invalid/explicit.png"))
+        var channel = LiveChannel(
+            groupName: "Fixture", name: "CCTV-1", logoURL: explicit, streams: []
+        )
+        let cache = LiveChannelLogoURLCache()
+        let importedURLs = cache.urls(for: channel)
+        XCTAssertTrue(importedURLs.count > 1)
+        XCTAssertEqual(cache.urls(for: channel, allowsFallback: false), [explicit])
+        XCTAssertEqual(cache.urls(for: channel), importedURLs)
+        XCTAssertEqual(cache.computationCount, 2)
+        channel.logoURL = nil
+        XCTAssertTrue(cache.urls(for: channel, allowsFallback: false).isEmpty)
+        XCTAssertTrue(LiveChannelLogoResolver.urls(for: channel, allowsFallback: false).isEmpty)
+        XCTAssertFalse(cache.urls(for: channel).isEmpty)
+    }
+
+    func testPortableBackupOfXtreamDescriptorContainsNoCredentials() throws {
+        let providerID = UUID()
+        let descriptor = try XtreamProviderConfiguration(
+            providerID: providerID,
+            displayName: "Xtream Fixture",
+            serverBaseURL: XCTUnwrap(URL(string: "https://example.invalid"))
+        )
+        let record = StoredConfiguration(
+            id: providerID,
+            name: descriptor.displayName,
+            sourceKind: .xtream,
+            sourceValue: descriptor.serverBaseURL.absoluteString,
+            baseURL: descriptor.serverBaseURL,
+            rawData: try descriptor.encoded(),
+            isActive: true
+        )
+
+        let data = try PortableBackupCodec.encode(
+            configuration: record,
+            history: [],
+            appVersion: "test",
+            appBuild: "test"
+        )
+        let decoded = try PortableBackupCodec.decode(data)
+        let text = String(decoding: data, as: UTF8.self)
+
+        XCTAssertEqual(decoded.payload.configuration.sourceKind, .xtream)
+        XCTAssertFalse(text.contains("fixture-user"))
+        XCTAssertFalse(text.contains("fixture"))
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("username"))
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("password"))
     }
 
     func testPortableBackupRoundTripPreservesConfigurationAndHistory() throws {
@@ -1321,6 +2044,24 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testProviderLabelsRespectImportCarrierAndRuntimeRouting() {
+        let cases: [(StoredConfigurationSourceKind, String, ConfigurationPresentationKind)] = [
+            (.remote, "https://example.invalid/config.json", .tvbox),
+            (.remote, "https://example.invalid/index.JS.MD5?version=2#sha256=abc", .catpaw),
+            (.remote, "https://example.invalid/config.json?file=index.js.md5", .tvbox),
+            (.localFile, "/tmp/index.js.md5", .tvbox),
+            (.pasted, "https://example.invalid/index.js.md5", .tvbox),
+            (.xtream, "https://example.invalid/index.js.md5", .xtream)
+        ]
+        for (sourceKind, value, expected) in cases {
+            let record = StoredConfiguration(
+                name: "Provider", sourceKind: sourceKind, sourceValue: value,
+                baseURL: nil, rawData: Data()
+            )
+            XCTAssertEqual(ConfigurationPresentationKind.resolve(record), expected, value)
+        }
+    }
+
     func testImportURLNormalizationOnlyTrimsEdges() throws {
         let exact = "https://user:pass@example.invalid/a%20b/config.js.md5?q=x%2By#fragment"
         let raw = " \t\n\(exact)\r\n "
@@ -1736,6 +2477,49 @@ final class OKVideoMacTests: XCTestCase {
         ))
     }
 
+    func testXtreamLiveHTTPSForcesCertificateVerificationWithoutChangingOtherLoads()
+        throws {
+        let httpsURL = try XCTUnwrap(URL(
+            string: "https://example.com/live/user/redacted/7.ts"
+        ))
+        let xtream = ResolvedMedia(
+            url: httpsURL,
+            headers: [:],
+            format: "ts",
+            siteKey: "xtream-live",
+            sourceName: "Channel",
+            episodeName: "TS"
+        )
+        let command = MPVTVBoxPlaybackPolicy.loadCommand(for: xtream)
+        XCTAssertEqual(Array(command.prefix(4)), [
+            "loadfile", httpsURL.absoluteString, "replace", "-1"
+        ])
+        XCTAssertEqual(command.last, "tls-verify=yes")
+
+        var imported = xtream
+        imported.siteKey = "live"
+        XCTAssertEqual(
+            MPVTVBoxPlaybackPolicy.loadCommand(for: imported),
+            ["loadfile", httpsURL.absoluteString, "replace"]
+        )
+
+        var insecureXtream = xtream
+        insecureXtream.url = try XCTUnwrap(URL(
+            string: "http://127.0.0.1:3211/live/user/redacted/7.ts"
+        ))
+        XCTAssertEqual(
+            MPVTVBoxPlaybackPolicy.loadCommand(for: insecureXtream),
+            ["loadfile", insecureXtream.url.absoluteString, "replace"]
+        )
+    }
+
+    @MainActor
+    func testMPVPrivacyHardeningOptionsAreAcceptedByBundledRuntime()
+        async throws {
+        let player = try MPVPlayerClient(teardownMode: .fullDestroy)
+        await player.shutdown()
+    }
+
     func testMPVRenderControlDefaultsToAdvancedWithLegacyRollback() {
         let suiteName = "OKVideoMacTests.MPVRenderControl.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -1805,6 +2589,112 @@ final class OKVideoMacTests: XCTestCase {
 
         let replay = try await controller.prepareForPlayback(requestID: UUID())
         XCTAssertEqual(replay.renderOwnerID, originalID)
+        await controller.shutdown()
+    }
+
+    @MainActor
+    func testPlayerLifecycleStrictReleaseDestroysOldClientBeforePublishingReplacement()
+        async throws {
+        let controller = PlayerLifecycleController(mode: .fullDestroy)
+        guard let original = controller.renderPlayer else {
+            throw XCTSkip("libmpv is unavailable in this test environment")
+        }
+        let firstRequestID = UUID()
+        _ = try await controller.prepareForPlayback(requestID: firstRequestID)
+        let originalID = original.renderOwnerID
+        var changes: [UUID?] = []
+        controller.onRenderClientChanged = { changes.append($0?.renderOwnerID) }
+
+        let replacement = try await controller.prepareForPlayback(
+            requestID: UUID(),
+            releasePolicy: .destroyBeforeLoad
+        )
+
+        XCTAssertNotEqual(replacement.renderOwnerID, originalID)
+        XCTAssertEqual(changes.first ?? originalID, nil)
+        XCTAssertEqual(changes.last ?? nil, replacement.renderOwnerID)
+        await controller.shutdown()
+    }
+
+    @MainActor
+    func testStaleCloseCannotDestroyAPlaybackThatClaimsOwnershipWhileCloseWaits()
+        async throws {
+        let controller = PlayerLifecycleController(mode: .fullDestroy)
+        guard let original = controller.renderPlayer else {
+            throw XCTSkip("libmpv is unavailable in this test environment")
+        }
+        let firstRequestID = UUID()
+        _ = try await controller.prepareForPlayback(requestID: firstRequestID)
+        let gate = PlayerLifecycleTransitionTestGate()
+        controller.transitionSuspensionForTesting = { kind in
+            if kind == .close { await gate.suspend() }
+        }
+        let close = Task {
+            await controller.closeAfterPlayback(requestID: firstRequestID)
+        }
+        try await gate.waitUntilSuspended()
+
+        let replacementRequestID = UUID()
+        let replacement = Task {
+            try await controller.prepareForPlayback(
+                requestID: replacementRequestID
+            )
+        }
+        let claimDeadline = Date().addingTimeInterval(5)
+        while !controller.ownsPlaybackForTesting(replacementRequestID),
+              Date() < claimDeadline {
+            await Task.yield()
+        }
+        let claimed = controller.ownsPlaybackForTesting(replacementRequestID)
+        XCTAssertTrue(claimed)
+        await gate.release()
+        await close.value
+        let player = try await replacement.value
+
+        XCTAssertEqual(player.renderOwnerID, original.renderOwnerID)
+        XCTAssertEqual(controller.renderPlayer?.renderOwnerID, original.renderOwnerID)
+        controller.transitionSuspensionForTesting = nil
+        await controller.shutdown()
+    }
+
+    @MainActor
+    func testStaleStopCannotStopAPlaybackThatClaimsOwnershipWhileStopWaits()
+        async throws {
+        let controller = PlayerLifecycleController(mode: .warmStop)
+        guard let original = controller.renderPlayer else {
+            throw XCTSkip("libmpv is unavailable in this test environment")
+        }
+        let firstRequestID = UUID()
+        _ = try await controller.prepareForPlayback(requestID: firstRequestID)
+        let gate = PlayerLifecycleTransitionTestGate()
+        controller.transitionSuspensionForTesting = { kind in
+            if kind == .stop { await gate.suspend() }
+        }
+        let stop = Task {
+            await controller.stop(ifOwnedBy: firstRequestID)
+        }
+        try await gate.waitUntilSuspended()
+
+        let replacementRequestID = UUID()
+        let replacement = Task {
+            try await controller.prepareForPlayback(
+                requestID: replacementRequestID
+            )
+        }
+        let claimDeadline = Date().addingTimeInterval(5)
+        while !controller.ownsPlaybackForTesting(replacementRequestID),
+              Date() < claimDeadline {
+            await Task.yield()
+        }
+        let claimed = controller.ownsPlaybackForTesting(replacementRequestID)
+        XCTAssertTrue(claimed)
+        await gate.release()
+        await stop.value
+        let player = try await replacement.value
+
+        XCTAssertEqual(player.renderOwnerID, original.renderOwnerID)
+        XCTAssertEqual(controller.renderPlayer?.renderOwnerID, original.renderOwnerID)
+        controller.transitionSuspensionForTesting = nil
         await controller.shutdown()
     }
 
@@ -1884,6 +2774,21 @@ final class OKVideoMacTests: XCTestCase {
             )?.id,
             channels[2].id
         )
+    }
+
+    func testProviderLiveReferenceIsNeverOpenedByBackgroundURLProbe() async throws {
+        let locator = try XtreamLivePlaybackLocator(
+            providerID: UUID(),
+            streamID: "42",
+            outputFormat: .ts
+        )
+        let stream = try LiveStream(
+            name: "TS",
+            target: .provider(.xtreamLive(locator))
+        )
+        XCTAssertNil(stream.url)
+        let result = await LiveStreamAvailabilityProber().result(for: stream)
+        XCTAssertEqual(result, .inconclusive)
     }
 
     func testLiveChannelNavigationNormalizesDuplicateAndUnavailableChannels() throws {
@@ -2015,6 +2920,66 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(candidates.isEmpty)
     }
 
+    func testXtreamLiveRecoveryStaysWithinCurrentChannel() throws {
+        let current = LiveChannel(
+            groupName: "News",
+            name: "Current",
+            streams: [
+                LiveStream(
+                    name: "HLS",
+                    url: try XCTUnwrap(URL(string: "https://example.com/current.m3u8"))
+                ),
+                LiveStream(
+                    name: "TS",
+                    url: try XCTUnwrap(URL(string: "https://example.com/current.ts"))
+                )
+            ]
+        )
+        let unrelated = try makeLiveChannel(
+            name: "Unrelated",
+            streamPath: "unrelated"
+        )
+
+        let candidates = LivePlaybackRecoveryPolicy.candidates(
+            channels: [current, unrelated],
+            startingChannel: current,
+            startingStream: current.streams[0],
+            scope: .currentChannel
+        )
+
+        XCTAssertEqual(
+            candidates.map { $0.channel.name },
+            ["Current", "Current"]
+        )
+        XCTAssertEqual(
+            candidates.map { $0.stream.name },
+            ["HLS", "TS"]
+        )
+    }
+
+    func testXtreamLiveFailurePolicyStopsOnAccountErrorsOnly() {
+        XCTAssertFalse(
+            XtreamLivePlaybackFailurePolicy.permitsFormatFallback(
+                after: "HTTP error 401 Unauthorized"
+            )
+        )
+        XCTAssertFalse(
+            XtreamLivePlaybackFailurePolicy.permitsFormatFallback(
+                after: "Account expired"
+            )
+        )
+        XCTAssertTrue(
+            XtreamLivePlaybackFailurePolicy.permitsFormatFallback(
+                after: "HTTP error 404 Not Found"
+            )
+        )
+        XCTAssertTrue(
+            XtreamLivePlaybackFailurePolicy.permitsFormatFallback(
+                after: "demuxer could not open stream"
+            )
+        )
+    }
+
     func testLiveSourceValidationRequiresEveryLineToBeDefinitivelyUnavailable() {
         XCTAssertTrue(
             LiveSourceValidationPolicy.shouldRemoveChannel(
@@ -2052,6 +3017,215 @@ final class OKVideoMacTests: XCTestCase {
             LiveSourceValidationPolicy.result(forHTTPStatus: 503),
             .inconclusive
         )
+    }
+
+
+    @MainActor
+    func testNativeXtreamAppleFallbackWithAppRendererNetworkGate() async throws {
+        guard ProcessInfo.processInfo.environment["OKVIDEOMAC_XTREAM_NETWORK_GATE"] == "1" else {
+            throw XCTSkip("Explicit public-network and renderer gate")
+        }
+        _ = NSApplication.shared
+        let url = URL(string: "https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_adv_example_hevc/master.m3u8")!
+        let response = try await URLSessionHTTPClient.isolatedEphemeral().send(HTTPRequest(
+            url: url, timeout: 15, earlyResponseLimitBytes: 256 * 1024, retryPolicy: .none
+        ))
+        let selection = try XCTUnwrap(HLSStartupSelection.select(from: response.body, baseURL: response.url))
+        try await verifyNativeXtreamRendering(url: url, selection: selection, expectedWidth: 1920)
+    }
+
+    @MainActor
+    func testNativeXtreamMuxRedirectWithAppRendererNetworkGate() async throws {
+        guard ProcessInfo.processInfo.environment["OKVIDEOMAC_XTREAM_NETWORK_GATE"] == "1" else {
+            throw XCTSkip("Explicit public-network and renderer gate")
+        }
+        try await verifyNativeXtreamRendering(
+            url: try XCTUnwrap(ProcessInfo.processInfo.environment["OKVIDEOMAC_XTREAM_REDIRECT_FIXTURE_URL"].flatMap(URL.init(string:))),
+            selection: nil, expectedWidth: nil
+        )
+    }
+
+    @MainActor
+    private func verifyNativeXtreamRendering(url: URL, selection: HLSStartupSelection?, expectedWidth: Int?) async throws {
+        _ = NSApplication.shared
+        let player = try MPVPlayerClient(compatibilityPolicy: .nativeXtreamLive)
+        try await player.setMuted(true)
+        let window = NSWindow(contentRect: NSRect(x: -2000, y: -2000, width: 640, height: 360), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let view = MPVOpenGLView(player: player, onError: { XCTFail("Renderer: \($0)") }, onSurfaceReady: { _ in }, onSurfaceUnavailable: { _ in })
+        window.contentView = view
+        view.frame = NSRect(x: 0, y: 0, width: 640, height: 360)
+        view.prepareOpenGL()
+        let progressed = expectation(description: "Actual app renderer and media timeline")
+        var latest = PlayerSnapshot()
+        var fulfilled = false
+        let reader = Task { @MainActor in
+            for await event in player.events {
+                if case .snapshot(let snapshot, _) = event {
+                    latest = snapshot
+                    if !fulfilled, snapshot.position > 1,
+                       snapshot.videoWidth > 0,
+                       snapshot.tracks.contains(where: { $0.type == .audio && $0.isSelected }) {
+                        fulfilled = true; progressed.fulfill()
+                    }
+                }
+            }
+        }
+        let draw = Task { @MainActor in
+            while !Task.isCancelled {
+                view.draw(view.bounds)
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+        }
+        let media = ResolvedMedia(url: url, headers: [:], format: "m3u8", siteKey: "xtream-live", sourceName: "public fixture", episodeName: "fixture", hlsStartupSelection: selection, compatibilityPolicy: .nativeXtreamLive)
+        do {
+            try await player.load(media, startPosition: nil, requestID: UUID())
+            await fulfillment(of: [progressed], timeout: 15)
+            if let expectedWidth { XCTAssertEqual(latest.videoWidth, expectedWidth) }
+            XCTAssertTrue(latest.tracks.contains(where: { $0.type == .audio && $0.isSelected }))
+            if selection != nil, let output = ProcessInfo.processInfo.environment["OKVIDEOMAC_XTREAM_FRAME_PATH"] {
+                try await player.screenshot(to: URL(fileURLWithPath: output))
+                XCTAssertTrue(FileManager.default.fileExists(atPath: output))
+            }
+        } catch {
+            draw.cancel(); reader.cancel(); view.tearDown(); window.close()
+            await player.shutdown(); throw error
+        }
+        draw.cancel(); reader.cancel(); view.tearDown(); window.close()
+        await player.shutdown()
+    }
+
+    @MainActor
+    func testUtilityPanelsFitContentAcrossWindowSizes() async throws {
+        for (naturalHeight, maximumHeight, expected) in [(80.0, 560.0, 80.0), (900.0, 560.0, 560.0), (900.0, 254.0, 254.0)] {
+            let host = NSHostingView(rootView:
+                PlayerUtilityPanelContent(maximumHeight: maximumHeight) {
+                    Color.red.frame(height: naturalHeight)
+                }.frame(width: 300)
+            )
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 700), styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            for _ in 0..<8 {
+                host.layoutSubtreeIfNeeded()
+                try await Task.sleep(nanoseconds: 25_000_000)
+            }
+            XCTAssertEqual(host.fittingSize.height, expected, accuracy: 2)
+            window.close()
+        }
+    }
+
+    @MainActor
+    func testNativeXtreamPendingLoadCanBeCancelledWithoutWaitingForDeadline() async throws {
+        let accepted = expectation(description: "Native media request connected")
+        let ready = expectation(description: "Fixture listening")
+        let listener = try NWListener(using: .tcp, on: .any)
+        var connections: [NWConnection] = []
+        listener.newConnectionHandler = { connection in
+            connections.append(connection)
+            connection.start(queue: .main)
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { _, _, _, _ in
+                accepted.fulfill()
+            }
+            // Intentionally never send headers, exercising a real blocked open.
+        }
+        listener.stateUpdateHandler = { if case .ready = $0 { ready.fulfill() } }
+        listener.start(queue: .main)
+        await fulfillment(of: [ready], timeout: 3)
+        let port = try XCTUnwrap(listener.port)
+        let controller = PlayerLifecycleController(mode: .warmStop)
+        defer { listener.cancel(); connections.forEach { $0.cancel() } }
+        let requestID = UUID()
+        let media = ResolvedMedia(url: URL(string: "http://127.0.0.1:\(port.rawValue)/slow.m3u8")!, headers: [:], siteKey: "xtream-live", sourceName: "fixture", episodeName: "fixture", compatibilityPolicy: .nativeXtreamLive)
+        let completed = expectation(description: "Cancelled load released lifecycle barrier")
+        let task = Task {
+            defer { completed.fulfill() }
+            do { try await controller.load(media, startPosition: nil, requestID: requestID); XCTFail("Unexpected load success") }
+            catch { XCTAssertTrue(error is CancellationError) }
+        }
+        await fulfillment(of: [accepted], timeout: 5)
+        let replacement = Task { try await controller.prepareForPlayback(requestID: UUID()) }
+        await fulfillment(of: [completed], timeout: 2)
+        let restored = try await replacement.value
+        XCTAssertEqual(restored.compatibilityPolicy, .existing)
+        _ = await task.result
+        await controller.shutdown()
+    }
+
+    func testNativeXtreamPreparationEnforcesTotalDeadline() async throws {
+        struct SlowClient: HTTPClient {
+            func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+                try await Task.sleep(nanoseconds: 60_000_000_000)
+                throw HTTPClientError.invalidResponse
+            }
+        }
+        let started = ProcessInfo.processInfo.systemUptime
+        do {
+            _ = try await NativeXtreamHLSPreparation.response(
+                client: SlowClient(), request: HTTPRequest(url: URL(string: "https://example.com/master.m3u8")!),
+                deadlineNanoseconds: 20_000_000
+            )
+            XCTFail("Expected absolute deadline")
+        } catch {
+            XCTAssertEqual(error as? HTTPClientError, .timeout)
+        }
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 1)
+    }
+
+    func testNativeXtreamProxyRoutingAndBypass() throws {
+        let remote = URL(string: "https://media.example/channel.m3u8")!
+        let settings: [String: Any] = ["HTTPSEnable": 1, "HTTPSProxy": "127.0.0.1", "HTTPSPort": 9999]
+        XCTAssertEqual(SystemMediaProxyResolver.resolve(for: remote, settings: settings, environment: [:]),
+                       .httpProxy(URL(string: "http://127.0.0.1:9999")!))
+        XCTAssertEqual(SystemMediaProxyResolver.resolve(for: remote, settings: settings, environment: ["no_proxy": ".example"]), .direct)
+        for text in ["http://127.0.0.2/x", "http://[::1]/x", "http://localhost/x", "file:///tmp/x"] {
+            XCTAssertEqual(SystemMediaProxyResolver.resolve(for: URL(string: text)!, settings: settings,
+                environment: ["http_proxy": "http://proxy.example:8888"]), .direct)
+        }
+        var bypassSettings = settings
+        bypassSettings["ExceptionsList"] = ["*.example"]
+        XCTAssertEqual(SystemMediaProxyResolver.resolve(for: remote, settings: bypassSettings, environment: [:]), .direct)
+        XCTAssertEqual(SystemMediaProxyResolver.resolve(for: remote, settings: ["SOCKSEnable": 1, "SOCKSProxy": "127.0.0.1", "SOCKSPort": 9999], environment: [:]), .inherited("unsupported-system-proxy"))
+        XCTAssertEqual(SystemMediaProxyResolver.resolve(for: remote, settings: [:], environment: ["http_proxy": "socks5://proxy.example:1080"]), .inherited("unsupported-environment-proxy"))
+        let options = Dictionary(uniqueKeysWithValues: MediaProxyDecision.direct.mpvOptions)
+        XCTAssertEqual(options["stream-lavf-o"], "http_proxy=")
+        XCTAssertEqual(options["demuxer-lavf-o"], "http_proxy=")
+        XCTAssertFalse(SystemMediaProxyResolver.bypasses(host: "notexample.com", list: "example.com"))
+        XCTAssertEqual(SystemMediaProxyResolver.resolve(for: remote, settings: [:], environment: ["http_proxy": "http://proxy.example:8888"]),
+                       .httpProxy(URL(string: "http://proxy.example:8888")!))
+    }
+
+    func testNativeXtreamDeadlineRequiresExplicitOptIn() {
+        var media = ResolvedMedia(url: URL(string: "https://example.com/live")!, headers: [:], siteKey: "xtream-live", sourceName: "x", episodeName: "y")
+        XCTAssertEqual(PlayerLoadTimeoutPolicy.seconds(for: media), 30)
+        media.compatibilityPolicy = .nativeXtreamLive
+        XCTAssertEqual(PlayerLoadTimeoutPolicy.seconds(for: media), 60)
+        media.nativeStartupBudgetSeconds = 51
+        XCTAssertEqual(PlayerLoadTimeoutPolicy.seconds(for: media), 51)
+        media.nativeStartupBudgetSeconds = 90
+        XCTAssertEqual(PlayerLoadTimeoutPolicy.seconds(for: media), 60)
+        media.nativeStartupBudgetSeconds = 0
+        XCTAssertEqual(PlayerLoadTimeoutPolicy.seconds(for: media), 1)
+        media.compatibilityPolicy = .existing
+        media.siteKey = "live"
+        XCTAssertEqual(PlayerLoadTimeoutPolicy.seconds(for: media), 8)
+    }
+
+    @MainActor
+    func testNativeXtreamInstanceDoesNotLeakIntoLegacyPlayback() async throws {
+        let controller = PlayerLifecycleController(mode: .warmStop)
+        let legacy = try await controller.prepareForPlayback(requestID: UUID())
+        let reused = try await controller.prepareForPlayback(requestID: UUID())
+        XCTAssertTrue(legacy === reused)
+        let native = try await controller.prepareForPlayback(requestID: UUID(), compatibilityPolicy: .nativeXtreamLive)
+        XCTAssertFalse(legacy === native)
+        XCTAssertEqual(native.compatibilityPolicy, .nativeXtreamLive)
+        let restored = try await controller.prepareForPlayback(requestID: UUID())
+        XCTAssertFalse(native === restored)
+        XCTAssertEqual(restored.compatibilityPolicy, .existing)
+        let reusedAgain = try await controller.prepareForPlayback(requestID: UUID())
+        XCTAssertTrue(restored === reusedAgain)
+        await controller.shutdown()
     }
 
     func testLivePlaybackUsesShorterLoadTimeoutThanOnDemandVideo() throws {
@@ -3025,6 +4199,305 @@ final class OKVideoMacTests: XCTestCase {
             XCTAssertEqual(state.activeSearchKeyword, "")
             XCTAssertNil(state.homeSearchReturnSection)
         }
+    }
+
+    private actor SuspendedDetailRequests {
+        private var pending: [String: CheckedContinuation<VideoDetail, Error>] = [:]
+        private var started: [String: CheckedContinuation<Void, Error>] = [:]
+        private var startTimeouts: [String: Task<Void, Never>] = [:]
+        private var isClosed = false
+
+        func detail(id: String) async throws -> VideoDetail {
+            guard !isClosed else { throw CancellationError() }
+            return try await withCheckedThrowingContinuation { continuation in
+                pending[id] = continuation
+                startTimeouts.removeValue(forKey: id)?.cancel()
+                started.removeValue(forKey: id)?.resume()
+            }
+        }
+
+        func waitUntilStarted(_ id: String) async throws {
+            guard !isClosed else { throw CancellationError() }
+            guard pending[id] == nil else { return }
+            try await withCheckedThrowingContinuation { continuation in
+                started[id] = continuation
+                startTimeouts[id] = Task { [weak self] in
+                    do {
+                        try await Task.sleep(nanoseconds: 5_000_000_000)
+                    } catch {
+                        return
+                    }
+                    guard !Task.isCancelled else { return }
+                    await self?.closeAfterStartTimeout(id)
+                }
+            }
+        }
+
+        private func closeAfterStartTimeout(_ id: String) {
+            guard started[id] != nil else { return }
+            isClosed = true
+            let waitingStarts = Array(started.values)
+            let waitingDetails = Array(pending.values)
+            started.removeAll()
+            pending.removeAll()
+            startTimeouts.values.forEach { $0.cancel() }
+            startTimeouts.removeAll()
+            let error = AppError.site("Detail fixture provider did not start within 5 seconds")
+            waitingStarts.forEach { $0.resume(throwing: error) }
+            waitingDetails.forEach { $0.resume(throwing: CancellationError()) }
+        }
+
+        func finish(_ summary: VideoSummary, fails: Bool = false) {
+            guard let continuation = pending.removeValue(forKey: summary.videoID) else {
+                return
+            }
+            if fails {
+                continuation.resume(throwing: AppError.site("Late fixture failure"))
+            } else {
+                continuation.resume(returning: VideoDetail(summary: summary, playSources: []))
+            }
+        }
+    }
+
+    private struct SuspendedDetailProvider: SiteProvider {
+        let requests: SuspendedDetailRequests
+        let site = SiteConfiguration(
+            key: "detail-fixture", name: "Detail Fixture", type: 1, api: "https://example.invalid/api"
+        )
+        let capability: SiteCapability = .standardJSON
+
+        func home() async throws -> SiteHome {
+            SiteHome(categories: [], recommendations: [])
+        }
+
+        func category(id: String, page: Int, filters: [String: String]) async throws -> VideoPage {
+            VideoPage(items: [], pagination: Pagination(page: page, pageCount: 1))
+        }
+
+        func detail(id: String) async throws -> VideoDetail {
+            try await requests.detail(id: id)
+        }
+
+        func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
+            VideoPage(items: [], pagination: Pagination(page: page, pageCount: 1))
+        }
+
+        func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
+            throw AppError.site("Playback is not part of this fixture")
+        }
+    }
+
+    @MainActor
+    private func searchDetailFixture() -> (AppState, SuspendedDetailRequests, [VideoSummary]) {
+        let requests = SuspendedDetailRequests()
+        let provider = SuspendedDetailProvider(requests: requests)
+        let state = AppState(environment: nil, initialProviders: [provider.site.key: provider])
+        let results = ["a", "b"].map {
+            VideoSummary(
+                siteKey: provider.site.key, siteName: provider.site.name,
+                videoID: $0, title: "返回测试 \($0)"
+            )
+        }
+        state.selectSection(.history)
+        state.searchFromSidebar("返回测试")
+        state.cancelSearch()
+        state.seedSearchResultsForTesting(results)
+        state.selectSearchSite(provider.site.key)
+        return (state, requests, results)
+    }
+
+    @MainActor
+    private func assertSearchDetailReturnContext(
+        _ state: AppState, results: [VideoSummary],
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        XCTAssertTrue(state.isHomeSearchPresented, file: file, line: line)
+        XCTAssertEqual(state.selectedSection, .home, file: file, line: line)
+        XCTAssertEqual(state.homeSearchReturnSection, .history, file: file, line: line)
+        XCTAssertEqual(state.searchDraftKeyword, "返回测试", file: file, line: line)
+        XCTAssertEqual(state.activeSearchKeyword, "返回测试", file: file, line: line)
+        XCTAssertEqual(state.selectedSearchSiteKey, "detail-fixture", file: file, line: line)
+        XCTAssertEqual(state.searchResults, results, file: file, line: line)
+    }
+
+    @MainActor
+    func testPendingSearchDetailDismissesImmediatelyAndRejectsLateSuccess() async throws {
+        let (state, requests, results) = searchDetailFixture()
+        let load = Task { await state.loadDetail(results[0]) }
+        try await requests.waitUntilStarted(results[0].videoID)
+        XCTAssertEqual(state.pendingDetailSummary, results[0])
+
+        state.dismissDetail()
+
+        XCTAssertFalse(state.isDetailPagePresented)
+        XCTAssertFalse(state.isLoading, "A dismissed detail must not retain the browser loading indicator")
+        assertSearchDetailReturnContext(state, results: results)
+        await requests.finish(results[0])
+        await load.value
+        XCTAssertNil(state.selectedDetail)
+        XCTAssertNil(state.pendingDetailSummary)
+        XCTAssertNil(state.presentedError)
+        assertSearchDetailReturnContext(state, results: results)
+    }
+
+    @MainActor
+    func testDismissedDetailSuccessAndFailureCannotFinishNewDetailLoading() async throws {
+        for oldRequestFails in [false, true] {
+            let (state, requests, results) = searchDetailFixture()
+            let oldLoad = Task { await state.loadDetail(results[0]) }
+            try await requests.waitUntilStarted(results[0].videoID)
+            state.dismissDetail()
+            let newLoad = Task { await state.loadDetail(results[1]) }
+            try await requests.waitUntilStarted(results[1].videoID)
+
+            await requests.finish(results[0], fails: oldRequestFails)
+            await oldLoad.value
+
+            XCTAssertEqual(state.pendingDetailSummary, results[1])
+            XCTAssertTrue(state.isDetailPagePresented)
+            XCTAssertNil(state.selectedDetail)
+            XCTAssertNil(state.presentedError)
+            XCTAssertFalse(state.isLoading, "Details own their pending presentation without borrowing home loading state")
+            await requests.finish(results[1])
+            await newLoad.value
+            XCTAssertNil(state.pendingDetailSummary)
+            XCTAssertEqual(state.selectedDetail?.summary, results[1])
+            state.dismissDetail()
+            assertSearchDetailReturnContext(state, results: results)
+        }
+    }
+
+    @MainActor
+    func testLoadedSearchDetailBackPreservesKeywordFilterAndResults() async throws {
+        let (state, requests, results) = searchDetailFixture()
+        let load = Task { await state.loadDetail(results[0]) }
+        try await requests.waitUntilStarted(results[0].videoID)
+        await requests.finish(results[0])
+        await load.value
+        XCTAssertEqual(state.selectedDetail?.summary, results[0])
+
+        state.dismissDetail()
+
+        XCTAssertFalse(state.isDetailPagePresented)
+        XCTAssertFalse(state.isLoading)
+        assertSearchDetailReturnContext(state, results: results)
+    }
+
+    @MainActor
+    func testSidebarSearchLeavesLoadedDetailFromEveryOrigin() async throws {
+        for origin: AppSection in [.home, .favorites, .history] {
+            let (state, requests, results) = searchDetailFixture()
+            state.returnFromSearchToHome()
+            state.selectSection(origin)
+            let load = Task { await state.loadDetail(results[0]) }
+            try await requests.waitUntilStarted(results[0].videoID)
+            await requests.finish(results[0])
+            await load.value
+            XCTAssertTrue(state.isDetailPagePresented)
+
+            state.searchFromSidebar("  新关键词  ")
+
+            XCTAssertFalse(state.isDetailPagePresented)
+            XCTAssertTrue(state.isHomeSearchPresented)
+            XCTAssertEqual(state.selectedSection, .home)
+            XCTAssertEqual(state.homeSearchReturnSection, origin)
+            XCTAssertEqual(state.activeSearchKeyword, "新关键词")
+            XCTAssertEqual(state.searchDraftKeyword, "新关键词")
+            XCTAssertTrue(state.searchResults.isEmpty)
+            state.cancelSearch()
+            state.returnFromSearchToOrigin()
+            XCTAssertEqual(state.selectedSection, origin)
+        }
+    }
+
+    @MainActor
+    func testSidebarSearchFromDetailRejectsOldCompletionAndReturnSnapshot() async throws {
+        for loadedBeforeSearch in [false, true] {
+            for oldRequestFails in [false, true] where !loadedBeforeSearch || !oldRequestFails {
+                let (state, requests, results) = searchDetailFixture()
+                let load = Task { await state.loadDetail(results[0]) }
+                try await requests.waitUntilStarted(results[0].videoID)
+                if loadedBeforeSearch {
+                    await requests.finish(results[0])
+                    await load.value
+                }
+
+                state.searchFromSidebar("新搜索")
+
+                XCTAssertFalse(state.isDetailPagePresented)
+                XCTAssertTrue(state.isHomeSearchPresented)
+                XCTAssertTrue(state.isSearching)
+                XCTAssertEqual(state.homeSearchReturnSection, .history)
+                XCTAssertEqual(state.activeSearchKeyword, "新搜索")
+                XCTAssertNil(state.selectedSearchSiteKey)
+                XCTAssertTrue(state.searchFolderPath.isEmpty)
+                XCTAssertTrue(state.searchResults.isEmpty)
+                state.cancelSearch()
+                let newResults = [results[1]]
+                state.seedSearchResultsForTesting(newResults)
+                if !loadedBeforeSearch {
+                    await requests.finish(results[0], fails: oldRequestFails)
+                    await load.value
+                }
+                XCTAssertFalse(state.isDetailPagePresented)
+                XCTAssertNil(state.presentedError)
+                XCTAssertEqual(state.searchResults, newResults)
+
+                // No stale detail snapshot may reinstate the old source filter.
+                state.dismissDetail()
+                XCTAssertNil(state.selectedSearchSiteKey)
+                XCTAssertEqual(state.activeSearchKeyword, "新搜索")
+                XCTAssertEqual(state.searchResults, newResults)
+                state.returnFromSearchToOrigin()
+                XCTAssertEqual(state.selectedSection, .history)
+            }
+        }
+    }
+
+    @MainActor
+    func testClearingSearchFromDetailDoesNotReviveTheOldSearch() async throws {
+        for loadedBeforeClear in [false, true] {
+            let (state, requests, results) = searchDetailFixture()
+            let load = Task { await state.loadDetail(results[0]) }
+            try await requests.waitUntilStarted(results[0].videoID)
+            if loadedBeforeClear {
+                await requests.finish(results[0])
+                await load.value
+            }
+
+            state.clearGlobalVideoSearch()
+
+            XCTAssertFalse(state.isDetailPagePresented)
+            XCTAssertFalse(state.isHomeSearchPresented)
+            XCTAssertEqual(state.selectedSection, .history)
+            XCTAssertEqual(state.searchDraftKeyword, "")
+            XCTAssertEqual(state.activeSearchKeyword, "")
+            if !loadedBeforeClear {
+                await requests.finish(results[0])
+                await load.value
+            }
+            state.dismissDetail()
+            XCTAssertFalse(state.isHomeSearchPresented)
+            XCTAssertFalse(state.isDetailPagePresented)
+            XCTAssertEqual(state.selectedSection, .history)
+            XCTAssertNil(state.selectedSearchSiteKey)
+        }
+    }
+
+    @MainActor
+    func testEmptySidebarSubmissionKeepsDetailAndSearchContext() async throws {
+        let (state, requests, results) = searchDetailFixture()
+        let load = Task { await state.loadDetail(results[0]) }
+        try await requests.waitUntilStarted(results[0].videoID)
+        await requests.finish(results[0])
+        await load.value
+
+        state.searchFromSidebar(" \n ")
+
+        XCTAssertTrue(state.isDetailPagePresented)
+        assertSearchDetailReturnContext(state, results: results)
+        state.dismissDetail()
+        assertSearchDetailReturnContext(state, results: results)
     }
 
     @MainActor
@@ -10340,9 +11813,11 @@ final class OKVideoMacTests: XCTestCase {
         let gate = NodeReadinessTestGate()
         let workflowCount = NodeReadinessTestCounter()
         let launcher = AndroidEmulatorLauncherMock()
+        let admitted = expectation(description: "All fallback callers entered startup actor")
+        admitted.expectedFulfillmentCount = 10
         let callers = (0..<10).map { _ in
             Task {
-                try await startup.ensureRuntime {
+                try await startup.ensureRuntimeForConcurrentTest(admitted: admitted) {
                     await workflowCount.increment()
                     await launcher.recordLaunch()
                     await launcher.recordLaunch()
@@ -10359,6 +11834,7 @@ final class OKVideoMacTests: XCTestCase {
             await Task.yield()
         }
         XCTAssertTrue(sawFallbackWorkflow)
+        await fulfillment(of: [admitted], timeout: 5)
         var observedWorkflowCount = await workflowCount.value
         var observedLaunchCount = await launcher.launchInvocationCount
         XCTAssertEqual(observedWorkflowCount, 1)
@@ -10508,10 +11984,12 @@ final class OKVideoMacTests: XCTestCase {
         let startup = AndroidRuntimeStartupSingleFlight()
         let launchGate = NodeReadinessTestGate()
         let launcher = AndroidEmulatorLauncherMock()
+        let admitted = expectation(description: "All runtime callers entered startup actor")
+        admitted.expectedFulfillmentCount = 10
 
         let callers = (0..<10).map { _ in
             Task {
-                try await startup.ensureRuntime {
+                try await startup.ensureRuntimeForConcurrentTest(admitted: admitted) {
                     await launcher.launch(waitingOn: launchGate)
                 }
             }
@@ -10527,9 +12005,7 @@ final class OKVideoMacTests: XCTestCase {
             await Task.yield()
         }
         XCTAssertTrue(didLaunch)
-        for _ in 0..<100 {
-            await Task.yield()
-        }
+        await fulfillment(of: [admitted], timeout: 5)
         var launchInvocationCount = await launcher.launchInvocationCount
         XCTAssertEqual(launchInvocationCount, 1)
 
@@ -10884,6 +12360,26 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertLessThanOrEqual(launchCount, 1)
     }
 
+    func testPrivateAVDOwnershipNormalizesAliasesAndRejectsOutsideFiles() throws {
+        let root = URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent("AVDOwnership-\(UUID().uuidString)")
+        let avd = root.appendingPathComponent("private.avd")
+        try FileManager.default.createDirectory(at: avd, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        // lsof reports opened files; Foundation resolves aliases of existing paths.
+        try Data().write(to: avd.appendingPathComponent("userdata.img"))
+        let alias = root.appendingPathComponent("alias.avd")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: avd)
+        let matches = AndroidDexBridgeRuntime.privateAVDFilePathMatches
+        XCTAssertTrue(matches(alias.appendingPathComponent("userdata.img").path, avd))
+        XCTAssertTrue(matches(avd.appendingPathComponent("userdata.img").path, alias))
+        XCTAssertTrue(matches("/private" + avd.appendingPathComponent("userdata.img").path, avd))
+        XCTAssertFalse(matches(avd.path + "-other/userdata.img", avd))
+        XCTAssertFalse(matches(root.appendingPathComponent("foreign.avd/userdata.img").path, avd))
+        XCTAssertFalse(matches(avd.path + "/../foreign.avd/userdata.img", avd))
+        XCTAssertFalse(matches("relative/userdata.img", avd))
+    }
+
     func testAndroidRealLifecycleStartAdoptAndStop() async throws {
         guard ProcessInfo.processInfo.environment[
             "OKVIDEOMAC_RUN_ANDROID_INTEGRATION"
@@ -10943,7 +12439,11 @@ final class OKVideoMacTests: XCTestCase {
 
             await restartedRuntime.stop()
             let stopped = await restartedRuntime.diagnosticSnapshot()
-            XCTAssertFalse(stopped.emulatorProcessRunning)
+            let shutdownEvidence = (stopped.lifecycleConflictReason ?? "none")
+                + " | " + stopped.recentCommands.suffix(8).map {
+                    "\($0.category): exit=\($0.exitCode), timeout=\($0.timedOut), duration=\($0.duration)"
+                }.joined(separator: "; ")
+            XCTAssertFalse(stopped.emulatorProcessRunning, shutdownEvidence)
             XCTAssertEqual(stopped.shutdownMechanism, .adbEmuKill)
             XCTAssertNotNil(stopped.shutdownCompletedAt)
             XCTAssertFalse(stopped.shutdownForced)
@@ -13440,6 +14940,61 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(classic, NSSize(width: 1_200, height: 900))
     }
 
+    func testPlayerMinimumWindowFitsControlsForWideAndTallVideo() {
+        for ratio in [16.0 / 9.0, 2.4, 32.0 / 9.0, 4.0 / 3.0, 9.0 / 16.0] {
+            let minimum = PlayerWindowPreferencePolicy.minimumContentSize(aspectRatio: ratio)
+            XCTAssertGreaterThanOrEqual(minimum.width, 640)
+            XCTAssertGreaterThanOrEqual(minimum.height, 360)
+            XCTAssertEqual(minimum.width / minimum.height, ratio, accuracy: 0.0001)
+            var preference = PlayerWindowPreference.default
+            preference.viewingWidth = 640
+            let restored = PlayerWindowPreferencePolicy.contentSize(
+                preference: preference, aspectRatio: ratio,
+                maximum: NSSize(width: 4_000, height: 3_000)
+            )
+            XCTAssertEqual(restored, minimum)
+        }
+    }
+
+    func testPlayerPanelsRemainInsideMinimumViewportAndAboveControls() {
+        for size in [CGSize(width: 640, height: 360), CGSize(width: 864, height: 360), CGSize(width: 1200, height: 675)] {
+            let layout = PlayerOverlayLayout(viewportSize: size)
+            XCTAssertLessThanOrEqual(layout.panelMaximumSize.width + 42, size.width)
+            XCTAssertLessThanOrEqual(layout.panelMaximumSize.height + 106, size.height)
+            XCTAssertGreaterThan(layout.panelMaximumSize.height, 200)
+        }
+        XCTAssertTrue(PlayerOverlayLayout(viewportSize: CGSize(width: 640, height: 360)).isCompact)
+        XCTAssertTrue(PlayerOverlayLayout(viewportSize: CGSize(width: 759, height: 450)).isCompact)
+        XCTAssertFalse(PlayerOverlayLayout(viewportSize: CGSize(width: 760, height: 450)).isCompact)
+    }
+
+    func testPlayerUtilityInteractionPreventsAutoHide() {
+        for live in [false, true] {
+            XCTAssertFalse(PlayerControlVisibilityPolicy.shouldAutoHide(
+                isLivePlayback: live, controlsHovering: false,
+                isFailed: false, keepsControlsVisible: true, isPlaying: true
+            ))
+        }
+    }
+
+    @MainActor
+    func testPlayerRootAcceptsMinimumViewportWithoutOverflow() throws {
+        guard #available(macOS 13.0, *) else {
+            throw XCTSkip("Hosting controller sizeThatFits requires macOS 13")
+        }
+        let state = AppState(environment: nil)
+        state.isPlayerPresented = true
+        let host = NSHostingController(rootView:
+            PlayerPlaybackWindowRoot(appState: state).environmentObject(state)
+        )
+        host.sizingOptions = []
+        for size in [CGSize(width: 640, height: 360), CGSize(width: 759, height: 360), CGSize(width: 800, height: 450)] {
+            let fitted = host.sizeThatFits(in: size)
+            XCTAssertLessThanOrEqual(fitted.width, size.width)
+            XCTAssertLessThanOrEqual(fitted.height, size.height)
+        }
+    }
+
     func testAutomaticPlayerWindowFitsAvailableScreenWithoutChangingRatio() {
         var preference = PlayerWindowPreference.default
         preference.viewingWidth = 1_600
@@ -14713,6 +16268,50 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(BrowseSegmentedNavigationMetrics.controlHeight, 32)
     }
 
+    @MainActor
+    func testBrowserBackButtonHitsTheEntire32PointControl() {
+        let button = BrowserToolbarBackNSButton()
+        let parent = NSView(frame: NSRect(x: 0, y: 0, width: 64, height: 64))
+        button.frame.origin = NSPoint(x: 16, y: 16)
+        parent.addSubview(button)
+
+        XCTAssertEqual(button.intrinsicContentSize, NSSize(width: 32, height: 32))
+        // Test edges and corners, not just the chevron at the center. The old
+        // icon-sized toolbar control missed clicks in this surrounding area.
+        for x in [0.5, 4, 8, 16, 24, 28, 31.5] {
+            for y in [0.5, 4, 8, 16, 24, 28, 31.5] {
+                XCTAssertTrue(parent.hitTest(NSPoint(x: 16 + x, y: 16 + y)) === button)
+            }
+        }
+        XCTAssertFalse(button.mouseDownCanMoveWindow)
+        XCTAssertTrue(button.acceptsFirstMouse(for: nil))
+    }
+
+    @MainActor
+    func testBrowserBackButtonReusedControlDispatchesOnlyTheCurrentAction() {
+        // NSControl action dispatch requires an application even in CLI XCTest.
+        _ = NSApplication.shared
+        let button = BrowserToolbarBackNSButton()
+        var oldRouteCalls = 0
+        var newRouteCalls = 0
+        button.configure(help: "Old route", identifier: "detail.back") {
+            oldRouteCalls += 1
+        }
+        button.performClick(nil)
+        XCTAssertEqual(oldRouteCalls, 1)
+
+        button.configure(help: "Current route", identifier: "search.back") {
+            newRouteCalls += 1
+        }
+        button.performClick(nil)
+        XCTAssertEqual(oldRouteCalls, 1)
+        XCTAssertEqual(newRouteCalls, 1)
+        XCTAssertEqual(button.accessibilityIdentifier(), "search.back")
+        XCTAssertEqual(button.accessibilityLabel(), "Current route")
+        XCTAssertEqual(button.toolTip, "Current route")
+        XCTAssertTrue(button.isEnabled)
+    }
+
     func testHomeCategoryNavigationHidesMoreAtExactFit() {
         let candidates = ["a", "b", "c"].map {
             HomeCategoryNavigationCandidate(id: $0, width: 72)
@@ -14798,6 +16397,7 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(AppSidebarMetrics.horizontalInset, 10)
         XCTAssertEqual(AppSidebarMetrics.topInset, 0)
         XCTAssertEqual(AppSidebarMetrics.searchToListSpacing, 16)
+        XCTAssertEqual(AppSidebarMetrics.rowHeight, 36)
 
         let background = NSVisualEffectView()
         AppSidebarNativePolicy.configure(background: background)
@@ -14816,6 +16416,68 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertNil(outlineView.headerView)
         XCTAssertFalse(outlineView.allowsEmptySelection)
         XCTAssertFalse(outlineView.allowsMultipleSelection)
+    }
+
+    @MainActor
+    func testBrowserSidebarUsesOneNativeSymbolAndTextColumn() throws {
+        let sourceList = NativeSidebarSourceList(
+            text: .constant(""),
+            presentation: SidebarSearchPresentationPolicy.presentation(
+                for: .home
+            ),
+            isSearchEnabled: true,
+            focusRequest: 0,
+            selectedSection: .home,
+            onTextChange: { _ in },
+            onSubmit: {},
+            onExitSearch: { true },
+            onSelect: { _ in }
+        )
+        let coordinator = sourceList.makeCoordinator()
+        let outlineView = NSOutlineView()
+        AppSidebarNativePolicy.configure(outlineView: outlineView)
+        XCTAssertEqual(
+            coordinator.outlineView(
+                outlineView,
+                heightOfRowByItem: NSObject()
+            ),
+            AppSidebarMetrics.rowHeight
+        )
+
+        let cells = AppSection.allCases.map { section in
+            let cell = NativeSidebarSourceList.ItemCellView(
+                frame: NSRect(
+                    x: 0,
+                    y: 0,
+                    width: AppSidebarMetrics.width,
+                    height: AppSidebarMetrics.rowHeight
+                )
+            )
+            cell.configure(section: section)
+            cell.layoutSubtreeIfNeeded()
+            return cell
+        }
+
+        let textMinX = try cells.map {
+            try XCTUnwrap($0.textField).frame.minX
+        }
+        let symbolCenterX = try cells.map {
+            try XCTUnwrap($0.imageView).frame.midX
+        }
+        let textDrift = try XCTUnwrap(textMinX.max())
+            - XCTUnwrap(textMinX.min())
+        let symbolDrift = try XCTUnwrap(symbolCenterX.max())
+            - XCTUnwrap(symbolCenterX.min())
+
+        // 0.5 pt is one physical pixel on the Retina display used for the
+        // reference capture. Native AppKit layout is expected to be exact.
+        XCTAssertLessThanOrEqual(textDrift, 0.5)
+        XCTAssertLessThanOrEqual(symbolDrift, 0.5)
+        XCTAssertTrue(cells.allSatisfy {
+            $0.imageView?.translatesAutoresizingMaskIntoConstraints == true
+                && $0.textField?.translatesAutoresizingMaskIntoConstraints
+                    == true
+        })
     }
 
     @MainActor
@@ -18396,6 +20058,10 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             from: fixture.sourceURL,
             configurationID: configurationID
         )
+        let supportsCurrent = await service.supportsProfileImport(configurationID: configurationID)
+        let supportsOther = await service.supportsProfileImport(configurationID: UUID())
+        XCTAssertTrue(supportsCurrent)
+        XCTAssertFalse(supportsOther)
         let profileData = Data(
             #"{"sites":{"list":[{"key":"alist-mounted","enable":true}]},"pans":{"list":[]},"danmu":{"urls":[],"autoPush":false},"color":[],"secretMarker":"profile-only"}"#.utf8
         )
@@ -18433,6 +20099,8 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             0o600
         )
         await service.stop()
+        let supportsStopped = await service.supportsProfileImport(configurationID: configurationID)
+        XCTAssertFalse(supportsStopped)
     }
 
     func testContractBProfileNamespaceSurvivesBundleVersionAndPinChanges() throws {
@@ -22349,6 +24017,36 @@ private actor ConfigurationCancellationTestRecorder {
 
     func recordAcknowledged(_ requestID: UUID) {
         events.append("ack:\(requestID)")
+    }
+}
+
+private actor PlayerLifecycleTransitionTestGate {
+    private var isSuspended = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func suspend() async {
+        isSuspended = true
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func waitUntilSuspended() async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while !isSuspended {
+            guard Date() < deadline else {
+                throw AppError.playback(
+                    "Timed out waiting for lifecycle test suspension"
+                )
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+        isSuspended = false
     }
 }
 

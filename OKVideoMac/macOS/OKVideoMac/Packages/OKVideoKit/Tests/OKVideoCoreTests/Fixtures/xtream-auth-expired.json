@@ -1,0 +1,12 @@
+{
+  "user_info": {
+    "auth": 0,
+    "status": "Expired",
+    "exp_date": "1600000000",
+    "is_trial": "false",
+    "active_cons": null,
+    "max_connections": "1",
+    "allowed_output_formats": "ts"
+  },
+  "server_info": {}
+}

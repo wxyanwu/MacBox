@@ -11,7 +11,6 @@ private enum DetailPageLayout {
 }
 
 struct DetailLoadingView: View {
-    @EnvironmentObject private var state: AppState
     let summary: VideoSummary
 
     var body: some View {
@@ -51,12 +50,33 @@ struct DetailLoadingView: View {
         }
         .browserToolbarScrollSurface(named: DetailPageLayout.coordinateSpaceName)
         .background(AppSurfacePalette.background.ignoresSafeArea())
-        .navigationTitle("")
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                DetailBackButton { state.dismissDetail() }
-            }
+    }
+}
+
+/// The route hosts this control alongside Back so changing detail content
+/// never replaces the window's navigation toolbar.
+struct DetailFavoriteButton: View {
+    @EnvironmentObject private var state: AppState
+    let detail: VideoDetail
+
+    private var isFavorite: Bool {
+        state.favorites.contains { $0.id == detail.summary.id }
+    }
+
+    private var title: String {
+        isFavorite
+            ? L10n.string("detail.unfavorite", fallback: "Remove from Favorites")
+            : L10n.string("detail.favorite", fallback: "Add to Favorites")
+    }
+
+    var body: some View {
+        Button {
+            Task { await state.toggleFavorite(detail) }
+        } label: {
+            Label(title, systemImage: isFavorite ? "star.fill" : "star")
         }
+        .help(title)
+        .accessibilityLabel(title)
     }
 }
 
@@ -108,34 +128,6 @@ struct DetailView: View {
         }
         .browserToolbarScrollSurface(named: DetailPageLayout.coordinateSpaceName)
         .background(AppSurfacePalette.background.ignoresSafeArea())
-        .navigationTitle("")
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                DetailBackButton { state.dismissDetail() }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    Task { await state.toggleFavorite(detail) }
-                } label: {
-                    Label(
-                        isFavorite
-                            ? L10n.string("detail.unfavorite", fallback: "Remove from Favorites")
-                            : L10n.string("detail.favorite", fallback: "Add to Favorites"),
-                        systemImage: isFavorite ? "star.fill" : "star"
-                    )
-                }
-                .help(
-                    isFavorite
-                        ? L10n.string("detail.unfavorite", fallback: "Remove from Favorites")
-                        : L10n.string("detail.favorite", fallback: "Add to Favorites")
-                )
-                .accessibilityLabel(
-                    isFavorite
-                        ? L10n.string("detail.unfavorite", fallback: "Remove from Favorites")
-                        : L10n.string("detail.favorite", fallback: "Add to Favorites")
-                )
-            }
-        }
         .onAppear {
             performInitialSelection()
             // Report after SwiftUI has mounted the real detail tree and the
@@ -506,10 +498,6 @@ struct DetailView: View {
         allPresentations.lazy.filter { $0.episodeNumber != nil }.prefix(2).count == 2
     }
 
-    private var isFavorite: Bool {
-        state.favorites.contains { $0.id == detail.summary.id }
-    }
-
     private var primaryEpisode: PlayEpisode? {
         selectedSource?.episodes.first
     }
@@ -571,18 +559,6 @@ struct DetailView: View {
                 episode: episode
             )
         }
-    }
-}
-
-private struct DetailBackButton: View {
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Label(L10n.string("common.back", fallback: "Back"), systemImage: "chevron.left")
-        }
-        .help(L10n.string("common.back-previous", fallback: "Back to the previous page"))
-        .accessibilityLabel(L10n.string("common.back-previous", fallback: "Back to the previous page"))
     }
 }
 

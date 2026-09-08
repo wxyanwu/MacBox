@@ -1,8 +1,8 @@
 # Compatibility
 
-- 对照版本：0.5.0（Build 99）
-- 最近更新：2026-09-07
-- 当前公开正式版本：0.5.0（Build 99），Apple Silicon / arm64 / macOS 12.0+
+- 对照版本：0.6.0（Build 100）
+- 最近更新：2026-09-09
+- 当前公开正式版本：0.6.0（Build 100），Apple Silicon / arm64 / macOS 12.0+
 
 ## 概述
 
@@ -57,6 +57,28 @@ OKVideoMac 的兼容性主要取决于源格式、站点类型、运行时、API
 
 Native Provider 处理 type 0、1、4，不依赖 QuickJS、Node 或 Android。它实现首页、
 分类、详情、搜索和播放地址交接；不同 CMS 的非标准字段和响应仍可能导致不兼容。
+
+### Native Xtream
+
+状态：`Supported`，按已实现的 Xtream-compatible API 子集定义。
+
+| 能力 | 状态 | 边界 |
+| --- | --- | --- |
+| Authentication | Supported | Active 认证及过期/禁用/无效响应拒绝；密码仅存 Keychain |
+| Movies | Supported | 分类、列表、详情、播放；空 metadata 数组可回退目录信息 |
+| Series | Supported | 分类、列表、详情、Season/Episode 与连续播放 |
+| Search | Supported | Movie + Series 本地索引和聚合搜索接入 |
+| Basic Live | Supported | 分类、频道、搜索、收藏/隐藏、刷新及同频道 TS/HLS 有限回退 |
+| Xtream EPG / catch-up / timeshift / direct_source | Unsupported | 不从导入 M3U/XMLTV 的能力推导 Native Xtream 支持 |
+
+Native Live 单独使用静态 HTTP 代理和 HTTPS CONNECT 决策，进入/离开该策略时
+销毁旧播放器实例，避免网络参数残留。普通 VOD 为 30 秒、导入 Live 为 8 秒，
+Native Live 为最多 60 秒；切台/取消可提前结束旧加载。PAC、SOCKS、认证代理与
+逐重定向/分片的系统路由没有完整实现。
+
+复杂 master 的受控处理只出现在已有的备用 HLS 尝试中，保留匹配的音频和字幕组；
+最多检查 10 秒及不足 256 KiB 数据，未知语义继续原地址。它不是通用 HLS 重写器，
+也不保证所有复杂 master 快速起播或所有服务商兼容。
 
 ### QuickJS
 
@@ -140,6 +162,8 @@ deployment support 不代表 macOS 12、13、15 已完成 Managed Runtime 实机
 | HLS `.m3u8` 媒体 URL | Supported | 作为频道媒体地址播放；HLS segment manifest 不是频道列表 |
 | TVBox/FongMi 配置顶层 `lives` | Unsupported | 字段可以解析和保存，但尚未接入独立直播源导入器 |
 | catchup / timeshift | Unsupported | 当前未实现 |
+
+Native Xtream Basic Live 使用独立的 Provider 目录和引用；不导出带账号的媒体 URL。
 
 ## EPG
 
@@ -315,9 +339,9 @@ App 支持范围和 Managed Android Runtime 实机验证是两个不同结论：
 | macOS 12.0+ | Supported | Info.plist 和全部 Mach-O `minos` 由包体脚本验证 |
 | Intel Mac / Universal Binary | Unsupported | 当前只交付 arm64 |
 | 本地 Hardened Runtime 包 | Supported | ad-hoc 签名，仅主 App 使用开发期 Library Validation 例外 |
-| Developer ID 分发 | Supported | 0.5.0（Build 99）正式 DMG 使用 Developer ID Application 与 secure timestamp 签名，Hardened Runtime、嵌套签名和权限边界由发布门禁验证 |
-| Notarization / Staple / Gatekeeper | Supported | 0.5.0（Build 99）只有在 Apple notarization 返回 `Accepted` 并通过 staple、`stapler validate` 与 Gatekeeper 后才发布 |
-| 0.5.0（Build 99）正式发布 | Supported | DMG、内部 ZIP、源码、四份 SBOM、Notices 和 APK 由外层 manifest/SHA256SUMS 绑定到 tag `v0.5.0` 指向的 exact commit |
+| Developer ID 分发 | Supported | 0.6.0（Build 100）正式 DMG 使用 Developer ID Application 与 secure timestamp 签名，Hardened Runtime、嵌套签名和权限边界由发布门禁验证 |
+| Notarization / Staple / Gatekeeper | Supported | 0.6.0（Build 100）只有在 Apple notarization 返回 `Accepted` 并通过 staple、`stapler validate` 与 Gatekeeper 后才发布 |
+| 0.6.0（Build 100）正式发布 | Supported | DMG、内部 ZIP、源码、四份 SBOM、Notices 和 APK 由外层 manifest/SHA256SUMS 绑定到 tag `v0.6.0` 指向的 exact commit |
 | App Sandbox | Not Applicable | 当前为 Developer ID 外部分发目标；Sandbox 与 Hardened Runtime 是不同边界 |
 
 ## 明确不提供

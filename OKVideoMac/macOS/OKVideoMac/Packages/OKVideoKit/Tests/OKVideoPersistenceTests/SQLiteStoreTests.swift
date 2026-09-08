@@ -71,6 +71,40 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(activeID, imported.id)
     }
 
+    func testXtreamConfigurationRoundTripsAsTextKindWithoutSchemaMigration()
+        async throws {
+        let store = try makeStore()
+        let providerID = UUID()
+        let descriptor = try XtreamProviderConfiguration(
+            providerID: providerID,
+            displayName: "Xtream Fixture",
+            serverBaseURL: XCTUnwrap(
+                URL(string: "http://example.invalid:8080/iptv")
+            )
+        )
+        let record = StoredConfiguration(
+            id: providerID,
+            name: descriptor.displayName,
+            sourceKind: .xtream,
+            sourceValue: descriptor.serverBaseURL.absoluteString,
+            baseURL: descriptor.serverBaseURL,
+            rawData: try descriptor.encoded(),
+            updatedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            isActive: true
+        )
+
+        try await store.saveConfiguration(record)
+
+        let activeConfiguration = try await store.activeConfiguration()
+        let restored = try XCTUnwrap(activeConfiguration)
+        XCTAssertEqual(restored, record)
+        XCTAssertEqual(restored.sourceKind, .xtream)
+        XCTAssertNil(
+            String(data: restored.rawData, encoding: .utf8)?
+                .range(of: "password", options: .caseInsensitive)
+        )
+    }
+
     func testConfigurationHistoryRestoreRemapsAndWritesAtomically() async throws {
         let store = try makeStore()
         let imported = StoredConfiguration(
@@ -396,6 +430,60 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertFalse(rawText.localizedCaseInsensitiveContains("referer"))
         XCTAssertFalse(rawText.localizedCaseInsensitiveContains("cookie"))
         XCTAssertFalse(rawText.localizedCaseInsensitiveContains("authorization"))
+    }
+
+    func testXtreamHistoryPersistsOnlyOpaqueLocatorAndDropsCredentialURL()
+        async throws {
+        let databaseURL = try makeDatabaseURL()
+        let store = try SQLiteStore(databaseURL: databaseURL)
+        let providerID = UUID()
+        let reference = PlaybackResourceReference(
+            configurationIdentity: providerID.uuidString.lowercased(),
+            siteIdentity: "xtream:\(providerID.uuidString.lowercased())",
+            providerKind: "xtream",
+            providerVersion: 1,
+            stableResourceLocator: "xtr1.m.31303031.6d6b76",
+            sourceIdentity: "xtr1.movie.31303031",
+            episodeIdentity: "xtr1.movie.31303031",
+            stability: .providerStable
+        )
+        let record = HistoryRecord(
+            configurationID: providerID,
+            siteKey: reference.siteIdentity,
+            videoID: "xtr.movie.31303031",
+            title: "Fixture Movie",
+            sourceKey: reference.sourceIdentity,
+            episodeReference: reference.stableResourceLocator,
+            mediaReference: "https://example.invalid/movie/user-name/secret-password/1001.mkv",
+            playbackReference: HistoryPlaybackReference(
+                sourceIdentity: reference.sourceIdentity,
+                resourceIdentity: reference.episodeIdentity,
+                providerResourceReference: reference
+            )
+        )
+
+        try await store.saveHistory(record, incognito: false)
+
+        let history = try await store.history()
+        let stored = try XCTUnwrap(history.first)
+        XCTAssertEqual(stored.episodeReference, reference.stableResourceLocator)
+        XCTAssertNil(stored.mediaReference)
+        XCTAssertEqual(
+            stored.playbackReference?.providerResourceReference,
+            reference
+        )
+
+        var rawText = ""
+        let verification = try SQLiteConnection(url: databaseURL)
+        try verification.query(
+            "SELECT COALESCE(episode_reference, '') || COALESCE(media_reference, '') || COALESCE(playback_reference, '') FROM history"
+        ) { statement in
+            rawText = verification.text(statement, 0) ?? ""
+        }
+        verification.close()
+        XCTAssertFalse(rawText.contains("user-name"))
+        XCTAssertFalse(rawText.contains("secret-password"))
+        XCTAssertFalse(rawText.contains("example.invalid"))
     }
 
     func testHistoryPersistenceDropsAndroidProviderInstanceLocator()

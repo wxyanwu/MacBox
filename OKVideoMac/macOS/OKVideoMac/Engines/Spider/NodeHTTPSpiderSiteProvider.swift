@@ -2307,7 +2307,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             )
         case .cancelled:
             return SiteSearchError(message, category: .transport)
-        case .invalidScheme, .responseTooLarge, .tooManyRedirects:
+        case .invalidScheme, .responseTooLarge, .tooManyRedirects,
+             .redirectRejected:
             return SiteSearchError(message, category: .provider)
         }
     }
@@ -2345,6 +2346,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         case .statusCode(let code):
             return isTransientHTTPStatus(code)
         case .invalidScheme, .responseTooLarge, .tooManyRedirects,
+             .redirectRejected,
              .invalidResponse, .cancelled:
             return false
         }

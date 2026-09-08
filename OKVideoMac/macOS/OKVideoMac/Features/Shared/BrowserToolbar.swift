@@ -42,6 +42,78 @@ enum PrimaryToolbarMetrics {
     static let titleLeadingOffset: CGFloat = 0
 }
 
+/// Navigation must remain clickable across the entire control, including when
+/// the browser is inactive. A native control also keeps titlebar dragging from
+/// consuming clicks in the transparent area around the chevron.
+struct BrowserToolbarBackButton: NSViewRepresentable {
+    let help: String
+    let identifier: String
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> BrowserToolbarBackNSButton {
+        let button = BrowserToolbarBackNSButton()
+        update(button)
+        return button
+    }
+
+    func updateNSView(_ button: BrowserToolbarBackNSButton, context: Context) {
+        update(button)
+    }
+
+    private func update(_ button: BrowserToolbarBackNSButton) {
+        button.configure(help: help, identifier: identifier, action: action)
+    }
+}
+
+final class BrowserToolbarBackNSButton: NSButton {
+    private var onBack: () -> Void = {}
+
+    init() {
+        super.init(frame: NSRect(origin: .zero, size: NSSize(
+            width: PrimaryToolbarMetrics.iconControlSize,
+            height: PrimaryToolbarMetrics.iconControlSize
+        )))
+        title = ""
+        setButtonType(.momentaryPushIn)
+        bezelStyle = .texturedRounded
+        isBordered = false
+        imagePosition = .imageOnly
+        image = NSImage(
+            systemSymbolName: "chevron.backward",
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(NSImage.SymbolConfiguration(
+            pointSize: PrimaryToolbarMetrics.iconFontSize,
+            weight: .medium
+        ))
+        target = self
+        action = #selector(goBack)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(
+            width: PrimaryToolbarMetrics.iconControlSize,
+            height: PrimaryToolbarMetrics.iconControlSize
+        )
+    }
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    func configure(help: String, identifier: String, action: @escaping () -> Void) {
+        toolTip = help
+        setAccessibilityLabel(help)
+        setAccessibilityIdentifier(identifier)
+        // SwiftUI can reuse the native view when the route changes. Always
+        // replace its action rather than retaining a previous route closure.
+        onBack = action
+    }
+
+    @objc private func goBack() { onBack() }
+}
+
 enum PrimaryToolbarLayout: Equatable, Sendable {
     case expanded
     case compact

@@ -1745,6 +1745,15 @@ actor NodeBundleRuntimeService {
     }
 
     @discardableResult
+    /// A profile file is meaningful only for the active host-integrated bundle.
+    /// Checking capability must not start or switch a runtime from a details page.
+    func supportsProfileImport(configurationID: UUID) -> Bool {
+        activeProfileURL != nil
+            && activeProfileStorageKey == desiredProfileNamespace?.storageKey
+            && desiredProfileNamespace?.configurationIdentity
+                == configurationID.uuidString.lowercased()
+    }
+
     func importProfile(
         _ data: Data,
         from sourceURL: URL,

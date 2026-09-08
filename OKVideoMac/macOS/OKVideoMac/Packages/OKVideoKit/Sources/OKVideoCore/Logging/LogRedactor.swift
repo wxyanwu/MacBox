@@ -7,7 +7,7 @@ public enum LogRedactor {
         "stoken", "signature", "sign", "requestkey", "key", "secret",
         "password", "passwd", "pwd", "session", "sessionid", "sid",
         "uidtoken", "jwt", "code", "ticket", "credential", "apikey",
-        "xapikey"
+        "xapikey", "username"
     ]
 
     public static func headers(_ headers: [String: String]) -> [String: String] {
@@ -34,6 +34,7 @@ public enum LogRedactor {
                     : item
             }
         }
+        components.path = redactingXtreamPathCredentials(in: components.path)
         return components.string ?? url.absoluteString
     }
 
@@ -88,7 +89,7 @@ public enum LogRedactor {
         )
         output = replacingMatches(
             in: output,
-            pattern: #"(?i)([\"']?(?:access[_-]?token|refresh[_-]?token|uid[_-]?token|token|auth|authorization|cookie|stoken|signature|sign|request[_-]?key|api[_-]?key|password|passwd|pwd|secret|credential|session(?:id)?|sid|jwt|code|ticket)[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^&\s,;}]+)"#,
+            pattern: #"(?i)([\"']?(?:access[_-]?token|refresh[_-]?token|uid[_-]?token|token|auth|authorization|cookie|stoken|signature|sign|request[_-]?key|api[_-]?key|username|password|passwd|pwd|secret|credential|session(?:id)?|sid|jwt|code|ticket)[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^&\s,;}]+)"#,
             template: "$1<redacted>"
         )
         output = replacingURLs(in: output)
@@ -124,6 +125,24 @@ public enum LogRedactor {
             output.replaceSubrange(range, with: url(parsed))
         }
         return output
+    }
+
+    private static func redactingXtreamPathCredentials(in path: String) -> String {
+        var components = path.split(
+            separator: "/",
+            omittingEmptySubsequences: false
+        ).map(String.init)
+        let credentialBearingRoutes = Set(["live", "movie", "series", "timeshift"])
+
+        for index in components.indices {
+            guard credentialBearingRoutes.contains(components[index].lowercased()),
+                  components.indices.contains(index + 2) else {
+                continue
+            }
+            components[index + 1] = "<redacted>"
+            components[index + 2] = "<redacted>"
+        }
+        return components.joined(separator: "/")
     }
 
     private static func replacingHomePaths(in text: String) -> String {

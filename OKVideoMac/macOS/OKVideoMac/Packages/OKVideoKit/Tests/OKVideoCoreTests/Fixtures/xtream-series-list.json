@@ -1,0 +1,22 @@
+[
+  {
+    "series_id": 700,
+    "name": "Fixture Series",
+    "cover": "https://media.example.invalid/series.jpg",
+    "plot": "Series plot",
+    "rating": "8.2",
+    "backdrop_path": ["https://media.example.invalid/backdrop.jpg"],
+    "episode_run_time": "45",
+    "category_id": 30,
+    "panel_extension": {"ignored": true}
+  },
+  {
+    "series_id": "701",
+    "name": "Sparse Series",
+    "cover": null,
+    "plot": "",
+    "rating": "",
+    "backdrop_path": null,
+    "category_id": "31"
+  }
+]

@@ -1,7 +1,7 @@
 # Performance
 
 - 文档类型：当前性能基线与待验证项
-- 对照版本：0.5.0（Build 99）
+- 对照版本：0.6.0（Build 100）
 - 最近更新：2026-09-07
 
 ## 已设置的资源边界
@@ -78,3 +78,7 @@
 - 不同编码、分辨率、全屏、多显示器和睡眠/唤醒下的播放 soak；
 - Main Thread Checker、Leaks、Allocations、Time Profiler、Network 和 Energy Log；
 - macOS 12 最低系统与当前 macOS 的对照数据。
+
+## 0.6.0 播放加载边界
+
+Native Xtream Live 的最长加载期限为 60 秒，普通 VOD 的 30 秒与导入 Live 的 8 秒保持不变。备用 HLS 准备采用独立 10 秒总时限，耗时从该次播放预算扣除。成功的首次加载没有额外清单请求。复杂 HLS 的初始化时间和缓存吞吐是不同指标，不能把起播前 0 KB/s 解释为未建立连接。

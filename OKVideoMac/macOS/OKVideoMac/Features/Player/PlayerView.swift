@@ -14,6 +14,7 @@ struct PlayerView: View {
     @State private var displayedVolume: Double?
     @State private var pendingVolume: Double?
     @State private var isVolumeEditing = false
+    @State private var isCompactVolumePresented = false
     @State private var isLiveVolumeControlPresented = false
     @State private var isLiveVolumeHovering = false
     @State private var volumeCommandTask: Task<Void, Never>?
@@ -43,6 +44,8 @@ struct PlayerView: View {
     private let utilityButtonSize: CGFloat = 38
 
     var body: some View {
+        GeometryReader { geometry in
+            let layout = PlayerOverlayLayout(viewportSize: geometry.size)
         ZStack {
             // fullDestroy intentionally leaves no embedded client between
             // sessions. While the next client is being recreated, the normal
@@ -102,7 +105,7 @@ struct PlayerView: View {
                 VStack(spacing: 0) {
                     floatingHeader
                     Spacer(minLength: 24)
-                    floatingControls
+                    floatingControls(isCompact: layout.isCompact)
                 }
                 .padding(.horizontal, 18)
                 .padding(.top, 12)
@@ -116,11 +119,11 @@ struct PlayerView: View {
             if !state.isLivePlayback,
                controlsVisible,
                let activeUtilityPanel {
-                VStack {
+                VStack(spacing: 0) {
                     Spacer(minLength: 24)
-                    HStack {
+                    HStack(spacing: 0) {
                         Spacer(minLength: 24)
-                        utilityPanel(activeUtilityPanel)
+                        utilityPanel(activeUtilityPanel, maximumSize: layout.panelMaximumSize)
                     }
                 }
                 .padding(.trailing, 18)
@@ -145,6 +148,8 @@ struct PlayerView: View {
             )
                 .frame(width: 0, height: 0)
         }
+        .frame(width: geometry.size.width, height: geometry.size.height)
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.clear)
         .onAppear {
@@ -160,6 +165,7 @@ struct PlayerView: View {
             volumeCommandTask = nil
             pendingVolume = nil
             isLiveVolumeControlPresented = false
+            isCompactVolumePresented = false
             isLiveVolumeHovering = false
             activeUtilityPanel = nil
             inspectedPlayerEpisode = nil
@@ -181,6 +187,10 @@ struct PlayerView: View {
             if panel != .episodes {
                 inspectedPlayerEpisode = nil
             }
+            panel == nil ? scheduleControlsHide() : keepControlsVisible()
+        }
+        .onChange(of: isCompactVolumePresented) { presented in
+            presented ? keepControlsVisible() : scheduleControlsHide()
         }
         .onChange(of: state.currentPlayerEpisodeID) { _ in
             inspectedPlayerEpisode = nil
@@ -766,26 +776,27 @@ struct PlayerView: View {
         }
     }
 
-    private var floatingControls: some View {
+    private func floatingControls(isCompact: Bool) -> some View {
         VStack(spacing: 2) {
             progressControls
                 .padding(.horizontal, 3)
 
+            if isCompact {
+                HStack(spacing: 8) {
+                    compactVolumeButton
+                    playbackTimeLabel
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    transportControls
+                    Spacer(minLength: 8)
+                    compactUtilityMenu
+                    fullScreenButton
+                }
+            } else {
             ZStack {
                 HStack(spacing: 12) {
                     HStack(spacing: 10) {
                         volumeControls
-                        Text(
-                            "\(formatTime(displayedPosition)) / "
-                                + formatTime(state.playerSnapshot.duration)
-                        )
-                        .font(
-                            .system(size: 12, weight: .semibold)
-                            .monospacedDigit()
-                        )
-                        .foregroundColor(.white.opacity(0.94))
-                        .shadow(color: .black.opacity(0.48), radius: 2, y: 1)
-                        .lineLimit(1)
+                        playbackTimeLabel
                     }
                     .frame(minWidth: 230, alignment: .leading)
 
@@ -794,6 +805,7 @@ struct PlayerView: View {
                 }
 
                 transportControls
+            }
             }
         }
         .foregroundColor(.white)
@@ -805,6 +817,53 @@ struct PlayerView: View {
         .onHover { inside in
             controlsHovering = inside
             inside ? keepControlsVisible() : scheduleControlsHide()
+        }
+    }
+
+    private var playbackTimeLabel: some View {
+        Text("\(formatTime(displayedPosition)) / \(formatTime(state.playerSnapshot.duration))")
+            .font(.system(size: 12, weight: .semibold).monospacedDigit())
+            .foregroundColor(.white.opacity(0.94))
+            .shadow(color: .black.opacity(0.48), radius: 2, y: 1)
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
+    }
+
+    private var compactVolumeButton: some View {
+        Button {
+            isCompactVolumePresented.toggle()
+            keepControlsVisible()
+        } label: {
+            utilityMenuIcon(state.playerSnapshot.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(L10n.string("player.volume", fallback: "Volume"))
+        .popover(isPresented: $isCompactVolumePresented, arrowEdge: .top) {
+            volumeControls.padding(12).environment(\.colorScheme, .dark)
+        }
+    }
+
+    private var compactUtilityMenu: some View {
+        Menu {
+            compactPanelAction(.episodes, title: L10n.string("player.choose-episode", fallback: "Choose Episode"))
+            compactPanelAction(.audio, title: L10n.string("player.audio-tracks", fallback: "Audio Tracks"))
+            compactPanelAction(.subtitles, title: L10n.string("player.subtitles", fallback: "Subtitles"))
+            compactPanelAction(.settings, title: L10n.string("player.settings", fallback: "Playback Settings"))
+        } label: {
+            utilityMenuIcon("ellipsis.circle")
+        }
+        .playerUtilityMenuStyle()
+        .fixedSize()
+        .help(L10n.string("common.more", fallback: "More"))
+        .accessibilityLabel(L10n.string("common.more", fallback: "More"))
+    }
+
+    private func compactPanelAction(_ panel: PlayerUtilityPanel, title: String) -> some View {
+        Button(title) {
+            inspectedPlayerEpisode = nil
+            if panel == .episodes { alignPlayerEpisodePageWithCurrentEpisode() }
+            activeUtilityPanel = panel
+            keepControlsVisible()
         }
     }
 
@@ -1058,6 +1117,11 @@ struct PlayerView: View {
                 help: L10n.string("player.settings", fallback: "Playback Settings")
             )
 
+            fullScreenButton
+        }
+    }
+
+    private var fullScreenButton: some View {
             playerIconButton(
                 systemImage: isWindowFullScreen
                     ? "arrow.down.right.and.arrow.up.left"
@@ -1068,7 +1132,6 @@ struct PlayerView: View {
             ) {
                 toggleFullScreen()
             }
-        }
     }
 
     private func utilityPanelButton(
@@ -1102,20 +1165,20 @@ struct PlayerView: View {
     }
 
     @ViewBuilder
-    private func utilityPanel(_ panel: PlayerUtilityPanel) -> some View {
+    private func utilityPanel(_ panel: PlayerUtilityPanel, maximumSize: CGSize) -> some View {
         switch panel {
         case .episodes:
-            episodePanel
+            episodePanel(maximumSize: maximumSize)
         case .audio:
-            audioTrackPanel
+            audioTrackPanel(maximumSize: maximumSize)
         case .subtitles:
-            subtitlePanel
+            subtitlePanel(maximumSize: maximumSize)
         case .settings:
-            playbackSettingsPanel
+            playbackSettingsPanel(maximumSize: maximumSize)
         }
     }
 
-    private var episodePanel: some View {
+    private func episodePanel(maximumSize: CGSize) -> some View {
         let presentations = state.playerEpisodePresentations
         let pageCount = PlayerEpisodePagePolicy.pageCount(
             episodeCount: presentations.count
@@ -1128,7 +1191,7 @@ struct PlayerView: View {
             presentations,
             pageIndex: safePageIndex
         )
-        return playerPanel(width: 500) {
+        return playerPanel(width: 500, maximumSize: maximumSize) {
             VStack(alignment: .leading, spacing: 12) {
                 panelHeader(
                     title: L10n.string("player.episodes", fallback: "Episodes"),
@@ -1254,9 +1317,9 @@ struct PlayerView: View {
         )
     }
 
-    private var audioTrackPanel: some View {
+    private func audioTrackPanel(maximumSize: CGSize) -> some View {
         let tracks = state.playerSnapshot.tracks.filter { $0.type == .audio }
-        return playerPanel(width: 340) {
+        return playerPanel(width: 340, maximumSize: maximumSize) {
             VStack(alignment: .leading, spacing: 10) {
                 panelHeader(
                     title: L10n.string("player.audio-tracks", fallback: "Audio Tracks"),
@@ -1279,7 +1342,7 @@ struct PlayerView: View {
                     }
                     .frame(
                         height: min(
-                            260,
+                            min(260, max(44, maximumSize.height - 110)),
                             max(44, CGFloat(tracks.count) * 39)
                         )
                     )
@@ -1288,12 +1351,12 @@ struct PlayerView: View {
         }
     }
 
-    private var subtitlePanel: some View {
+    private func subtitlePanel(maximumSize: CGSize) -> some View {
         let tracks = state.playerSnapshot.tracks.filter {
             $0.type == .subtitle
         }
-        return playerPanel(width: 360) {
-            ScrollView {
+        return playerPanel(width: 360, maximumSize: maximumSize) {
+            Group {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         panelHeader(
@@ -1391,13 +1454,12 @@ struct PlayerView: View {
                     }
                 }
             }
-            .frame(height: 420)
         }
     }
 
-    private var playbackSettingsPanel: some View {
-        playerPanel(width: 370) {
-            ScrollView {
+    private func playbackSettingsPanel(maximumSize: CGSize) -> some View {
+        playerPanel(width: 370, maximumSize: maximumSize) {
+            Group {
                 VStack(alignment: .leading, spacing: 12) {
                     panelHeader(title: L10n.string("player.settings", fallback: "Playback Settings"), detail: nil)
 
@@ -1496,17 +1558,35 @@ struct PlayerView: View {
                     }
                 }
             }
-            .frame(height: 430)
         }
     }
 
     private func playerPanel<Content: View>(
         width: CGFloat,
-        @ViewBuilder content: () -> Content
+        maximumSize: CGSize,
+        @ViewBuilder content: @escaping () -> Content
     ) -> some View {
-        content()
+        VStack(spacing: 8) {
+            HStack {
+                Spacer()
+                Button {
+                    activeUtilityPanel = nil
+                    scheduleControlsHide()
+                } label: {
+                    Image(systemName: "xmark")
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(L10n.string("common.close", fallback: "Close"))
+                .accessibilityLabel(L10n.string("common.close", fallback: "Close"))
+            }
+            PlayerUtilityPanelContent(maximumHeight: max(1, maximumSize.height - 64)) {
+                content()
+            }
+        }
             .padding(14)
-            .frame(width: width)
+            .frame(width: min(width, maximumSize.width))
             .background {
                 ZStack {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -1858,6 +1938,7 @@ struct PlayerView: View {
             isLivePlayback: state.isLivePlayback,
             controlsHovering: controlsHovering,
             isFailed: isFailed,
+            keepsControlsVisible: activeUtilityPanel != nil || isCompactVolumePresented || isVolumeEditing || scrubPosition != nil,
             isPlaying: {
                 if case .playing = state.playerSnapshot.status { return true }
                 return false
@@ -2532,6 +2613,54 @@ private extension View {
                 BorderlessButtonMenuStyle(showsMenuIndicator: false)
             )
         }
+    }
+}
+
+/// ScrollView normally accepts all proposed height. Measure its natural
+/// content instead so short panels hug their controls and long ones scroll.
+struct PlayerUtilityPanelContent<Content: View>: View {
+    let maximumHeight: CGFloat
+    @ViewBuilder var content: () -> Content
+    @State private var contentHeight: CGFloat = 1
+
+    var body: some View {
+        ScrollView {
+            content()
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .background(GeometryReader { geometry in
+                    Color.clear.preference(key: PlayerUtilityPanelHeightKey.self,
+                                           value: geometry.size.height)
+                })
+        }
+        .frame(height: min(maximumHeight, max(1, contentHeight)), alignment: .top)
+        .onPreferenceChange(PlayerUtilityPanelHeightKey.self) { height in
+            if height.isFinite, height > 0, abs(height - contentHeight) > 0.5 {
+                contentHeight = height
+            }
+        }
+    }
+}
+
+private struct PlayerUtilityPanelHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 1
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+struct PlayerOverlayLayout {
+    let viewportSize: CGSize
+
+    // Full controls require two 230-point side regions, the 216-point
+    // transport group, separation, and the viewport's horizontal padding.
+    var isCompact: Bool { viewportSize.width < 760 }
+
+    var panelMaximumSize: CGSize {
+        CGSize(
+            width: max(1, viewportSize.width - 42),
+            height: max(1, min(560, viewportSize.height - 106))
+        )
     }
 }
 

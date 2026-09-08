@@ -300,6 +300,40 @@ public struct PlayEpisode: Codable, Equatable, Hashable, Identifiable, Sendable 
         self.referenceIdentity = referenceIdentity
         self.providerResourceReference = providerResourceReference
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, url, referenceIdentity, providerResourceReference
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        name = try values.decode(String.self, forKey: .name)
+        url = try values.decode(String.self, forKey: .url)
+        referenceIdentity = try values.decodeIfPresent(String.self, forKey: .referenceIdentity)
+        providerResourceReference = try values.decodeIfPresent(
+            PlaybackResourceReference.self, forKey: .providerResourceReference
+        )
+        guard providerResourceReference?.resourceKind != .live else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: decoder.codingPath,
+                debugDescription: "A Live reference cannot be decoded as an episode."
+            ))
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        guard providerResourceReference?.resourceKind != .live else {
+            throw EncodingError.invalidValue("live-reference-in-episode", .init(
+                codingPath: encoder.codingPath,
+                debugDescription: "A Live reference cannot be encoded as an episode."
+            ))
+        }
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(name, forKey: .name)
+        try values.encode(url, forKey: .url)
+        try values.encodeIfPresent(referenceIdentity, forKey: .referenceIdentity)
+        try values.encodeIfPresent(providerResourceReference, forKey: .providerResourceReference)
+    }
 }
 
 /// Produces non-secret structural identities for playback history.
@@ -511,6 +545,11 @@ public struct PlaybackQuality: Equatable, Hashable, Identifiable, Sendable {
 /// the same provider/version for refresh. It must never be used for display,
 /// source-name matching or cross-provider fallback.
 public struct PlaybackResourceReference: Codable, Equatable, Hashable, Sendable {
+    public enum ResourceKind: String, Codable, Equatable, Hashable, Sendable {
+        case episode
+        case live
+    }
+
     public enum Stability: String, Codable, Equatable, Hashable, Sendable {
         /// The provider explicitly guarantees that the locator is durable.
         case providerStable
@@ -520,6 +559,7 @@ public struct PlaybackResourceReference: Codable, Equatable, Hashable, Sendable 
     }
 
     public var schemaVersion: Int
+    public var resourceKind: ResourceKind
     public var configurationIdentity: String
     public var siteIdentity: String
     public var providerKind: String
@@ -543,6 +583,7 @@ public struct PlaybackResourceReference: Codable, Equatable, Hashable, Sendable 
         expiresAt: Date? = nil
     ) {
         self.schemaVersion = schemaVersion
+        resourceKind = .episode
         self.configurationIdentity = configurationIdentity
         self.siteIdentity = siteIdentity
         self.providerKind = providerKind
@@ -552,6 +593,112 @@ public struct PlaybackResourceReference: Codable, Equatable, Hashable, Sendable 
         self.episodeIdentity = episodeIdentity
         self.stability = stability
         self.expiresAt = expiresAt
+    }
+
+    /// Live references deliberately do not borrow source/episode semantics.
+    /// The empty legacy slots only preserve source compatibility for callers
+    /// of the existing episode-only model and never appear in Live JSON.
+    public static func xtreamLive(
+        _ locator: XtreamLivePlaybackLocator
+    ) -> PlaybackResourceReference {
+        let providerIdentity = locator.providerID.uuidString.lowercased()
+        var reference = PlaybackResourceReference(
+            schemaVersion: 2,
+            configurationIdentity: providerIdentity,
+            siteIdentity: "xtream:\(providerIdentity)",
+            providerKind: "xtream",
+            providerVersion: 1,
+            stableResourceLocator: locator.encoded,
+            sourceIdentity: "",
+            episodeIdentity: "",
+            stability: .providerStable
+        )
+        reference.resourceKind = .live
+        return reference
+    }
+
+    /// The only accepted Live variant currently belongs to native Xtream.
+    /// Validate the full outer binding as well as the versioned inner locator
+    /// at every boundary: public mutable properties are not an attestation.
+    public var xtreamLiveLocator: XtreamLivePlaybackLocator? {
+        guard resourceKind == .live,
+              schemaVersion == 2,
+              providerKind == "xtream",
+              providerVersion == 1,
+              stability == .providerStable,
+              expiresAt == nil,
+              sourceIdentity.isEmpty,
+              episodeIdentity.isEmpty,
+              let locator = try? XtreamLivePlaybackLocator(encoded: stableResourceLocator),
+              configurationIdentity == locator.providerID.uuidString.lowercased(),
+              siteIdentity == "xtream:\(configurationIdentity)" else {
+            return nil
+        }
+        return locator
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, resourceKind, configurationIdentity, siteIdentity
+        case providerKind, providerVersion, stableResourceLocator
+        case sourceIdentity, episodeIdentity, stability, expiresAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try values.decode(Int.self, forKey: .schemaVersion)
+        resourceKind = try values.decodeIfPresent(ResourceKind.self, forKey: .resourceKind)
+            ?? .episode
+        configurationIdentity = try values.decode(String.self, forKey: .configurationIdentity)
+        siteIdentity = try values.decode(String.self, forKey: .siteIdentity)
+        providerKind = try values.decode(String.self, forKey: .providerKind)
+        providerVersion = try values.decode(Int.self, forKey: .providerVersion)
+        stableResourceLocator = try values.decode(String.self, forKey: .stableResourceLocator)
+        stability = try values.decode(Stability.self, forKey: .stability)
+        expiresAt = try values.decodeIfPresent(Date.self, forKey: .expiresAt)
+        switch resourceKind {
+        case .episode:
+            // Keep legacy version/replay semantics; only Live has a new exact
+            // schema contract. Existing providers own their version checks.
+            sourceIdentity = try values.decode(String.self, forKey: .sourceIdentity)
+            episodeIdentity = try values.decode(String.self, forKey: .episodeIdentity)
+        case .live:
+            sourceIdentity = ""
+            episodeIdentity = ""
+            guard !values.contains(.sourceIdentity),
+                  !values.contains(.episodeIdentity),
+                  xtreamLiveLocator != nil else {
+                throw DecodingError.dataCorrupted(.init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Invalid Live playback reference."
+                ))
+            }
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        switch resourceKind {
+        case .episode:
+            // Do not add a kind tag to any existing episode wire format.
+            try values.encode(sourceIdentity, forKey: .sourceIdentity)
+            try values.encode(episodeIdentity, forKey: .episodeIdentity)
+        case .live:
+            guard xtreamLiveLocator != nil else {
+                throw EncodingError.invalidValue("invalid-live-reference", .init(
+                    codingPath: encoder.codingPath,
+                    debugDescription: "Invalid Live playback reference."
+                ))
+            }
+            try values.encode(resourceKind, forKey: .resourceKind)
+        }
+        try values.encode(schemaVersion, forKey: .schemaVersion)
+        try values.encode(configurationIdentity, forKey: .configurationIdentity)
+        try values.encode(siteIdentity, forKey: .siteIdentity)
+        try values.encode(providerKind, forKey: .providerKind)
+        try values.encode(providerVersion, forKey: .providerVersion)
+        try values.encode(stableResourceLocator, forKey: .stableResourceLocator)
+        try values.encode(stability, forKey: .stability)
+        try values.encodeIfPresent(expiresAt, forKey: .expiresAt)
     }
 }
 
@@ -872,6 +1019,7 @@ public enum SiteCapability: String, Codable, Sendable {
     case base64JSON
     case javaScriptSpider
     case javaDexSpider
+    case xtream
     case unsupportedSpider
 }
 
@@ -939,6 +1087,9 @@ public extension SiteProvider {
         source: PlaySource,
         episode: PlayEpisode
     ) {
+        guard request.providerResourceReference?.resourceKind != .live else {
+            throw AppError.playback("Live references cannot use episode playback refresh.")
+        }
         func matchingPlayback(
             in detail: VideoDetail
         ) -> (PlaySource, PlayEpisode)? {

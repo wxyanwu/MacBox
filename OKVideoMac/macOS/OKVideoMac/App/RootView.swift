@@ -22,6 +22,7 @@ enum AppSidebarMetrics {
     static let horizontalInset: CGFloat = 10
     static let topInset: CGFloat = 0
     static let searchToListSpacing: CGFloat = 16
+    static let rowHeight: CGFloat = 36
 }
 
 enum SidebarSearchEscapeAction: Equatable {
@@ -38,6 +39,7 @@ enum SidebarSearchEscapePolicy {
 @MainActor
 enum AppSidebarNativePolicy {
     static var iconTint: NSColor { .systemBlue }
+    static let rowSizeStyle = NSTableView.RowSizeStyle.large
 
     static func configure(background: NSVisualEffectView) {
         background.material = .sidebar
@@ -54,10 +56,10 @@ enum AppSidebarNativePolicy {
 
     static func configure(outlineView: NSOutlineView) {
         outlineView.style = .sourceList
-        // App Store deliberately uses the spacious source-list treatment even
-        // when the global table-size preference resolves to medium. AppKit
-        // still owns all text and symbol metrics inside the large row style.
-        outlineView.rowSizeStyle = .large
+        // Keep AppKit's large source-list text and symbol metrics. The delegate
+        // supplies the App Store-matched 36 pt row rhythm because AppKit pins
+        // the `rowHeight` property itself to the selected semantic size.
+        outlineView.rowSizeStyle = rowSizeStyle
         outlineView.headerView = nil
         outlineView.allowsEmptySelection = false
         outlineView.allowsMultipleSelection = false
@@ -612,8 +614,8 @@ private struct QuickSwitcherView: View {
         state.supportedSites.filter { matches($0.name) || matches($0.key) }
     }
 
-    private var matchingLiveSources: [StoredLiveSource] {
-        state.liveSources.filter { matches($0.name) }
+    private var matchingLiveSources: [LiveSourceDescriptor] {
+        state.liveSourceDescriptors.filter { matches($0.name) }
     }
 
     private func matches(_ value: String) -> Bool {
@@ -2134,7 +2136,7 @@ private struct SidebarView: View {
         case .video:
             return !state.visibleSites.isEmpty
         case .liveChannels:
-            return !state.liveSources.isEmpty
+            return !state.liveSourceDescriptors.isEmpty
         }
     }
 
@@ -2164,11 +2166,11 @@ private struct SidebarView: View {
 /// Hosts the browser navigation in the same native source-list controls used
 /// by AppKit applications. AppKit owns the sidebar material, row size, text,
 /// glyph, selection, inactive-window, accent-color, and accessibility states.
-/// The only explicit size choices are AppKit's large search control and
-/// semantic `large` source-list rows, matching the current App Store rather
-/// than hand-drawn text, glyph, or selection metrics.
+/// The only explicit size choices are AppKit's large search control, semantic
+/// `large` source-list metrics, and the App Store-matched 36 pt row rhythm;
+/// text, glyph slots, and selection rendering remain native.
 @MainActor
-private struct NativeSidebarSourceList: NSViewRepresentable {
+struct NativeSidebarSourceList: NSViewRepresentable {
     @Binding var text: String
     let presentation: SidebarSearchPresentation
     let isSearchEnabled: Bool
@@ -2276,35 +2278,17 @@ private struct NativeSidebarSourceList: NSViewRepresentable {
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
 
-            symbolView.translatesAutoresizingMaskIntoConstraints = false
+            rowSizeStyle = AppSidebarNativePolicy.rowSizeStyle
             symbolView.imageScaling = .scaleProportionallyDown
             symbolView.contentTintColor = AppSidebarNativePolicy.iconTint
-            symbolView.setContentHuggingPriority(.required, for: .horizontal)
 
-            label.translatesAutoresizingMaskIntoConstraints = false
             label.lineBreakMode = .byTruncatingTail
             label.maximumNumberOfLines = 1
-            label.setContentCompressionResistancePriority(
-                .defaultLow,
-                for: .horizontal
-            )
 
             imageView = symbolView
             textField = label
             addSubview(symbolView)
             addSubview(label)
-            NSLayoutConstraint.activate([
-                symbolView.leadingAnchor.constraint(equalTo: leadingAnchor),
-                symbolView.centerYAnchor.constraint(equalTo: centerYAnchor),
-                label.leadingAnchor.constraint(
-                    equalTo: symbolView.trailingAnchor,
-                    constant: 7
-                ),
-                label.trailingAnchor.constraint(
-                    lessThanOrEqualTo: trailingAnchor
-                ),
-                label.centerYAnchor.constraint(equalTo: centerYAnchor)
-            ])
         }
 
         @available(*, unavailable)
@@ -2426,6 +2410,13 @@ private struct NativeSidebarSourceList: NSViewRepresentable {
             shouldSelectItem item: Any
         ) -> Bool {
             item is ItemNode
+        }
+
+        func outlineView(
+            _ outlineView: NSOutlineView,
+            heightOfRowByItem item: Any
+        ) -> CGFloat {
+            AppSidebarMetrics.rowHeight
         }
 
         func outlineView(
@@ -2568,7 +2559,7 @@ private struct CollapsedSidebarSearchButton: View {
         case .video:
             return !state.visibleSites.isEmpty
         case .liveChannels:
-            return !state.liveSources.isEmpty
+            return !state.liveSourceDescriptors.isEmpty
         }
     }
 
@@ -2766,11 +2757,36 @@ private struct BrowserDetailRouteContainer: View {
     @State private var isContentScrolled = false
 
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
             if let detail = state.selectedDetail {
                 DetailView(detail: detail)
             } else if let summary = state.pendingDetailSummary {
                 DetailLoadingView(summary: summary)
+            }
+        }
+        // A concrete container owns both navigation preferences and toolbar
+        // items. Attaching the back item to a Group while its children own
+        // their titles/toolbars drops it during loading -> detail on macOS.
+        .navigationTitle("")
+        .toolbar {
+            ToolbarItem(id: "detail.back", placement: .navigation) {
+                BrowserToolbarBackButton(
+                    help: L10n.string(
+                        "common.back-previous",
+                        fallback: "Back to the previous page"
+                    ),
+                    identifier: "detail.back",
+                    action: { state.dismissDetail() }
+                )
+                .frame(
+                    width: PrimaryToolbarMetrics.iconControlSize,
+                    height: PrimaryToolbarMetrics.iconControlSize
+                )
+            }
+            ToolbarItem(id: "detail.favorite", placement: .primaryAction) {
+                if let detail = state.selectedDetail {
+                    DetailFavoriteButton(detail: detail)
+                }
             }
         }
         .environment(\.browserToolbarScrollReporter) { isScrolled in

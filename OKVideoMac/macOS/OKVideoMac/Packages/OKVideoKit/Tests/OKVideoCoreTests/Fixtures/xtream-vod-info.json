@@ -1,0 +1,26 @@
+{
+  "info": {
+    "name": "Fixture Movie One",
+    "movie_image": "https://media.example.invalid/movie-one.jpg",
+    "backdrop_path": [
+      "https://media.example.invalid/backdrop-1.jpg",
+      "https://media.example.invalid/backdrop-2.jpg"
+    ],
+    "plot": "Fixture plot",
+    "cast": "Actor One, Actor Two",
+    "director": "Director One",
+    "genre": "Drama",
+    "release_date": "2024-01-02",
+    "duration": "01:32:10",
+    "duration_secs": "5530",
+    "rating": 7.4,
+    "youtube_trailer": "fixture-trailer"
+  },
+  "movie_data": {
+    "stream_id": "1001",
+    "name": "Fixture Movie One",
+    "category_id": 10,
+    "container_extension": "mkv",
+    "direct_source": ""
+  }
+}

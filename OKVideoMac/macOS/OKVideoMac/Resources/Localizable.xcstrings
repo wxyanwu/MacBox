@@ -1,6 +1,69 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "providers.check-again": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Check Again"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"重新检查"}}}},
+    "providers.compatibility-details": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Compatibility Details"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"查看兼容性详情"}}}},
+    "providers.import.complete": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"%d sites added. This provider is now in use."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"已添加 %d 个站点，正在使用此片源。"}}}},
+    "providers.file.help": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"JSON or text configuration. CatPaw settings files belong in the existing provider’s details."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"支持 JSON 或文本配置。CatPaw 设置文件请在已有片源的详情中导入。"}}}},
+    "providers.file.select": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Choose a TVBox Configuration"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"选择 TVBox 配置文件"}}}},
+    "providers.advanced": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Advanced Options"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"高级选项"}}}},
+    "providers.link.tvbox": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Configuration link · The app will read the TVBox configuration when adding."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"配置链接 · 添加时将读取 TVBox 类配置"}}}},
+    "providers.link.catpaw": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"CatPawOpen link · The app will check compatibility when adding."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"CatPawOpen 链接 · 添加时将检查兼容性"}}}},
+    "providers.import.help": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Use a TVBox configuration link or file, or a CatPawOpen .js.md5 link."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"支持 TVBox 配置链接或文件，以及 CatPawOpen 的 .js.md5 链接。"}}}},
+    "providers.file": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"File"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"文件"}}}},
+    "providers.link": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Link"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"链接"}}}},
+    "providers.add-use": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Add and Use"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"添加并使用"}}}},
+    "providers.back": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Back"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"返回"}}}},
+    "providers.local.update-help": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"To update this provider, add the new configuration file or text."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"本地配置无法在线更新。如有新版，请重新添加配置文件或文本。"}}}},
+    "providers.catpaw.activate-first": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Use this provider first to manage its CatPaw settings."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"先使用此片源，再管理它的 CatPaw 设置。"}}}},
+    "providers.catpaw.unavailable": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Settings-file import is available when a compatible CatPaw runtime is ready."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"兼容的 CatPaw 服务准备就绪后，才能导入设置文件。"}}}},
+    "providers.catpaw.import.help": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Use test0.db.json to replace this provider’s saved site, account, and cloud settings."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"选择 test0.db.json，替换此片源已保存的站点、账号和网盘等设置。"}}}},
+    "providers.catpaw.import": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Import CatPaw Settings"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"导入 CatPaw 设置"}}}},
+    "providers.catpaw.help": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"When a site needs a cloud account, opening or playing it will guide you through sign-in."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"站点需要网盘账号时，打开站点或播放内容会引导你登录。"}}}},
+    "providers.edit-account": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Edit Server and Account…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"编辑服务器与账号…"}}}},
+    "providers.connection": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Connection"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"片源来源"}}}},
+    "providers.method.account.help": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Xtream · Server address, username, and password"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"Xtream · 填写服务器地址、用户名和密码"}}}},
+    "providers.method.account": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Sign In with an Account"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"使用账号添加"}}}},
+    "providers.method.file.help": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"TVBox · Choose a JSON or text configuration from this Mac"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"TVBox · 选择电脑里保存的 JSON 或文本配置"}}}},
+    "providers.method.file": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Import a Configuration File"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"从配置文件添加"}}}},
+    "providers.method.link.help": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"TVBox / CatPawOpen · Paste a configuration link"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"TVBox / CatPawOpen · 粘贴提供方给你的配置链接"}}}},
+    "providers.method.link": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Add Using a Link"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"通过链接添加"}}}},
+    "providers.choose-method": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Choose the information you received from your provider."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"根据你手里已有的资料，选择添加方式。"}}}},
+    "providers.list.help": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Each provider may contain several sites. Choose a site on the video home page."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"一个片源可以包含多个站点。添加后，可在点播首页选择其中的站点。"}}}},
+    "providers.empty": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Add a provider above to start watching."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"点击上方“添加”，添加片源后即可开始观看。"}}}},
+    "providers.more": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"More Actions"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"更多操作"}}}},
+    "providers.details": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Details"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"详情"}}}},
+    "providers.update": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Update"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"更新片源"}}}},
+    "providers.current.subtitle": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"%@ · Used for the video home page and search"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"%@ · 点播首页和搜索使用此片源"}}}},
+    "providers.add.subtitle": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Use a link, a TVBox configuration file, or an Xtream account."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"通过链接、TVBox 配置文件或 Xtream 账号添加。"}}}},
+    "providers.add": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Add Provider"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"添加片源"}}}},
+    "common.add": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Add…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"添加…"}}}},
+    "common.edit": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Edit"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"编辑"}}}},
+    "xtream.add.action": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Add Xtream Provider"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"添加 Xtream 站点"}}}},
+    "xtream.add.subtitle": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Connect Movies, Series, Search, and Basic Live TV through the native Xtream provider."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"通过原生 Xtream Provider 接入电影、剧集、搜索和基础直播。"}}}},
+    "xtream.add.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Add Xtream Account"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"添加 Xtream 账号"}}}},
+    "xtream.credentials.invalid": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Enter a valid Xtream username and password."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"请输入有效的 Xtream 用户名和密码。"}}}},
+    "xtream.edit.credentials-note": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"For security, enter the username and password again before saving changes."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"为保障安全，保存修改前请重新输入用户名和密码。"}}}},
+    "xtream.edit.missing": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The Xtream provider no longer exists."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"该 Xtream 站点已不存在。"}}}},
+    "xtream.edit.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Edit Xtream Provider"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"编辑 Xtream 站点"}}}},
+    "xtream.editor.subtitle": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Use your subscription to watch movies, series, and live channels."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"使用你的订阅账号观看电影、剧集和直播频道。"}}}},
+    "xtream.episode.fallback": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Episode %lld"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"第 %lld 集"}}}},
+    "xtream.name": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Name (Optional)"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"名称（选填）"}}}},
+    "xtream.name.placeholder": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"My Xtream Provider"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"我的 Xtream 站点"}}}},
+    "xtream.operation.in-progress": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Another provider operation is already in progress."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"另一个站点操作正在进行中。"}}}},
+    "xtream.password": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Password"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"密码"}}}},
+    "xtream.save.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Unable to Save Xtream Provider"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"无法保存 Xtream 站点"}}}},
+    "xtream.save.failed.retry": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The provider could not be saved. Check the fields and try again."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"无法保存站点，请检查各字段后重试。"}}}},
+    "xtream.security-note": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Credentials are stored only in this Mac’s Keychain. Configuration exports and portable backups never contain them."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"凭据仅存储在这台 Mac 的钥匙串中，配置导出和便携备份绝不会包含凭据。"}}}},
+    "xtream.server-url": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Server Address"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"服务器地址"}}}},
+    "xtream.source.episodes": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Episodes"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"选集"}}}},
+    "xtream.source.movie": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Movie"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"电影"}}}},
+    "xtream.source.season": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Season %lld"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"第 %lld 季"}}}},
+    "xtream.test-connection": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Test Connection"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"测试连接"}}}},
+    "xtream.test.success": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Connection succeeded."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"连接成功。"}}}},
+    "xtream.test.success-with-status": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Connection succeeded. Account status: %@."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"连接成功，账户状态：%@。"}}}},
+    "xtream.testing": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Testing"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在测试"}}}},
+    "xtream.username": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Username"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"用户名"}}}},
     "common.list-separator": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"; "}},"zh-Hans":{"stringUnit":{"state":"translated","value":"；"}}}},
     "live.group-count": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"%1$@ (%2$lld)"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"%1$@（%2$lld）"}}}},
     "sidebar.search.shortcut-help": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"%@ (⌘F)"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"%@（⌘F）"}}}},
@@ -97,7 +160,7 @@
     "configuration.import.live-sync-summary": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Live TV sync finished: %d added, %d skipped, %d failed."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"直播同步完成：新增 %d 个，跳过 %d 个，失败 %d 个。"}}}},
     "configuration.import.live-unsupported": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":" %d dynamic Live TV plugins cannot be synced yet."}},"zh-Hans":{"stringUnit":{"state":"translated","value":" %d 个动态直播插件暂不支持同步。"}}}},
     "configuration.import.summary": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"%d providers found: %d require Android Bridge, %d use JavaScript, and %d use other built-in capabilities."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"共发现 %d 个站点：%d 个需要 Android Bridge，%d 个使用 JavaScript，%d 个使用其他内建能力。"}}}},
-    "configuration.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Video Providers"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"点播配置"}}}},
+    "configuration.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Video Providers"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"点播片源"}}}},
     "diagnostics.export.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Unable to export diagnostics: %@"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"无法导出诊断：%@"}}}},
     "home.filter.option": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"%@: %@"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"%@：%@"}}}},
     "home.filter.option-accessibility": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"%@, %@"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"%@，%@"}}}},
@@ -457,6 +520,7 @@
     "player.url.invalid-character": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The media URL contains an invalid character."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"媒体 URL 包含无效字符"}}}},
     "player.url.resolving": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"<resolving playback URL>"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"<正在获取播放地址>"}}}},
     "player.validation.no-media": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The stream loaded but produced no audio or video within %d seconds"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"该线路已载入，但 %d 秒内没有产生音视频"}}}},
+    "player.volume": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Volume"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"音量"}}}},
     "player.volume.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Unable to Set Volume"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"音量设置失败"}}}},
     "player.wake-resume.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Unable to Resume After Wake"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"唤醒后恢复播放失败"}}}},
     "player.window-sizing.automatic": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Match Video Automatically"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"自动匹配画面"}}}},
@@ -762,8 +826,8 @@
     "configuration.actions.close-note": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Closing returns to the previous content page and browsing position."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"关闭后会回到原来的内容页和浏览位置。"}}}},
     "configuration.actions.empty": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"This configuration category did not return any available actions."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"该配置分类没有返回可执行操作。"}}}},
     "configuration.actions.loading": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Loading configuration actions…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在读取当前配置操作…"}}}},
-    "configuration.activate": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Activate"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"启用"}}}},
-    "configuration.active": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Active"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"当前使用"}}}},
+    "configuration.activate": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Use This Provider"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"使用此片源"}}}},
+    "configuration.active": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"In Use"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在使用"}}}},
     "configuration.base-url.optional": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Relative Resource Base URL (Optional)"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"相对资源基准 URL（可选）"}}}},
     "configuration.bridge.unresponsive": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The local configuration bridge repeatedly failed to respond. Try the action again."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"本机配置桥连续无法响应，请重试该操作。"}}}},
     "configuration.catpaw-selection.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Unable to Select CatPaw Configuration"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"无法选择 CatPaw 配置"}}}},
@@ -783,23 +847,23 @@
     "configuration.export.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Export Failed"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"导出失败"}}}},
     "configuration.export.failed-message": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Unable to export configuration: %@"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"无法导出配置：%@"}}}},
     "configuration.file-selection.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Unable to Select File"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"无法选择文件"}}}},
-    "configuration.import": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Import Video Provider Configuration"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"导入点播配置"}}}},
+    "configuration.import": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Add Provider"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"添加片源"}}}},
     "configuration.import-catpaw": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Import CatPaw Configuration"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"导入 CatPaw 配置"}}}},
     "configuration.import-catpaw.subtitle": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Choose test0.db.json. Accounts and mounts are written only to the protected runtime profile."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"选择 test0.db.json；账号与挂载只写入受保护的运行 profile"}}}},
     "configuration.import-enable-first": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Import and enable a video provider configuration first."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"请先导入并启用一个点播配置。"}}}},
     "configuration.import-update.section": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Import & Update"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"导入与更新"}}}},
     "configuration.import.action": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Import…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"导入…"}}}},
     "configuration.import.action-short": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Import"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"导入"}}}},
-    "configuration.import.android-unavailable": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Android Bridge is unavailable. %d imported Java/Dex providers cannot run yet."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"Android Bridge 当前不可用，%d 个 Java/Dex 站点已导入但暂时不能运行。"}}}},
+    "configuration.import.android-unavailable": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"%d sites need the Android compatibility component. You will be guided to install it when needed."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"其中 %d 个站点需要 Android 兼容组件，使用时会引导你安装。"}}}},
     "configuration.import.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Configuration Import Failed"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"配置导入失败"}}}},
     "configuration.import.formats": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Supports JSON, limited JSONC, image, and Base64-wrapped formats. You can sync included Live TV lists after import."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"支持 JSON、有限 JSONC、图片或 Base64 包装格式；完成后可选择同步其中的直播列表。"}}}},
     "configuration.import.in-progress": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Another configuration is already being imported. Wait for it to finish."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"已有配置正在导入，请稍候"}}}},
     "configuration.import.subtitle": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Import a video provider configuration from a URL or pasted content."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"通过 URL 或粘贴内容导入点播配置。"}}}},
-    "configuration.import.success": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Configuration Imported"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"配置导入成功"}}}},
+    "configuration.import.success": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Provider Added"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"片源已添加"}}}},
     "configuration.imported.empty": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"No video provider configurations yet. Import one above."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"还没有点播配置，可先从上方导入。"}}}},
-    "configuration.imported.section": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Imported Configurations"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"已导入配置"}}}},
+    "configuration.imported.section": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"My Providers"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"我的片源"}}}},
     "configuration.importing": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Importing"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"导入中"}}}},
-    "configuration.name.optional": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Configuration Name (Optional)"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"点播配置名称（可选）"}}}},
+    "configuration.name.optional": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Provider Name (Optional)"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"片源名称（选填）"}}}},
     "configuration.page.updated": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The configuration page was updated. Open it again."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"配置页面已更新，请重新打开"}}}},
     "configuration.refresh-current": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Refresh Current Video Provider Configuration"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"刷新当前点播配置"}}}},
     "configuration.refresh.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Configuration Refresh Failed"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"配置刷新失败"}}}},
@@ -1081,7 +1145,7 @@
     "settings.pane.general.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"General"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"通用"}}}},
     "settings.pane.live.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Live TV Sources"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"直播源"}}}},
     "settings.pane.playback.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Playback"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"视频"}}}},
-    "settings.pane.providers.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Video Providers"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"点播配置"}}}},
+    "settings.pane.providers.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Video Providers"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"点播片源"}}}},
     "settings.pane.search.subtitle": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Choose Default Search Providers"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"选择默认搜索站点"}}}},
     "settings.pane.settings.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Settings"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"设置"}}}},
     "settings.playback.autoplay.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Autoplay Next Episode"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"自动播放下一集"}}}},
@@ -4203,23 +4267,7 @@
         }
       }
     },
-    "settings.pane.providers.subtitle": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Import and switch provider sources"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "导入与切换片源"
-          }
-        }
-      }
-    },
+    "settings.pane.providers.subtitle": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Add and switch video providers"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"添加与切换点播片源"}}}},
     "settings.pane.search.title": {
       "extractionState": "manual",
       "localizations": {
@@ -4373,23 +4421,7 @@
         }
       }
     },
-    "settings.providers.subtitle": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Import, switch, and maintain video provider configurations"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "导入、切换和维护点播配置"
-          }
-        }
-      }
-    },
+    "settings.providers.subtitle": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Add a provider and choose one to watch"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"添加你的片源，选择一个开始观看"}}}},
     "settings.search.configuration.saved-separately": {
       "extractionState": "manual",
       "localizations": {

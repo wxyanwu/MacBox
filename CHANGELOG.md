@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.6.0] - 2026-09-09
+
+### Added
+
+- Native Xtream-compatible account authentication, Movies, Series, season/episode
+  navigation, combined catalog search and Basic Live. Credentials stay in Keychain;
+  persisted playback references and exports exclude account secrets.
+- English and Simplified Chinese String Catalog UI, persistent language selection
+  and restart/relaunch support.
+
+### Playback and fixes
+
+- Isolated Native Live static HTTP proxy/HTTPS CONNECT handling, normal 302 media
+  redirects, bounded 60-second startup and conservative backup-HLS master selection
+  preserving audio/subtitles. Existing imported Live and VOD startup policies remain.
+- Request ownership and player-instance boundaries protect cancellation, switching
+  and closing from stale events and transport-state contamination.
+- Empty VOD metadata arrays now use existing catalog details; malformed metadata
+  remains rejected.
+- Grouped source configuration, content-sized player utility panels across window
+  sizes, and reliable browser back-button hit targets and route updates.
+
+- Android shutdown normalizes system directory aliases on both sides of its
+  private-AVD check while retaining strict process ownership boundaries.
+
+### Compatibility
+
+- Existing TVBox/CatVod, CatPaw-style Node, QuickJS, Android csp_, direct/local media
+  and imported Live retain their documented scope.
+- Native Xtream EPG, catch-up/timeshift and direct_source remain unsupported; proxy
+  and HLS support is deliberately bounded, not universal.
+- Apple Silicon / arm64, macOS 12.0+. See Docs/RELEASE_NOTES_0.6.0.md for details.
+
 ## [0.5.0] - 2026-09-07
 
 ### Managed Android Runtime

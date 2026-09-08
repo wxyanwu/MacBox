@@ -1,0 +1,21 @@
+[
+  {
+    "stream_id": 1001,
+    "name": "Fixture Movie One",
+    "stream_icon": "https://media.example.invalid/movie-one.jpg",
+    "rating": "7.4",
+    "rating_5based": 3.7,
+    "added": 1700000000,
+    "category_id": "10",
+    "container_extension": "mp4",
+    "direct_source": ""
+  },
+  {
+    "stream_id": "1002",
+    "name": "Fixture Movie Two",
+    "stream_icon": null,
+    "rating": null,
+    "category_id": 20,
+    "container_extension": "mkv"
+  }
+]

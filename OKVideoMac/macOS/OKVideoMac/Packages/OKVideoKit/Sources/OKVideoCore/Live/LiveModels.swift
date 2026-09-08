@@ -23,6 +23,9 @@ public struct LivePlaylist: Equatable, Sendable {
         for groupIndex in copy.groups.indices {
             for channelIndex in copy.groups[groupIndex].channels.indices {
                 for streamIndex in copy.groups[groupIndex].channels[channelIndex].streams.indices {
+                    guard case .direct = copy.groups[groupIndex].channels[channelIndex].streams[streamIndex].target else {
+                        continue
+                    }
                     var merged = headers
                     merged.merge(
                         copy.groups[groupIndex].channels[channelIndex].streams[streamIndex].headers
@@ -36,12 +39,19 @@ public struct LivePlaylist: Equatable, Sendable {
 }
 
 public struct LiveGroup: Codable, Equatable, Identifiable, Sendable {
-    public var id: String { name }
+    public var id: String { explicitID ?? name }
+    public var explicitID: String?
     public var name: String
     public var password: String?
     public var channels: [LiveChannel]
 
-    public init(name: String, password: String? = nil, channels: [LiveChannel] = []) {
+    public init(
+        name: String,
+        password: String? = nil,
+        channels: [LiveChannel] = [],
+        explicitID: String? = nil
+    ) {
+        self.explicitID = explicitID
         self.name = name
         self.password = password
         self.channels = channels
@@ -49,7 +59,10 @@ public struct LiveGroup: Codable, Equatable, Identifiable, Sendable {
 }
 
 public struct LiveChannel: Codable, Equatable, Identifiable, Sendable {
-    public var id: String { "\(groupName)::\(name)" }
+    public var id: String { explicitID ?? "\(groupName)::\(name)" }
+    public var groupID: String { explicitGroupID ?? groupName }
+    public var explicitID: String?
+    public var explicitGroupID: String?
     public var groupName: String
     public var name: String
     public var number: String?
@@ -65,8 +78,12 @@ public struct LiveChannel: Codable, Equatable, Identifiable, Sendable {
         logoURL: URL? = nil,
         tvgID: String? = nil,
         tvgName: String? = nil,
-        streams: [LiveStream]
+        streams: [LiveStream],
+        explicitID: String? = nil,
+        explicitGroupID: String? = nil
     ) {
+        self.explicitID = explicitID
+        self.explicitGroupID = explicitGroupID
         self.groupName = groupName
         self.name = name
         self.number = number
@@ -77,10 +94,25 @@ public struct LiveChannel: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+public enum LiveStreamTarget: Equatable, Sendable {
+    case direct(URL)
+    case provider(PlaybackResourceReference)
+}
+
 public struct LiveStream: Codable, Equatable, Identifiable, Sendable {
-    public var id: String { url.absoluteString }
+    public var id: String {
+        switch target {
+        case .direct(let url): return url.absoluteString
+        case .provider(let reference):
+            return reference.xtreamLiveLocator?.encoded ?? "invalid-provider-live-target"
+        }
+    }
     public var name: String
-    public var url: URL
+    public var target: LiveStreamTarget
+    public var url: URL? {
+        guard case .direct(let url) = target else { return nil }
+        return url
+    }
     public var headers: [String: String]
     public var format: String?
     public var needsParsing: Bool
@@ -93,10 +125,80 @@ public struct LiveStream: Codable, Equatable, Identifiable, Sendable {
         needsParsing: Bool = false
     ) {
         self.name = name
-        self.url = url
+        self.target = .direct(url)
         self.headers = headers
         self.format = format
         self.needsParsing = needsParsing
+    }
+
+    public init(
+        name: String,
+        target: LiveStreamTarget,
+        headers: [String: String] = [:],
+        format: String? = nil,
+        needsParsing: Bool = false
+    ) throws {
+        self.name = name
+        self.target = target
+        self.headers = headers
+        self.format = format
+        self.needsParsing = needsParsing
+        try validateProviderTarget()
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, url, headers, format, needsParsing
+        case targetVersion, providerResourceReference
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        format = try container.decodeIfPresent(String.self, forKey: .format)
+        if container.contains(.targetVersion) || container.contains(.providerResourceReference) {
+            guard !container.contains(.url),
+                  try container.decode(Int.self, forKey: .targetVersion) == 1 else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .targetVersion, in: container,
+                    debugDescription: "Unsupported or ambiguous Live stream target"
+                )
+            }
+            target = .provider(try container.decode(
+                PlaybackResourceReference.self, forKey: .providerResourceReference
+            ))
+            headers = try container.decodeIfPresent([String: String].self, forKey: .headers) ?? [:]
+            needsParsing = try container.decodeIfPresent(Bool.self, forKey: .needsParsing) ?? false
+            try validateProviderTarget()
+        } else {
+            target = .direct(try container.decode(URL.self, forKey: .url))
+            headers = try container.decode([String: String].self, forKey: .headers)
+            needsParsing = try container.decode(Bool.self, forKey: .needsParsing)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        try validateProviderTarget()
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name, forKey: .name)
+        try container.encodeIfPresent(format, forKey: .format)
+        switch target {
+        case .direct(let url):
+            try container.encode(url, forKey: .url)
+            try container.encode(headers, forKey: .headers)
+            try container.encode(needsParsing, forKey: .needsParsing)
+        case .provider(let reference):
+            try container.encode(1, forKey: .targetVersion)
+            try container.encode(reference, forKey: .providerResourceReference)
+        }
+    }
+
+    private func validateProviderTarget() throws {
+        guard case .provider(let reference) = target else { return }
+        guard let locator = reference.xtreamLiveLocator,
+              headers.isEmpty, !needsParsing,
+              format == nil || format == locator.outputFormat.rawValue else {
+            throw LiveModelError.invalidProviderTarget
+        }
     }
 }
 

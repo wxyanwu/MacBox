@@ -27,6 +27,18 @@ enum PlayerTeardownMode: String, CaseIterable, Sendable {
     }
 }
 
+enum PlayerReleasePolicy: Equatable, Sendable {
+    case existingBehavior
+    case destroyBeforeLoad
+}
+
+enum PlayerLifecycleTransitionKind: Equatable, Sendable {
+    case prepare
+    case strictRelease
+    case stop
+    case close
+}
+
 /// Keeps the player cache bounded on long remote streams. `legacy` is an
 /// operational rollback for servers whose buffering behavior depends on the
 /// previous unbounded defaults.
@@ -96,9 +108,17 @@ enum MPVRenderControlMode: String, CaseIterable, Sendable {
     var usesAdvancedControl: Bool { self == .advanced }
 }
 
+private final class NativeLoadCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+}
+
 enum PlayerLoadTimeoutPolicy {
     static func seconds(for media: ResolvedMedia) -> Int {
-        media.siteKey == "live" ? 8 : 30
+        if media.compatibilityPolicy == .nativeXtreamLive { return min(60, max(1, media.nativeStartupBudgetSeconds ?? 60)) }
+        return media.siteKey == "live" ? 8 : 30
     }
 }
 
@@ -107,12 +127,21 @@ enum MPVTVBoxPlaybackPolicy {
         for media: ResolvedMedia,
         omitFormatHint: Bool = false
     ) -> [String] {
-        var command = ["loadfile", media.url.absoluteString, "replace"]
-        guard media.transportProfile == .tvBox else { return command }
-        let options = fileOptions(
-            for: media,
-            omitFormatHint: omitFormatHint
-        )
+        let source: String
+        if media.compatibilityPolicy == .nativeXtreamLive, let selection = media.hlsStartupSelection {
+            source = "lavf://data:application/vnd.apple.mpegurl;base64," + Data(selection.playlist.utf8).base64EncodedString()
+        } else { source = media.url.absoluteString }
+        var command = ["loadfile", source, "replace"]
+        var options = media.transportProfile == .tvBox
+            ? fileOptions(for: media, omitFormatHint: omitFormatHint)
+            : []
+        if media.compatibilityPolicy == .nativeXtreamLive, media.hlsStartupSelection != nil {
+            options.append("demuxer-lavf-format=hls")
+        }
+        if media.siteKey == "xtream-live",
+           media.url.scheme?.lowercased() == "https" {
+            options.append("tls-verify=yes")
+        }
         guard !options.isEmpty else { return command }
         command.append("-1")
         command.append(options.joined(separator: ","))
@@ -734,6 +763,7 @@ final class MPVPlayerClient: PlayerClient {
         static let queueOverflow: Int32 = 24
     }
 
+    let compatibilityPolicy: PlaybackCompatibilityPolicy
     private let library: MPVLibrary
     private let queue = DispatchQueue(
         label: "com.okvideomac.player.libmpv",
@@ -785,8 +815,10 @@ final class MPVPlayerClient: PlayerClient {
         bundle: Bundle = .main,
         teardownMode: PlayerTeardownMode = .warmStop,
         performanceProfile: MPVPlaybackPerformanceProfile = .configured(),
-        renderControlMode: MPVRenderControlMode = .configured()
+        renderControlMode: MPVRenderControlMode = .configured(),
+        compatibilityPolicy: PlaybackCompatibilityPolicy = .existing
     ) throws {
+        self.compatibilityPolicy = compatibilityPolicy
         self.teardownMode = teardownMode
         self.performanceProfile = performanceProfile
         self.renderControlMode = renderControlMode
@@ -812,6 +844,22 @@ final class MPVPlayerClient: PlayerClient {
         do {
             try setOption("config", value: "no", client: created)
             try setOption("terminal", value: "no", client: created)
+            // These path-bearing features vary across supported libmpv
+            // versions. Disable every option the bundled runtime recognizes;
+            // only a genuine "option not found" is compatibility-skippable.
+            // Invalid values and all other failures still abort initialization.
+            for option in [
+                ("load-scripts", "no"),
+                ("resume-playback", "no"),
+                ("save-position-on-quit", "no"),
+                ("save-watch-history", "no"),
+                ("write-filename-in-watch-later-config", "no"),
+                ("log-file", "")
+            ] {
+                _ = try setOptionIfAvailable(
+                    option.0, value: option.1, client: created
+                )
+            }
             try setOption("input-default-bindings", value: "no", client: created)
             try setOption("input-cursor", value: "no", client: created)
             try setOption("idle", value: "yes", client: created)
@@ -902,11 +950,23 @@ final class MPVPlayerClient: PlayerClient {
         aspectRatio: String?,
         panscan: Double
     ) async throws {
+        try Task.checkCancellation()
+        guard media.compatibilityPolicy == compatibilityPolicy else {
+            throw AppError.playback("Playback policy requires a fresh player instance.")
+        }
         try validate(media: media)
+        let proxyDecision = compatibilityPolicy == .nativeXtreamLive
+            ? SystemMediaProxyResolver.resolve(for: media.hlsStartupSelection?.routingURL ?? media.url) : nil
         let loadTimeoutSeconds = PlayerLoadTimeoutPolicy.seconds(for: media)
+        let cancellation = NativeLoadCancellation()
+        try await withTaskCancellationHandler {
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<Void, Error>) in
             queue.async {
+                if self.compatibilityPolicy == .nativeXtreamLive, cancellation.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
                 guard self.isRunning, let client = self.client else {
                     continuation.resume(
                         throwing: AppError.playback(L10n.string("player.runtime.closed", fallback: "libmpv has closed."))
@@ -936,6 +996,19 @@ final class MPVPlayerClient: PlayerClient {
                         panscan: panscan,
                         client: client
                     )
+                    if let proxyDecision {
+                        for option in proxyDecision.mpvOptions {
+                            try self.setPropertyString(
+                                option.0, value: option.1, client: client,
+                                operation: "Configure Native Xtream transport"
+                            )
+                        }
+                        PlayerExperimentLogger.lifecycle(
+                            "xtream transport=\(proxyDecision.diagnosticMode)",
+                            playerID: self.renderOwnerID, requestID: requestID,
+                            mode: self.teardownMode
+                        )
+                    }
                     try self.applyHTTPHeaders(media.headers, client: client)
                     self.pendingStartPosition = startPosition.flatMap {
                         $0.isFinite && $0 > 0 ? $0 : nil
@@ -1009,6 +1082,24 @@ final class MPVPlayerClient: PlayerClient {
                     _ = try? self.command(["stop"], client: client)
                 }
             }
+        }
+        } onCancel: {
+            if self.compatibilityPolicy == .nativeXtreamLive {
+                cancellation.cancel()
+                self.cancelPendingNativeLoad(requestID: requestID)
+            }
+        }
+    }
+
+    /// Breaks the lifecycle barrier only for the old Native Xtream request.
+    /// It cannot stop a successor or change ordinary VOD/Live cancellation.
+    func cancelPendingNativeLoad(requestID: UUID?) {
+        guard compatibilityPolicy == .nativeXtreamLive, let requestID else { return }
+        queue.async {
+            guard self.currentRequestID == requestID,
+                  self.pendingLoad != nil, let client = self.client else { return }
+            self.completeLoad(.failure(CancellationError()))
+            _ = try? self.command(["stop"], client: client)
         }
     }
 
@@ -1530,6 +1621,34 @@ final class MPVPlayerClient: PlayerClient {
                 )
             }
         }
+    }
+
+    @discardableResult
+    private func setOptionIfAvailable(
+        _ name: String,
+        value: String,
+        client: OpaquePointer
+    ) throws -> Bool {
+        let result = name.withCString { namePointer in
+            value.withCString { valuePointer in
+                library.setOptionString(client, namePointer, valuePointer)
+            }
+        }
+        if result >= 0 { return true }
+        if library.errorString(for: result)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() == "option not found" {
+            return false
+        }
+        try library.checked(
+            result,
+            operation: L10n.string(
+                "player.operation.set-option",
+                fallback: "Set mpv option %@",
+                name
+            )
+        )
+        return true
     }
 
     private func schedulePlaybackDiagnostics(requestID: UUID) {
@@ -2553,9 +2672,15 @@ final class PlayerLifecycleController {
     private let continuation: AsyncStream<PlayerEvent>.Continuation
     private var currentClient: PlayerClient?
     private var eventForwardingTask: Task<Void, Never>?
-    private var teardownTask: Task<Void, Never>?
+    private var lifecycleBarrier: Task<Void, Never>?
+    private var lifecycleBarrierID: UUID?
     private var deferredDestroyTask: Task<Void, Never>?
+    private var deferredDestroyID: UUID?
     private var isShuttingDown = false
+    private var playbackIntentRequestID: UUID?
+    private var playbackIntentGeneration: UInt64 = 0
+    var transitionSuspensionForTesting:
+        ((PlayerLifecycleTransitionKind) async -> Void)?
 
     private var rememberedVolume: Double = 100
     private var rememberedMuted = false
@@ -2603,126 +2728,182 @@ final class PlayerLifecycleController {
             ?? L10n.string("player.runtime.unavailable", fallback: "libmpv unavailable")
     }
 
+    func ownsPlaybackForTesting(_ requestID: UUID) -> Bool {
+        playbackIntentRequestID == requestID
+    }
+
     @discardableResult
-    func prepareForPlayback(requestID: UUID) async throws -> MPVPlayerClient {
+    func prepareForPlayback(
+        requestID: UUID,
+        releasePolicy: PlayerReleasePolicy = .existingBehavior,
+        compatibilityPolicy: PlaybackCompatibilityPolicy = .existing
+    ) async throws -> MPVPlayerClient {
+        let generation = claimPlaybackIntent(requestID: requestID)
         if let deferredDestroyTask {
+            let deferredDestroyID = self.deferredDestroyID
             deferredDestroyTask.cancel()
             await deferredDestroyTask.value
-            self.deferredDestroyTask = nil
+            if self.deferredDestroyID == deferredDestroyID {
+                self.deferredDestroyTask = nil
+                self.deferredDestroyID = nil
+            }
         }
-        if let teardownTask {
-            await teardownTask.value
+        guard ownsPlaybackIntent(requestID: requestID, generation: generation) else {
+            throw CancellationError()
         }
-        guard !isShuttingDown else {
-            throw AppError.playback(L10n.string("player.shutting-down", fallback: "The player is shutting down."))
-        }
-        if let player = renderPlayer {
+        return try await serializeLifecycleTransition { [weak self] in
+            guard let self else { throw CancellationError() }
+            await self.transitionSuspensionForTesting?(.prepare)
+            guard self.ownsPlaybackIntent(
+                requestID: requestID, generation: generation
+            ), !self.isShuttingDown else {
+                throw CancellationError()
+            }
+
+            if let capturedClient = self.currentClient,
+               releasePolicy == .destroyBeforeLoad
+                || self.renderPlayer?.compatibilityPolicy != compatibilityPolicy {
+                await self.transitionSuspensionForTesting?(.strictRelease)
+                guard self.ownsPlaybackIntent(
+                    requestID: requestID, generation: generation
+                ) else { throw CancellationError() }
+                self.detachCurrentClient(ifIdenticalTo: capturedClient)
+                await capturedClient.shutdown()
+                guard self.ownsPlaybackIntent(
+                    requestID: requestID, generation: generation
+                ) else { throw CancellationError() }
+            }
+
+            if let player = self.renderPlayer {
+                PlayerStartupTraceStore.shared.markClientReady(
+                    requestID: requestID,
+                    playerID: player.renderOwnerID
+                )
+                return player
+            }
+            if let unavailable = self.currentClient {
+                self.detachCurrentClient(ifIdenticalTo: unavailable)
+                await unavailable.shutdown()
+                guard self.ownsPlaybackIntent(
+                    requestID: requestID, generation: generation
+                ) else { throw CancellationError() }
+            }
+
+            PlayerExperimentLogger.lifecycle(
+                "recreate begin",
+                playerID: nil,
+                requestID: requestID,
+                mode: self.mode
+            )
+            let player = try MPVPlayerClient(teardownMode: self.mode, compatibilityPolicy: compatibilityPolicy)
+            do {
+                try await self.applyRememberedSettings(to: player)
+                guard self.ownsPlaybackIntent(
+                    requestID: requestID, generation: generation
+                ), !self.isShuttingDown else {
+                    await player.shutdown()
+                    throw CancellationError()
+                }
+            } catch {
+                await player.shutdown()
+                throw error
+            }
+            self.currentClient = player
+            self.startForwardingEvents(from: player)
+            self.onRenderClientChanged?(player)
             PlayerStartupTraceStore.shared.markClientReady(
                 requestID: requestID,
                 playerID: player.renderOwnerID
             )
+            PlayerExperimentLogger.lifecycle(
+                "recreate ready",
+                playerID: player.renderOwnerID,
+                requestID: requestID,
+                mode: self.mode
+            )
             return player
         }
-
-        PlayerExperimentLogger.lifecycle(
-            "recreate begin",
-            playerID: nil,
-            requestID: requestID,
-            mode: mode
-        )
-        let player = try MPVPlayerClient(teardownMode: mode)
-        do {
-            try await applyRememberedSettings(to: player)
-        } catch {
-            await player.shutdown()
-            throw error
-        }
-        currentClient = player
-        startForwardingEvents(from: player)
-        onRenderClientChanged?(player)
-        PlayerStartupTraceStore.shared.markClientReady(
-            requestID: requestID,
-            playerID: player.renderOwnerID
-        )
-        PlayerExperimentLogger.lifecycle(
-            "recreate ready",
-            playerID: player.renderOwnerID,
-            requestID: requestID,
-            mode: mode
-        )
-        return player
     }
 
     func closeAfterPlayback(
         requestID: UUID?,
         warmRetentionSeconds: TimeInterval = 0
     ) async {
+        let ownership = ownershipForRelease(requestID: requestID)
+        guard let ownership else { return }
+        renderPlayer?.cancelPendingNativeLoad(requestID: ownership.requestID)
         let retention = max(0, warmRetentionSeconds)
-        if mode == .fullDestroy, retention == 0 {
-            // Destruction itself is the strongest native release boundary and
-            // cannot hang waiting for an end-file event that will never be
-            // delivered. AppState releases transfer receipts only after this
-            // method returns.
-            await fullDestroy(requestID: requestID)
-            return
-        }
-        await stop()
-        guard mode == .fullDestroy else { return }
-        if retention > 0 {
-            deferredDestroyTask?.cancel()
-            let task = Task { @MainActor [weak self] in
-                do {
-                    try await Task.sleep(
-                        nanoseconds: UInt64(retention * 1_000_000_000)
-                    )
-                } catch {
-                    return
+        do {
+            try await serializeLifecycleTransition { [weak self] in
+                guard let self else { return }
+                try await self.transitionSuspensionForTesting?(.close)
+                guard self.ownsPlaybackIntent(
+                    requestID: ownership.requestID,
+                    generation: ownership.generation
+                ), let capturedClient = self.currentClient else { return }
+                if self.mode == .fullDestroy, retention == 0 {
+                    self.detachCurrentClient(ifIdenticalTo: capturedClient)
+                    await capturedClient.shutdown()
+                } else {
+                    await capturedClient.stop()
                 }
-                guard let self, !self.isShuttingDown else { return }
-                self.deferredDestroyTask = nil
-                await self.fullDestroy(requestID: requestID)
             }
-            deferredDestroyTask = task
+        } catch {
             return
         }
-        await fullDestroy(requestID: requestID)
+        guard ownsPlaybackIntent(
+            requestID: ownership.requestID,
+            generation: ownership.generation
+        ), mode == .fullDestroy, retention > 0 else { return }
+        deferredDestroyTask?.cancel()
+        let deferredGeneration = ownership.generation
+        let deferredRequestID = ownership.requestID
+        let deferredID = UUID()
+        let task = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(
+                    nanoseconds: UInt64(retention * 1_000_000_000)
+                )
+            } catch {
+                return
+            }
+            guard let self,
+                  self.ownsPlaybackIntent(
+                    requestID: deferredRequestID,
+                    generation: deferredGeneration
+                  ), !self.isShuttingDown else { return }
+            await self.fullDestroy(requestID: deferredRequestID)
+        }
+        deferredDestroyTask = task
+        deferredDestroyID = deferredID
     }
 
     func fullDestroy(requestID: UUID?) async {
-        if let teardownTask {
-            await teardownTask.value
+        guard let ownership = ownershipForRelease(requestID: requestID) else {
             return
         }
-        guard let player = currentClient else { return }
-        let playerID = (player as? MPVPlayerClient)?.renderOwnerID
-        PlayerExperimentLogger.lifecycle(
-            "full destroy begin",
-            playerID: playerID,
-            requestID: requestID,
-            mode: mode
-        )
-        eventForwardingTask?.cancel()
-        eventForwardingTask = nil
-        let task = Task { @MainActor [weak self, player] in
+        renderPlayer?.cancelPendingNativeLoad(requestID: ownership.requestID)
+        _ = try? await serializeLifecycleTransition { [weak self] in
+            guard let self,
+                  self.ownsPlaybackIntent(
+                    requestID: ownership.requestID,
+                    generation: ownership.generation
+                  ), let player = self.currentClient else { return }
+            let playerID = (player as? MPVPlayerClient)?.renderOwnerID
+            PlayerExperimentLogger.lifecycle(
+                "full destroy begin", playerID: playerID,
+                requestID: ownership.requestID, mode: self.mode
+            )
+            self.detachCurrentClient(ifIdenticalTo: player)
             await player.shutdown()
-            guard let self else { return }
-            if self.currentClient === player {
-                self.currentClient = nil
-                self.onRenderClientChanged?(nil)
-            }
             if let playerID {
                 PlayerStartupTraceStore.shared.cancel(playerID: playerID)
             }
             PlayerExperimentLogger.lifecycle(
-                "full destroy end",
-                playerID: playerID,
-                requestID: requestID,
-                mode: self.mode
+                "full destroy end", playerID: playerID,
+                requestID: ownership.requestID, mode: self.mode
             )
         }
-        teardownTask = task
-        await task.value
-        teardownTask = nil
     }
 
     func load(
@@ -2731,21 +2912,37 @@ final class PlayerLifecycleController {
         requestID: UUID,
         waitForRenderSurface: ((UUID) async throws -> Void)? = nil
     ) async throws {
-        let player = try await prepareForPlayback(requestID: requestID)
-        if let waitForRenderSurface {
-            try await waitForRenderSurface(player.renderOwnerID)
-            try Task.checkCancellation()
-            guard renderPlayer === player else {
-                throw CancellationError()
+        let generation = claimPlaybackIntent(requestID: requestID)
+        try await serializeLifecycleTransition { [weak self] in
+            guard let self,
+                  self.ownsPlaybackIntent(
+                    requestID: requestID, generation: generation
+                  ) else { throw CancellationError() }
+            let player = try await self.prepareForPlaybackInsideTransition(
+                requestID: requestID,
+                generation: generation,
+                compatibilityPolicy: media.compatibilityPolicy
+            )
+            if let waitForRenderSurface {
+                try await waitForRenderSurface(player.renderOwnerID)
+                try Task.checkCancellation()
+                guard self.ownsPlaybackIntent(
+                    requestID: requestID, generation: generation
+                ), self.renderPlayer === player else {
+                    throw CancellationError()
+                }
             }
+            try await player.load(
+                media,
+                startPosition: startPosition,
+                requestID: requestID,
+                aspectRatio: self.rememberedAspectRatio,
+                panscan: PlayerViewportPolicy.panscan(siteKey: media.siteKey)
+            )
+            guard self.ownsPlaybackIntent(
+                requestID: requestID, generation: generation
+            ) else { throw CancellationError() }
         }
-        try await player.load(
-            media,
-            startPosition: startPosition,
-            requestID: requestID,
-            aspectRatio: rememberedAspectRatio,
-            panscan: PlayerViewportPolicy.panscan(siteKey: media.siteKey)
-        )
     }
 
     func play() async throws {
@@ -2756,8 +2953,26 @@ final class PlayerLifecycleController {
         try await requireClient().pause()
     }
 
+    func stop(ifOwnedBy requestID: UUID) async {
+        if playbackIntentRequestID == requestID { renderPlayer?.cancelPendingNativeLoad(requestID: requestID) }
+        guard let ownership = ownershipForRelease(requestID: requestID) else {
+            return
+        }
+        renderPlayer?.cancelPendingNativeLoad(requestID: ownership.requestID)
+        _ = try? await serializeLifecycleTransition { [weak self] in
+            guard let self else { return }
+            await self.transitionSuspensionForTesting?(.stop)
+            guard self.ownsPlaybackIntent(
+                requestID: ownership.requestID,
+                generation: ownership.generation
+            ), let capturedClient = self.currentClient else { return }
+            await capturedClient.stop()
+        }
+    }
+
     func stop() async {
-        await currentClient?.stop()
+        guard let requestID = playbackIntentRequestID else { return }
+        await stop(ifOwnedBy: requestID)
     }
 
     func seek(to position: TimeInterval) async throws {
@@ -2827,19 +3042,16 @@ final class PlayerLifecycleController {
     }
 
     func shutdown() async {
-        guard !isShuttingDown else {
-            if let teardownTask {
-                await teardownTask.value
-            }
-            return
-        }
+        guard !isShuttingDown else { await lifecycleBarrier?.value; return }
+        renderPlayer?.cancelPendingNativeLoad(requestID: playbackIntentRequestID)
         isShuttingDown = true
+        playbackIntentGeneration &+= 1
+        playbackIntentRequestID = nil
         deferredDestroyTask?.cancel()
         await deferredDestroyTask?.value
         deferredDestroyTask = nil
-        if let teardownTask {
-            await teardownTask.value
-        }
+        deferredDestroyID = nil
+        await lifecycleBarrier?.value
         eventForwardingTask?.cancel()
         eventForwardingTask = nil
         if let player = currentClient {
@@ -2848,6 +3060,107 @@ final class PlayerLifecycleController {
         currentClient = nil
         onRenderClientChanged?(nil)
         continuation.finish()
+    }
+
+    private typealias PlaybackOwnership = (requestID: UUID, generation: UInt64)
+
+    private func claimPlaybackIntent(requestID: UUID) -> UInt64 {
+        guard playbackIntentRequestID != requestID else {
+            return playbackIntentGeneration
+        }
+        renderPlayer?.cancelPendingNativeLoad(requestID: playbackIntentRequestID)
+        playbackIntentGeneration &+= 1
+        playbackIntentRequestID = requestID
+        return playbackIntentGeneration
+    }
+
+    private func ownershipForRelease(requestID: UUID?) -> PlaybackOwnership? {
+        if playbackIntentRequestID == nil, let requestID {
+            return (requestID, claimPlaybackIntent(requestID: requestID))
+        }
+        guard let ownedRequestID = playbackIntentRequestID,
+              requestID == nil || requestID == ownedRequestID else { return nil }
+        return (ownedRequestID, playbackIntentGeneration)
+    }
+
+    private func ownsPlaybackIntent(requestID: UUID, generation: UInt64) -> Bool {
+        !isShuttingDown
+            && playbackIntentRequestID == requestID
+            && playbackIntentGeneration == generation
+    }
+
+    private func serializeLifecycleTransition<T>(
+        _ operation: @escaping @MainActor () async throws -> T
+    ) async throws -> T {
+        let previous = lifecycleBarrier
+        let operationID = UUID()
+        let task = Task<T, Error> { @MainActor in
+            await previous?.value
+            try Task.checkCancellation()
+            return try await operation()
+        }
+        lifecycleBarrierID = operationID
+        lifecycleBarrier = Task { _ = try? await task.value }
+        do {
+            let value = try await task.value
+            if lifecycleBarrierID == operationID {
+                lifecycleBarrier = nil
+                lifecycleBarrierID = nil
+            }
+            return value
+        } catch {
+            if lifecycleBarrierID == operationID {
+                lifecycleBarrier = nil
+                lifecycleBarrierID = nil
+            }
+            throw error
+        }
+    }
+
+    private func prepareForPlaybackInsideTransition(
+        requestID: UUID,
+        generation: UInt64,
+        compatibilityPolicy: PlaybackCompatibilityPolicy
+    ) async throws -> MPVPlayerClient {
+        guard ownsPlaybackIntent(
+            requestID: requestID, generation: generation
+        ), !isShuttingDown else { throw CancellationError() }
+        if let player = renderPlayer, player.compatibilityPolicy == compatibilityPolicy { return player }
+        if let unavailable = currentClient {
+            detachCurrentClient(ifIdenticalTo: unavailable)
+            await unavailable.shutdown()
+            guard ownsPlaybackIntent(
+                requestID: requestID, generation: generation
+            ) else { throw CancellationError() }
+        }
+        let player = try MPVPlayerClient(teardownMode: mode, compatibilityPolicy: compatibilityPolicy)
+        do {
+            try await applyRememberedSettings(to: player)
+            guard ownsPlaybackIntent(
+                requestID: requestID, generation: generation
+            ) else {
+                await player.shutdown()
+                throw CancellationError()
+            }
+        } catch {
+            await player.shutdown()
+            throw error
+        }
+        currentClient = player
+        startForwardingEvents(from: player)
+        onRenderClientChanged?(player)
+        PlayerStartupTraceStore.shared.markClientReady(
+            requestID: requestID, playerID: player.renderOwnerID
+        )
+        return player
+    }
+
+    private func detachCurrentClient(ifIdenticalTo capturedClient: PlayerClient) {
+        guard currentClient === capturedClient else { return }
+        eventForwardingTask?.cancel()
+        eventForwardingTask = nil
+        currentClient = nil
+        onRenderClientChanged?(nil)
     }
 
     private func requireClient() throws -> PlayerClient {
