@@ -1,8 +1,9 @@
 # Compatibility
 
-- 对照版本：0.6.0（Build 100）
+- 对照版本：0.6.1（Build 101）
 - 最近更新：2026-09-09
-- 当前公开正式版本：0.6.0（Build 100），Apple Silicon / arm64 / macOS 12.0+
+- 当前源码版本：0.6.1（Build 101），Apple Silicon / arm64 / macOS 12.0+
+- 最新公开公证 DMG：0.6.0；0.6.1 本地 Release 验证与公开分发门禁分别记录
 
 ## 概述
 
@@ -110,6 +111,16 @@ Spider 返回的清晰度顺序或显式位置，不按“原画”名称擅自�
 这是受支持 CatVod/CatPaw 风格 Node 视频接口的一个兼容子集，不表示支持任意 Node
 Spider、完整 CatPawOpen 应用协议或其他内容模块。远程 bundle 具有 Node 完整能力，
 只应加载可信配置。
+
+### Android Managed component storage / uninstall
+
+状态：`Supported`（0.6.1 新增）。分类统计组件、安装缓存、用户数据和备份；仅删除可识别的
+Managed components。保留 AVD/userdata、登录状态、backing/encryption 文件、Android home、
+私有 ADB keys、用户数据 backups 和 runtime-selection；External SDK 始终排除。
+卸载前必须确认本应用 Android 会话停止（包括 External 模式）。只读 dry-run、短效单次计划、
+独立 Maintenance 事务及恢复保证删除范围可审计；未知内容保留，不提供删除用户数据入口。
+预计释放空间来自本次计划，需要时可重装组件，仍执行既有 AVD 兼容性检查。
+见 [实现与验证说明](../../../../Docs/ANDROID_MANAGED_UNINSTALL.md)。
 
 ### Android / Dex
 
@@ -342,6 +353,7 @@ App 支持范围和 Managed Android Runtime 实机验证是两个不同结论：
 | Developer ID 分发 | Supported | 0.6.0（Build 100）正式 DMG 使用 Developer ID Application 与 secure timestamp 签名，Hardened Runtime、嵌套签名和权限边界由发布门禁验证 |
 | Notarization / Staple / Gatekeeper | Supported | 0.6.0（Build 100）只有在 Apple notarization 返回 `Accepted` 并通过 staple、`stapler validate` 与 Gatekeeper 后才发布 |
 | 0.6.0（Build 100）正式发布 | Supported | DMG、内部 ZIP、源码、四份 SBOM、Notices 和 APK 由外层 manifest/SHA256SUMS 绑定到 tag `v0.6.0` 指向的 exact commit |
+| 0.6.1（Build 101）源码收口 | Supported | 默认测试及本地 Release 验证另行记录；tag `v0.6.1` 留待公证分发门禁；不沿用 0.6.0 的公证结论 |
 | App Sandbox | Not Applicable | 当前为 Developer ID 外部分发目标；Sandbox 与 Hardened Runtime 是不同边界 |
 
 ## 明确不提供

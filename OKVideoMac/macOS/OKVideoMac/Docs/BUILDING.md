@@ -1,18 +1,27 @@
 # Building OKVideoMac
 
-## 0.6.0 release verification
+## 0.6.1 source finalization verification
 
-The 0.6.0 (Build 100) source baseline executes 719 App tests (713 passed,
-6 external-fixture/Android E2E tests not enabled), 261 OKVideoKit tests,
-36 AndroidRuntimeKit tests (35 passed, 1 online-install test not enabled),
-and 30 Node/CatPaw/Quark tests. External and installed-DMG smoke gates are
-recorded separately and may not be inferred from these unit-test counts. The four
-real Android lifecycle tests skipped by the default run were then executed in
-separate processes and all passed. The isolated API 35 runtime matrix also passed.
-See [release validation](../../../../Docs/RELEASE_VALIDATION_0.6.0.md) for the boundary.
-Xcode build-for-testing succeeds; on the current host, LaunchServices cannot
-launch its test runner. The full suite is executed using the same built module,
-bundled libraries and XCTest engine in an isolated CLI host with AppKit initialized.
+The complete default suite executes 721 App tests (713 passed, 8 conditional
+external/Android/renderer gates skipped), 261 OKVideoKit tests (all passed),
+57 AndroidRuntimeKit tests (56 passed, 1 online-install gate skipped), and
+30 Node/CatPaw/Quark tests (all passed): 1060 passed, 9 skipped, zero failures.
+The earlier 98-pass result was a focused uninstall regression, not the full suite.
+Android lint succeeds; the JVM unit target has no sources. Dependency Kotlin
+metadata diagnostics remain documented and were not suppressed.
+
+The final full App run uses a temporary Debug test host with a unique Bundle
+Identifier, original single-instance protection and Chinese system-language
+arguments. This avoids the user's running App and matches existing localized
+assertions. Explicit English and Chinese localization tests still run. The initial
+host-configuration failures, exact skips and final results are recorded in
+[0.6.1 validation](../../../../Docs/RELEASE_VALIDATION_0.6.1.md).
+This temporary test setup is not the delivered Release bundle.
+
+The historical 0.6.0 validation remains in
+[its original record](../../../../Docs/RELEASE_VALIDATION_0.6.0.md).
+This source finalization does not repeat real Emulator uninstall or claim Apple
+notarization. A public release/tag still requires the distribution gates below.
 
 Formal distribution uses the existing command below. The default invocation is
 local ad-hoc packaging and is not a formal Release substitute:

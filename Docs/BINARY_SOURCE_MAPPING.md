@@ -1,11 +1,10 @@
-# OKVideoMac 0.6.0 (Build 100) Binary → Source Mapping
+# OKVideoMac 0.6.1 (Build 101) Binary → Source Mapping
 
-This document answers which fixed source corresponds to each binary distributed
-in OKVideoMac 0.6.0 (Build 100). The authoritative per-release Git commit and
-binary/source hashes are recorded in the published
-`SOURCE_RELEASE_MANIFEST.json`. The formal asset set is available under tag
-`v0.6.0`; where native reproducible-build evidence is missing, the status
-remains explicit.
+This document maps the 0.6.1 (Build 101) source candidate to packaged binaries.
+The generated `SOURCE_RELEASE_MANIFEST.json` records the exact per-package commit
+and hashes. Public assets and `v0.6.1` follow the formal distribution gates; the
+published v0.6.0 source set remains historical evidence. Native reproducibility
+limitations below remain explicit and unchanged.
 
 The historical project-code baseline is Git commit
 `c0c145896a78749bc811d2af98621518fb58902c`; Phase 1 is
@@ -15,7 +14,7 @@ Using a moving `main`, `master`, or `latest` URL is not acceptable.
 
 | Distributed binary / content | Fixed corresponding source | Changes / build relationship | Release source status |
 | --- | --- | --- | --- |
-| `Contents/MacOS/OKVideoMac` | exact Git commit recorded in the adjacent `SOURCE_RELEASE_MANIFEST.json` and referenced by tag `v0.6.0` | Xcode Release arm64 build | Deterministic project source is verified against the internal ZIP carrier; the public DMG is independently verified and hash-bound by the same outer manifest |
+| `Contents/MacOS/OKVideoMac` | exact Git commit recorded in the adjacent `SOURCE_RELEASE_MANIFEST.json` and to be referenced by the final public release tag | Xcode Release arm64 build | Deterministic project source is verified against the internal ZIP carrier; the public DMG is independently verified and hash-bound by the same outer manifest |
 | OKVideoKit code linked into the executable | `macOS/OKVideoMac/Packages/OKVideoKit` at the same project commit | project source, `GPL-3.0-only` | Fixed source is included in the published project archive |
 | `libOKMPVBridge.dylib` | `macOS/OKVideoMac/Native/MPVBridge/OKMPVBridge.c` and `.h` at the Phase 4 final project commit; exact implementation recovered from project-history commit `481dc64` | project bridge dynamically linked to patched mpv and FFmpeg; restored source exports the stable 25-symbol interface including both media-probe functions | Exact stable project source is present; rebuild and 25-symbol comparison pass; published source archive contains the bridge |
 | `libmpv.dylib` | [mpv v0.41.0 archive](https://github.com/mpv-player/mpv/archive/refs/tags/v0.41.0.tar.gz), SHA `ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209`, plus `Patches/mpv-0.41.0-coreaudio-without-cocoa.patch`, SHA `f57fa49d8916d3ffc3834bb3f2a53b041c0113984bbd9f3ef6b68257b3c0af9f` | GPL-enabled Meson build; modified source | Source archive, patch, build script/options, license and hashes are included in the generated third-party source/license archives |

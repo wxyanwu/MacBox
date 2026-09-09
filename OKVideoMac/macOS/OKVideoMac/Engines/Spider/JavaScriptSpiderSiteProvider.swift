@@ -2346,6 +2346,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         )
     }
 
+    private let operationAdmission = AndroidBridgeOperationAdmission()
     private let runtime: AndroidDexBridgeRuntime
     private let runtimePrerequisite: @Sendable () async throws -> Void
     private let session: URLSession
@@ -2387,6 +2388,17 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     func startRuntime() async throws -> AndroidRuntimeStatus {
         try await runtime.start()
         return await runtime.status()
+    }
+
+    func beginManagedMaintenance() async throws {
+        try await runtime.closeManagedStartupAdmission()
+        try await operationAdmission.closeAndWait()
+        try await runtime.stopForManagedMaintenance()
+    }
+
+    func endManagedMaintenance() async {
+        await runtime.endManagedMaintenance()
+        await operationAdmission.reopen()
     }
 
     func stopRuntime() async -> AndroidRuntimeStatus {
@@ -2627,6 +2639,30 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     )
 
     func invoke(
+        site: SiteConfiguration,
+        configurationID: String,
+        configurationHosts: [String],
+        jarReference: String,
+        baseURL: URL?,
+        method: String,
+        arguments: [JSONValue],
+        monitorsAuthorization explicitAuthorizationAction: Bool = false,
+        interactionKind explicitInteractionKind:
+            ConfigurationInteraction.ActionKind? = nil,
+        refreshPlayback: Bool = false,
+        requestedInteractionID: UUID? = nil
+    ) async throws -> JSONValue {
+        try await operationAdmission.perform { [self] in
+            try await invokeAdmitted(site: site, configurationID: configurationID,
+                configurationHosts: configurationHosts, jarReference: jarReference,
+                baseURL: baseURL, method: method, arguments: arguments,
+                monitorsAuthorization: explicitAuthorizationAction,
+                interactionKind: explicitInteractionKind, refreshPlayback: refreshPlayback,
+                requestedInteractionID: requestedInteractionID)
+        }
+    }
+
+    private func invokeAdmitted(
         site: SiteConfiguration,
         configurationID: String,
         configurationHosts: [String],
@@ -3052,6 +3088,13 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
 
     func uiState(interactionID: UUID? = nil) async throws
         -> AndroidBridgeUIState {
+        try await operationAdmission.perform { [self] in
+            try await uiStateAdmitted(interactionID: interactionID)
+        }
+    }
+
+    private func uiStateAdmitted(interactionID: UUID? = nil) async throws
+        -> AndroidBridgeUIState {
         try await runtime.ensureReady()
         return try await fetchUIState(interactionID: interactionID)
     }
@@ -3084,6 +3127,15 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     }
 
     func resetAuthorizationUI(
+        interactionID: UUID? = nil,
+        cancellationReason: String = "hostRequested"
+    ) async throws {
+        try await operationAdmission.perform { [self] in
+            try await resetAuthorizationUIAdmitted(interactionID: interactionID, cancellationReason: cancellationReason)
+        }
+    }
+
+    private func resetAuthorizationUIAdmitted(
         interactionID: UUID? = nil,
         cancellationReason: String = "hostRequested"
     ) async throws {
@@ -3122,6 +3174,14 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     }
 
     func confirmInteractionCompletion(
+        interactionID: UUID
+    ) async throws -> AndroidBridgeUIState {
+        try await operationAdmission.perform { [self] in
+            try await confirmInteractionCompletionAdmitted(interactionID: interactionID)
+        }
+    }
+
+    private func confirmInteractionCompletionAdmitted(
         interactionID: UUID
     ) async throws -> AndroidBridgeUIState {
         try await runtime.ensureReady()
@@ -5964,6 +6024,7 @@ actor AndroidDexBridgeRuntime {
     private let currentBootIdentifier: String
     private let verboseAndroidDiagnosticsEnabled: Bool
     private var userSelectedSDKRoot: String?
+    private var maintenanceStopToken: UUID?
     private var runtimeSelectionMode: AndroidRuntimeMode?
     private var emulatorProcess: Process?
     private var emulatorOutputHandles: [FileHandle] = []
@@ -6846,6 +6907,7 @@ actor AndroidDexBridgeRuntime {
     }
 
     func status() async -> AndroidRuntimeStatus {
+        if maintenanceStopToken != nil { return .stopping }
         if let persisted = AndroidRuntimeFailureStatePolicy.status(
             operationStatus: operationStatus,
             lastFailure: lastFailure
@@ -7466,6 +7528,7 @@ actor AndroidDexBridgeRuntime {
     }
 
     func repair() async throws {
+        guard maintenanceStopToken == nil else { throw RuntimeMaintenanceError.busy }
         actionSurfaceLease = nil
         let retryKnownFailedNetworkCommand = AndroidRuntimeRecoveryPolicy
             .shouldRetryKnownFailedNetworkCommand(
@@ -7483,6 +7546,7 @@ actor AndroidDexBridgeRuntime {
     }
 
     func rebuildPrivateAVD() async throws {
+        guard maintenanceStopToken == nil else { throw RuntimeMaintenanceError.busy }
         let stopToken = await Self.startupSingleFlight.beginStopping(
             permanent: false
         )
@@ -7570,7 +7634,78 @@ actor AndroidDexBridgeRuntime {
         try await ensureRuntimeStartup(forceInstall: true)
     }
 
+    func closeManagedStartupAdmission() async throws {
+        guard maintenanceStopToken == nil else { throw RuntimeMaintenanceError.busy }
+        // Reserve before the actor yields to cancellation/cleanup.
+        maintenanceStopToken = UUID()
+        maintenanceStopToken = await Self.startupSingleFlight.beginStopping(permanent: false)
+    }
+
+    func stopForManagedMaintenance() async throws {
+        guard maintenanceStopToken != nil else { throw RuntimeMaintenanceError.busy }
+        let recorded = loadIdentity()
+        let adbPID = lastADBServerDiagnostic?.pid ?? persistedADBServerPID
+        let adbBirth = lastADBServerDiagnostic?.birthIdentity ?? persistedADBServerBirthIdentity
+        let toolchain = recorded.flatMap { resolver().toolchain(at: $0.sdkRoot) }
+            ?? resolver().resolve() ?? lastObservedToolchain
+        await performStop(reason: "managedMaintenance")
+        guard lastShutdownMechanism != .refusedOwnershipMismatch,
+              lastShutdownMechanism != .none,
+              try matchingAVDProcessCount() == 0,
+              !fileManager.fileExists(atPath: manifestURL.path),
+              emulatorProcess?.isRunning != true else {
+            throw RuntimeMaintenanceError.sessionNotStopped
+        }
+        stopPrivateADBServerIfOwned(toolchain: toolchain)
+        if let adbPID, let adbBirth,
+           processBirthIdentity(pid: adbPID)?.value == adbBirth {
+            throw RuntimeMaintenanceError.sessionNotStopped
+        }
+        try verifyMaintenanceProcessesStopped()
+    }
+
+    /// A failed probe is not an empty process set. Check every command against
+    /// the private runtime and private ADB port, including auxiliary children.
+    private func verifyMaintenanceProcessesStopped() throws {
+        let output = try run(URL(fileURLWithPath: "/bin/ps"),
+            ["-axo", "pid=,command="], category: "runtime.maintenance.processes", timeout: 5)
+        guard !output.isEmpty else { throw RuntimeMaintenanceError.sessionNotStopped }
+        let privatePath = runtimeDirectory.standardizedFileURL.resolvingSymlinksInPath().path
+        for line in output.split(whereSeparator: \.isNewline) {
+            let parts = line.trimmingCharacters(in: .whitespaces).split(separator: " ", maxSplits: 1)
+            guard parts.count == 2, let pid = Int32(parts[0]), pid != getpid() else { continue }
+            let command = String(parts[1])
+            if command.contains(privatePath) || command.contains("-avd " + Self.avdName)
+                || command.contains("@" + Self.avdName)
+                || (command.contains("adb") && command.contains(String(privateADBServerPort))) {
+                throw RuntimeMaintenanceError.sessionNotStopped
+            }
+        }
+        // lsof exits 1 when no listener matches. Other errors are ambiguous.
+        do {
+            let output = try run(URL(fileURLWithPath: "/usr/sbin/lsof"),
+                ["-nP", "-iTCP:\(privateADBServerPort)", "-sTCP:LISTEN", "-Fp"],
+                category: "runtime.maintenance.listener", timeout: 5)
+            guard output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw RuntimeMaintenanceError.sessionNotStopped
+            }
+        } catch let error as AndroidToolCommandError {
+            guard error.exitCode == 1, !error.timedOut,
+                  error.stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw RuntimeMaintenanceError.sessionNotStopped
+            }
+        }
+    }
+
+    func endManagedMaintenance() async {
+        if let token = maintenanceStopToken {
+            maintenanceStopToken = nil
+            await Self.startupSingleFlight.finishStopping(token)
+        }
+    }
+
     func stop() async {
+        guard maintenanceStopToken == nil else { return }
         let stopToken = await Self.startupSingleFlight.beginStopping(
             permanent: false
         )
@@ -7882,6 +8017,7 @@ actor AndroidDexBridgeRuntime {
     }
 
     func ensureReady() async throws {
+        try RuntimeMaintenanceService.requireNoPendingTransaction(layout: AndroidRuntimeLayout(applicationSupportDirectory: applicationSupportDirectory))
         guard !(await Self.startupSingleFlight.isRejectingStartup()) else {
             throw AndroidRuntimeAdmissionError.terminating
         }
@@ -10388,14 +10524,16 @@ actor AndroidDexBridgeRuntime {
                 writtenMetadata.append(name)
             }
         } catch {
-            for move in completedMoves.reversed()
-                where !fileManager.fileExists(atPath: move.source.path) {
-                try? fileManager.moveItem(
-                    at: move.destination,
-                    to: move.source
-                )
+            var restoreFailed = false
+            for move in completedMoves.reversed() {
+                if fileManager.fileExists(atPath: move.source.path) {
+                    restoreFailed = true
+                    continue
+                }
+                do { try fileManager.moveItem(at: move.destination, to: move.source) }
+                catch { restoreFailed = true }
             }
-            try? fileManager.removeItem(at: backup)
+            if !restoreFailed { try? fileManager.removeItem(at: backup) }
             throw error
         }
         return AndroidPrivateAVDBackupResult(
@@ -10686,6 +10824,7 @@ actor AndroidDexBridgeRuntime {
     private func managedAVDContext(
         for toolchain: AndroidToolchain
     ) throws -> ManagedAVDContext? {
+        if runtimeSelectionMode == .external { return nil }
         let layout = AndroidRuntimeLayout(
             applicationSupportDirectory: applicationSupportDirectory
         )
@@ -11473,6 +11612,9 @@ actor AndroidDexBridgeRuntime {
                 )
             }
         }
+        // Keep ownership evidence if the daemon did not actually exit.
+        if let pid = current.pid,
+           processBirthIdentity(pid: pid)?.value == expectedBirthIdentity { return }
         adbServerProcess = nil
         for handle in adbServerOutputHandles { try? handle.close() }
         adbServerOutputHandles = []

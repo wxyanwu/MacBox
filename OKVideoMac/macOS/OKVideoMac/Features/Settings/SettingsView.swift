@@ -673,6 +673,46 @@ struct SettingsView: View {
 
                 SettingsDivider()
 
+                VStack(alignment: .leading, spacing: 10) {
+                    if let storage = state.androidRuntimeStorage {
+                        Text(SettingsL10n.string("settings.android.storage.summary", "Components: %@ · Installation cache: %@ · Android user data: %@ · Backups: %@",
+                            ByteCountFormatter.string(fromByteCount: storage.componentBytes, countStyle: .file),
+                            ByteCountFormatter.string(fromByteCount: storage.cacheBytes, countStyle: .file),
+                            ByteCountFormatter.string(fromByteCount: storage.userDataBytes, countStyle: .file),
+                            ByteCountFormatter.string(fromByteCount: storage.backupBytes, countStyle: .file)))
+                            .font(.caption).foregroundStyle(.secondary)
+                        if !storage.isComplete {
+                            Text(SettingsL10n.string("settings.android.storage.incomplete", "Storage estimate is incomplete. Unverified files will not be removed."))
+                                .font(.caption).foregroundStyle(.orange)
+                        }
+                        HStack {
+                            if storage.hasPendingMaintenance {
+                                Button(SettingsL10n.string("settings.android.uninstall.retry-cleanup", "Resume Maintenance…")) {
+                                    Task { await state.recoverAndroidMaintenanceIfNeeded() }
+                                }
+                            } else {
+                                Button(SettingsL10n.string("settings.android.action.uninstall-runtime", "Uninstall OKVideoMac-managed Components…"), role: .destructive) {
+                                    Task { await state.uninstallManagedAndroidRuntime() }
+                                }
+                                .disabled(storage.componentBytes + storage.cacheBytes + storage.backupBytes == 0)
+                            }
+                            if state.isAndroidRuntimeBusy { AppActivityIndicator(size: .small) }
+                        }
+                        .disabled(state.isAndroidRuntimeBusy || state.managedRuntimeInstallationState.isBusy)
+                    } else {
+                        Text(SettingsL10n.string("settings.android.storage.calculating", "Calculating Android storage…"))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let message = state.androidMaintenanceMessage {
+                        Text(message).font(.caption).textSelection(.enabled)
+                    }
+                    Text(SettingsL10n.string("settings.android.uninstall.keep-user-data", "Uninstall keeps Android sign-in data, user-data backups, private keys, and external SDK files."))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(16)
+
+                SettingsDivider()
+
                 SettingsControlRow(
                     icon: externalRuntimeIcon,
                     color: externalRuntimeColor,
@@ -795,6 +835,7 @@ struct SettingsView: View {
             }
         }
         .task {
+            await state.refreshAndroidStorage()
             while !Task.isCancelled {
                 await state.refreshAndroidRuntimeStatus()
                 try? await Task.sleep(nanoseconds: 2_000_000_000)

@@ -4882,6 +4882,8 @@ final class AppState: ObservableObject {
         ConfigurationCategoryPresentation?
     @Published private(set) var androidRuntimeStatus: AndroidRuntimeStatus = .checking
     @Published private(set) var isAndroidRuntimeBusy = false
+    @Published private(set) var androidRuntimeStorage: ManagedRuntimeStorage?
+    @Published private(set) var androidMaintenanceMessage: String?
     @Published private(set) var managedRuntimeInstallationState:
         ManagedRuntimeInstallationState = .detecting
     @Published private(set) var androidRuntimeModeSnapshot:
@@ -5119,6 +5121,7 @@ final class AppState: ObservableObject {
         startNodeRuntimeStatusMonitoring()
         startNodeProfileRevisionMonitoring()
         startManagedRuntimeStatusMonitoring()
+        await recoverAndroidMaintenanceIfNeeded()
         androidRuntimeModeSnapshot = await environment
             .androidRuntimeModeCoordinator.refresh()
         _ = try? await environment.androidRuntimeManager.refresh()
@@ -13834,6 +13837,23 @@ final class AppState: ObservableObject {
            let object = try? JSONSerialization.jsonObject(with: encoded) {
             report["androidManagedRuntime"] = LogRedactor.json(object)
         }
+        if let service = environment?.androidRuntimeManager.maintenance {
+            if let plan = await service.diagnosticPlan(),
+               let encoded = try? diagnosticEncoder.encode(plan),
+               let object = try? JSONSerialization.jsonObject(with: encoded) {
+                report["androidManagedUninstallPlan"] = LogRedactor.json(object)
+            }
+            let transactions = await service.transactionDiagnostics()
+            if let encoded = try? diagnosticEncoder.encode(transactions),
+               let object = try? JSONSerialization.jsonObject(with: encoded) {
+                report["androidUninstallTransactions"] = LogRedactor.json(object)
+            }
+            let storage = await service.storage()
+            if let encoded = try? diagnosticEncoder.encode(storage),
+               let object = try? JSONSerialization.jsonObject(with: encoded) {
+                report["androidManagedStorage"] = object
+            }
+        }
         if let modeSnapshot = await environment?.androidRuntimeModeCoordinator
             .diagnosticReport(),
            let encoded = try? diagnosticEncoder.encode(modeSnapshot),
@@ -14770,6 +14790,7 @@ final class AppState: ObservableObject {
     }
 
     func refreshAndroidRuntimeStatus() async {
+        guard !isAndroidRuntimeBusy else { return }
         guard let environment else {
             androidRuntimeStatus = .unavailable(
                 L10n.string("android.runtime.environment-uninitialized", fallback: "The application environment has not finished initializing.")
@@ -14783,7 +14804,7 @@ final class AppState: ObservableObject {
     }
 
     func showManagedRuntimeInstaller() async {
-        guard let environment else { return }
+        guard let environment, !isAndroidRuntimeBusy else { return }
         do {
             try await environment.androidRuntimeManager.presentInstallOffer()
             isAndroidRuntimeInstallSheetPresented = true
@@ -14793,13 +14814,14 @@ final class AppState: ObservableObject {
     }
 
     func installManagedRuntime(acceptingLicenses: Bool) async {
-        guard let environment else { return }
+        guard let environment, !isAndroidRuntimeBusy else { return }
         do {
             try await environment.androidRuntimeManager.installDefault(
                 acceptingLicenses: acceptingLicenses
             )
             androidRuntimeStatus = await environment.androidDexBridge
                 .runtimeStatus()
+            await refreshAndroidStorage()
         } catch is CancellationError {
             return
         } catch {
@@ -14813,7 +14835,7 @@ final class AppState: ObservableObject {
     }
 
     func repairManagedRuntime(acceptingLicenses: Bool) async {
-        guard let environment else { return }
+        guard let environment, !isAndroidRuntimeBusy else { return }
         if androidRuntimeStatus.isRunning {
             androidRuntimeStatus = await environment.androidDexBridge.stopRuntime()
         }
@@ -18559,5 +18581,101 @@ private extension String {
     var nonEmpty: String? {
         let value = trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value
+    }
+}
+
+extension AppState {
+    func refreshAndroidStorage() async {
+        guard let environment else { return }
+        androidRuntimeStorage = await environment.androidRuntimeManager.maintenance.storage()
+    }
+
+    func uninstallManagedAndroidRuntime() async {
+        guard let environment, !isAndroidRuntimeBusy,
+              !managedRuntimeInstallationState.isBusy else { return }
+        isAndroidRuntimeBusy = true
+        defer { isAndroidRuntimeBusy = false }
+        do {
+            let service = environment.androidRuntimeManager.maintenance
+            let plan = try await service.prepareManagedUninstall()
+            guard !plan.items.isEmpty else { throw RuntimeMaintenanceError.nothingToRemove }
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = L10n.string("settings.android.uninstall.title", fallback: "Uninstall OKVideoMac-managed Android components?")
+            alert.informativeText = L10n.string("settings.android.uninstall.message", fallback: "Approximately %@ will be removed. The OKVideoMac Android session will be stopped first. Android sign-in data, user-data backups, private keys, and your external SDK selection will be kept. External SDK files will not be deleted.", ByteCountFormatter.string(fromByteCount: plan.estimatedReclaimBytes, countStyle: .file))
+            alert.addButton(withTitle: L10n.string("settings.android.uninstall.confirm", fallback: "Uninstall Components"))
+            alert.addButton(withTitle: L10n.string("common.cancel", fallback: "Cancel"))
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            try await runAndroidMaintenance(planID: plan.id)
+        } catch {
+            androidMaintenanceMessage = maintenanceMessage(error)
+        }
+        await refreshAndroidStorage()
+    }
+
+    func recoverAndroidMaintenanceIfNeeded() async {
+        await refreshAndroidStorage()
+        guard androidRuntimeStorage?.hasPendingMaintenance == true,
+              !isAndroidRuntimeBusy else { return }
+        isAndroidRuntimeBusy = true
+        defer { isAndroidRuntimeBusy = false }
+        do { try await runAndroidMaintenance(planID: nil) }
+        catch { androidMaintenanceMessage = maintenanceMessage(error) }
+        await refreshAndroidStorage()
+    }
+
+    private func runAndroidMaintenance(planID: UUID?) async throws {
+        guard let environment else { return }
+        let manager = environment.androidRuntimeManager
+        let coordinator = environment.androidRuntimeModeCoordinator
+        let bridge = environment.androidDexBridge
+        let token = try await coordinator.beginMaintenance()
+        do {
+            try await manager.beginMaintenance()
+        } catch {
+            await coordinator.endMaintenance(token)
+            throw error
+        }
+        androidMaintenanceMessage = L10n.string("settings.android.uninstall.running", fallback: "Stopping Android and checking the uninstall transaction…")
+        do {
+            let results: [ManagedUninstallResult]
+            if let planID {
+                results = [try await manager.maintenance.execute(planID: planID) {
+                    try await bridge.beginManagedMaintenance()
+                }]
+            } else {
+                results = try await manager.maintenance.recover {
+                    try await bridge.beginManagedMaintenance()
+                }
+            }
+            androidMaintenanceMessage = results.contains(where: \.cleanupPending)
+                ? L10n.string("settings.android.uninstall.cleanup-pending", fallback: "Components are uninstalled, but some files still need cleanup. Android user data was kept. Retry cleanup before installing again.")
+                : L10n.string("settings.android.uninstall.success", fallback: "Maintenance completed. Android user data, private keys, and the external SDK were kept.")
+        } catch {
+            await bridge.endManagedMaintenance()
+            await manager.endMaintenance()
+            await coordinator.endMaintenance(token)
+            throw error
+        }
+        await bridge.endManagedMaintenance()
+        await manager.endMaintenance()
+        await coordinator.endMaintenance(token)
+        androidRuntimeModeSnapshot = await coordinator.refresh()
+        androidRuntimeStatus = await bridge.runtimeStatus()
+    }
+
+    private func maintenanceMessage(_ error: Error) -> String {
+        switch error as? RuntimeMaintenanceError {
+        case .expiredPlan, .changed:
+            return L10n.string("settings.android.uninstall.plan-changed", fallback: "The uninstall plan expired or the files changed. Nothing further was removed. Review a new plan and try again.")
+        case .busy:
+            return L10n.string("settings.android.uninstall.busy", fallback: "Another Android operation is in progress. Wait for it to finish before trying again.")
+        case .sessionNotStopped:
+            return L10n.string("settings.android.uninstall.stop-failed", fallback: "The OKVideoMac Android session could not be confirmed stopped. No components were removed.")
+        case .nothingToRemove:
+            return L10n.string("settings.android.uninstall.empty", fallback: "No recognized managed components or installation cache need removal.")
+        default:
+            return L10n.string("settings.android.uninstall.failure", fallback: "Maintenance could not finish safely. Unrecognized files and recovery data were kept. Export diagnostics before trying again.")
+        }
     }
 }

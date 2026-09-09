@@ -1169,3 +1169,33 @@ private struct FailingFixtureValidator: StagedRuntimeValidating {
         )
     }
 }
+
+extension AndroidRuntimeKitTests {
+    func testInstallUninstallReinstallPreservesUserdataAndExternalSelection() async throws {
+        let support = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: support) }
+        let layout = AndroidRuntimeLayout(applicationSupportDirectory: support)
+        let descriptor = downloadableGenerationDescriptor(id: "uninstall-reinstall")
+        let catalog = RuntimeCatalog(schemaVersion: 1, catalogVersion: "uninstall-reinstall",
+            candidateMatrix: [], generations: [descriptor])
+        let installer = AndroidRuntimeInstaller(layout: layout, catalog: catalog,
+            downloader: FixtureDownloader(counter: InvocationCounter()),
+            materializer: FixtureMaterializer(), validator: FixtureValidator(counter: InvocationCounter()))
+        _ = try await installer.install(generationID: descriptor.generationID)
+        let userdata = layout.avdDirectory.appendingPathComponent("userdata.img")
+        try FileManager.default.createDirectory(at: layout.avdDirectory, withIntermediateDirectories: true)
+        try Data("persistent-login".utf8).write(to: userdata)
+        let selection = layout.root.appendingPathComponent("runtime-selection.json")
+        let preference = Data("{\"schemaVersion\":1,\"mode\":\"external\",\"externalSDKRoot\":\"/external-sdk\"}".utf8)
+        try preference.write(to: selection)
+        let maintenance = RuntimeMaintenanceService(applicationSupportDirectory: support, catalog: catalog)
+        let plan = try await maintenance.prepareManagedUninstall()
+        let result = try await maintenance.execute(planID: plan.id, quiesce: {})
+        XCTAssertFalse(result.cleanupPending)
+        XCTAssertEqual(AndroidRuntimeDetector(layout: layout).detect(catalog: catalog).status, .notInstalled)
+        _ = try await installer.install(generationID: descriptor.generationID)
+        XCTAssertEqual(AndroidRuntimeDetector(layout: layout).detect(catalog: catalog).status, .ready)
+        XCTAssertEqual(try String(contentsOf: userdata), "persistent-login")
+        XCTAssertEqual(try Data(contentsOf: selection), preference)
+    }
+}

@@ -1045,6 +1045,8 @@ actor AndroidRuntimeModeCoordinator {
     private let managedAVDAdmission: ManagedAVDAdmission?
     private let configureSession: SessionConfiguration
     private let sessionStatus: SessionStatus
+    private var maintenanceToken: UUID?
+    private var maintenanceEpoch = 0
     private var record: AndroidRuntimeModeRecord
     private var lastExternalValidation: ExternalAndroidRuntimeValidation?
 
@@ -1076,12 +1078,34 @@ actor AndroidRuntimeModeCoordinator {
         )
     }
 
+    func beginMaintenance() throws -> UUID {
+        guard maintenanceToken == nil else { throw RuntimeMaintenanceError.busy }
+        let token = UUID()
+        maintenanceToken = token
+        maintenanceEpoch += 1
+        return token
+    }
+
+    func endMaintenance(_ token: UUID) {
+        if maintenanceToken == token { maintenanceToken = nil }
+    }
+
+    private func requireMaintenanceIdle(epoch: Int? = nil) throws {
+        guard maintenanceToken == nil, epoch == nil || epoch == maintenanceEpoch else {
+            throw RuntimeMaintenanceError.busy
+        }
+        try RuntimeMaintenanceService.requireNoPendingTransaction(layout: layout)
+    }
+
     func prepareRuntime() async throws {
+        let epoch = maintenanceEpoch
         while true {
+            try requireMaintenanceIdle(epoch: epoch)
             let admitted = record
             switch admitted.mode {
             case .managed:
                 await configureSession(.managed, nil)
+                try requireMaintenanceIdle(epoch: epoch)
                 do {
                     try await ensureManagedReady()
                 } catch {
@@ -1099,6 +1123,7 @@ actor AndroidRuntimeModeCoordinator {
                 } else {
                     try validateAndAdoptManagedAVD()
                 }
+                try requireMaintenanceIdle(epoch: epoch)
                 return
 
             case .external:
@@ -1133,6 +1158,7 @@ actor AndroidRuntimeModeCoordinator {
                       record.mode == .external else {
                     continue
                 }
+                try requireMaintenanceIdle(epoch: epoch)
                 return
             }
         }
@@ -1142,9 +1168,12 @@ actor AndroidRuntimeModeCoordinator {
     /// launch compatibility is the problem, but only if the selected
     /// environment has every create/repair dependency.
     func prepareRuntimeRepair() async throws {
+        let epoch = maintenanceEpoch
+        try requireMaintenanceIdle(epoch: epoch)
         switch record.mode {
         case .managed:
             await configureSession(.managed, nil)
+            try requireMaintenanceIdle(epoch: epoch)
             try await ensureManagedReady()
         case .external:
             guard let path = record.externalSDKRoot else {
@@ -1161,9 +1190,11 @@ actor AndroidRuntimeModeCoordinator {
             }
             await configureSession(.external, validation.sdkRoot)
         }
+        try requireMaintenanceIdle(epoch: epoch)
     }
 
     func refresh() async -> AndroidRuntimeModeSnapshot {
+        if maintenanceToken != nil { return snapshot(validation: lastExternalValidation) }
         while true {
             let admitted = record
             let validation: ExternalAndroidRuntimeValidation?
@@ -1300,6 +1331,8 @@ actor AndroidRuntimeModeCoordinator {
         newMode: AndroidRuntimeMode,
         newExternalRoot: URL?
     ) async throws {
+        try requireMaintenanceIdle()
+        let epoch = maintenanceEpoch
         let sameMode = record.mode == newMode
         let sameRoot: Bool
         if newMode == .external {
@@ -1311,6 +1344,7 @@ actor AndroidRuntimeModeCoordinator {
         }
         if sameMode && sameRoot { return }
         let status = await sessionStatus()
+        try requireMaintenanceIdle(epoch: epoch)
         switch status.phase {
         case .running, .starting, .stopping:
             throw AndroidRuntimeModeCoordinatorError.runtimeMustStop

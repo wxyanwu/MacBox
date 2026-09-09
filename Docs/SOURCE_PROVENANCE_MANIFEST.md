@@ -1,4 +1,8 @@
-# OKVideoMac 0.6.0 (Build 100) Source Provenance Manifest
+# OKVideoMac 0.6.1 (Build 101) Source Provenance Manifest
+
+> The 0.6.1 third-party input set is unchanged from 0.6.0. Audited output hashes below are
+> historical evidence; the generated 0.6.1 source index and manifest bind current
+> binaries. This update does not claim a newly published notarized release.
 
 Manifest date: 2026-09-09
 Baseline audit: `Docs/THIRD_PARTY_LICENSE_AUDIT.md`

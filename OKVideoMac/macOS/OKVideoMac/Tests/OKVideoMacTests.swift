@@ -25534,3 +25534,48 @@ private final class AndroidRuntimeSynchronousCounter: @unchecked Sendable {
         lock.unlock()
     }
 }
+
+final class AndroidMaintenanceAdmissionTests: XCTestCase {
+    func testMaintenanceCancelsAndJoinsBridgeOperationsThenRejectsNewRequests() async throws {
+        let admission = AndroidBridgeOperationAdmission()
+        let started = expectation(description: "operation admitted")
+        let operation = Task {
+            try await admission.perform {
+                started.fulfill()
+                try await Task.sleep(nanoseconds: 30_000_000_000)
+                return 1
+            }
+        }
+        await fulfillment(of: [started], timeout: 2)
+        try await admission.closeAndWait()
+        do { _ = try await operation.value; XCTFail("cancelled operation completed") }
+        catch is CancellationError {} catch { XCTFail("unexpected error") }
+        do { _ = try await admission.perform { 2 }; XCTFail("admitted while closed") }
+        catch { XCTAssertEqual(error as? RuntimeMaintenanceError, .busy) }
+        await admission.reopen()
+        let value = try await admission.perform { 3 }
+        XCTAssertEqual(value, 3)
+    }
+}
+
+extension AndroidRuntimeModeCompatibilityTests {
+    func testMaintenanceFreezesModeAndDexAdmissionWithoutChangingSelection() async throws {
+        let fixture = try makeFixture(legacySDKRoot: nil)
+        defer { fixture.cleanup() }
+        _ = try fixture.store.loadOrMigrate(managedRuntimeUsable: false)
+        let original = try Data(contentsOf: fixture.store.recordURL)
+        let probe = AndroidRuntimeRoutingProbe()
+        let coordinator = try makeCoordinator(fixture: fixture,
+            validator: makeValidator(fixture: fixture, javaRuntime: nil),
+            managedRuntimeUsableAtMigration: false, managedUsability: false, probe: probe)
+        let token = try await coordinator.beginMaintenance()
+        do { try await coordinator.prepareRuntime(); XCTFail("Dex admitted") }
+        catch { XCTAssertEqual(error as? RuntimeMaintenanceError, .busy) }
+        do { _ = try await coordinator.useManagedRuntime(); XCTFail("mode changed") }
+        catch { XCTAssertEqual(error as? RuntimeMaintenanceError, .busy) }
+        XCTAssertEqual(original, try Data(contentsOf: fixture.store.recordURL))
+        await coordinator.endMaintenance(token)
+        _ = try await coordinator.useManagedRuntime()
+        XCTAssertEqual(original, try Data(contentsOf: fixture.store.recordURL))
+    }
+}

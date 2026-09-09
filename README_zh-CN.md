@@ -2,26 +2,30 @@
 
 [English](README.md) | 简体中文
 
-**面向 Apple Silicon Mac 的原生视频与直播客户端，兼容部分 TVBox、CatVod、
-CatPaw 风格 Provider，支持 QuickJS、Node Spider，以及按需启用的托管 Android
-兼容环境。**
+**面向 Apple Silicon 的原生 macOS IPTV/点播播放器，支持 Xtream、M3U/XMLTV、
+部分 TVBox/CatVod/CatPaw 风格 Provider，以及 libmpv 播放。**
 
 [![最新版本](https://img.shields.io/github/v/release/yaolin-dev/OKVideoMac?display_name=tag&sort=semver)](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 ![macOS 12+](https://img.shields.io/badge/macOS-12%2B-000000?logo=apple&logoColor=white)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-000000?logo=apple&logoColor=white)
 [![GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 
-使用 Swift、SwiftUI/AppKit 与 libmpv 构建，不是套壳的 Android 界面。
+使用 Swift 和 SwiftUI/AppKit 构建。Android 是部分 Java/Dex Provider 按需使用的
+可选兼容层。
 
-**原生 macOS · 点播与直播 · libmpv 播放 · 多 Provider 搜索 ·
-QuickJS/Node Spider · 可选 Java/Dex 兼容**
+**原生 macOS · Xtream · IPTV/点播 · M3U/XMLTV · libmpv · 多 Provider 搜索 ·
+QuickJS/Node Spider**
 
 ## 下载
 
 ### [下载最新稳定版本 →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-当前正式版本为 **0.6.0（Build 100）** · macOS 12.0+ · 仅支持 Apple Silicon
-（`arm64`）· Developer ID 签名 · Apple 公证并已 Staple。
+当前源码版本为 **0.6.1（Build 101）** · macOS 12.0+ · 仅支持 Apple Silicon
+（`arm64`）。本次补丁增加 Android 组件存储管理与卸载。
+
+最新已公开、完成 Developer ID 签名和 Apple 公证的 DMG 仍是
+[v0.6.0](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.6.0)。
+0.6.1 的源码收口与本地 Release 验证不代表新的公证下载包已发布；公开资产另行完成分发门禁。
 
 打开 DMG，将 `OKVideoMac.app` 拖入“应用程序”即可。无需关闭 Gatekeeper 或 SIP。
 每个 Release 同时提供校验和、发布说明、对应源码、SBOM 与第三方声明。
@@ -29,21 +33,20 @@ QuickJS/Node Spider · 可选 Java/Dex 兼容**
 > OKVideoMac 是播放器与 Provider 客户端，不内置第三方影视源、账号、Cookie、
 > 解析服务或 DRM 密钥。
 
-## 0.6.0 新增内容
+## 0.6.1 新增内容
 
-- **Native Xtream-compatible API**：账号接入、电影/剧集分类与详情、季集导航、
-  电影和剧集搜索，以及 Basic Live 分类、频道和播放。凭据保存到 macOS Keychain；
-  导出配置不携带凭据，恢复后需要重新输入。
-- **Native Live 兼容性**：独立的静态 HTTP 代理/HTTPS CONNECT 处理、媒体重定向、
-  有界 TS/HLS 回退、取消与请求所有权保护。普通导入直播与点播保留原有加载策略。
-- **简体中文 / English**：String Catalog、持久语言选择和重启切换。首次启动读取
-  系统首选语言的第一项；其他语言（含繁体中文）默认显示英语。
-- **来源设置与播放器面板**：整合配置入口，选集、音轨、字幕和设置面板按内容高度显示，
-  适应普通窗口、缩放窗口和全屏。
+- **Android 分类存储统计：** 分别查看托管组件、安装缓存、Android 用户数据与备份，
+  并在删除确认中查看本次操作预计释放的空间。
+- **安全卸载托管组件：** 在确认本应用的 Android 会话已经停止后，移除可识别的
+  OKVideoMac 托管 Android 组件。
+- **保留 Android 数据：** 用户数据、登录状态、backing/encryption 文件、Android home、
+  私有 ADB 身份、用户数据备份和运行模式选择均保留。External SDK 永远不是卸载目标。
+  需要时可重新安装托管组件；当前不提供独立的 Android 用户数据删除入口。
+- **恢复与文档：** 中断的维护事务可以继续处理；中英文项目介绍同步突出已有的 Native Xtream。
 
-Native Xtream 当前不提供 Xtream EPG、回看/时移或 `direct_source`。
-代理处理不等于完整支持 PAC、SOCKS、认证代理和逐 CDN 动态路由；复杂 HLS 仍可能
-较慢，受控回退只处理已识别的保守子集。详见[发布说明](Docs/RELEASE_NOTES_0.6.0.md)。
+Native Xtream 已在 0.6.0 引入，包括认证、Movies、Series、电影/剧集搜索和 Basic Live。
+Xtream EPG、回看/时移与 `direct_source` 仍不支持。详见
+[0.6.1 发布说明](Docs/RELEASE_NOTES_0.6.1.md)。
 
 ## 软件截图
 
@@ -74,7 +77,7 @@ Native Xtream 当前不提供 Xtream EPG、回看/时移或 `direct_source`。
   Sheet、键盘交互、辅助功能和 macOS 导航，而不是重新包装移动端界面。
 - **libmpv 播放。** 点播与直播基于 libmpv/FFmpeg，支持 Seek、音轨、字幕、倍速、
   截图、全屏，以及在可用线路间进行有界回退。
-- **灵活的 Provider 运行时。** 支持 Native CMS JSON，以及部分 TVBox/CatVod 风格
+- **灵活的 Provider 运行时。** 支持 Native Xtream、CMS JSON，以及部分 TVBox/CatVod 风格
   QuickJS、CatVod/CatPaw 风格 Node 和 Java/Dex `csp_` Spider；兼容边界明确，
   不宣称覆盖整个生态。
 - **搜索与资料库。** 多 Provider 隔离搜索、详情、收藏、历史、进度恢复和长剧集
@@ -100,6 +103,7 @@ Native Xtream 当前不提供 Xtream EPG、回看/时移或 `direct_source`。
 | Node Spider | 部分兼容 | CatVod/CatPaw 风格视频接口子集 |
 | Java/Dex `csp_` Spider | 实验性 | 需要 Managed Runtime 或已确认的 External SDK |
 | Managed Android Runtime | 可用 | 推荐 Android 模式，仅在需要时安装 |
+| 托管组件存储 / 卸载 | 可用 | 分类统计，保留用户数据和外部 SDK |
 | External Android SDK | 可用 | 高级用户明确选择，不从 `PATH` 自动切换 |
 | Intel Mac | 不支持 | 不提供 Intel 或 Universal Binary 正式包 |
 
@@ -119,6 +123,11 @@ Spider、直播、XMLTV、搜索与普通播放都直接在 macOS 上运行。
   `ANDROID_HOME` 或手工创建 AVD。
 - **External SDK（高级）：** 已有兼容 SDK 的用户可在设置中选择、验证并确认。
   Android Studio、Homebrew、`PATH` 或环境变量不会让 App 静默改变模式。
+
+Android 兼容功能支持查看分类存储占用，并可安全卸载由 OKVideoMac 管理的 Android 组件。
+默认保留 Android 用户数据、登录状态、私有 ADB 身份、用户数据备份、运行模式选择及外部 SDK。
+确认框根据实际可识别的安装内容估算释放空间，不承诺固定容量。
+详见 [Android 存储与卸载](Docs/ANDROID_MANAGED_UNINSTALL.md)。
 
 Managed 安装事务与 Emulator Session 生命周期互相独立。存储、修复、许可证和当前
 实机验证边界见 [Android Bridge 设置](OKVideoMac/macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP_zh-CN.md)。
@@ -226,11 +235,11 @@ Managed Runtime 安装与 Android Emulator Session 分开；安装和 Session �
 
 ## 发布完整性
 
-公开的 **0.6.0（Build 100）** 资产来自 Tag `v0.6.0`。签名、公证并已 Staple 的
-DMG 随附 SHA-256、对应源码、SBOM、Notices 与发布 Manifest。详见
-[0.6.0 发布说明](Docs/RELEASE_NOTES_0.6.0.md)、
-[源码发布流程](Docs/SOURCE_RELEASE_PROCESS.md)与
-[DMG 发布流程](Docs/DMG_RELEASE_PROCESS.md)。
+0.6.1 / Build 101 源码更新与公开二进制发布分别验证。本地 ad-hoc Release 校验不代表
+Developer ID 签名、Apple 公证、Staple 或 Gatekeeper 验证通过。公开 0.6.1 DMG 与 tag
+必须从最终干净提交按 [DMG 发布流程](Docs/DMG_RELEASE_PROCESS.md)生成，并附带对应
+源码、SBOM 和哈希。已有 v0.6.0 发布和资产保持不变。详见
+[0.6.1 发布说明](Docs/RELEASE_NOTES_0.6.1.md)与[源码发布流程](Docs/SOURCE_RELEASE_PROCESS.md)。
 
 ## 文档
 
@@ -239,6 +248,8 @@ DMG 随附 SHA-256、对应源码、SBOM、Notices 与发布 Manifest。详见
 - [Android Bridge 设置](OKVideoMac/macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP_zh-CN.md)
 - [从源码构建](OKVideoMac/macOS/OKVideoMac/Docs/BUILDING.md)
 - [架构说明](OKVideoMac/macOS/OKVideoMac/Docs/ARCHITECTURE.md)
+- [Android 存储与卸载](Docs/ANDROID_MANAGED_UNINSTALL.md)
+- [0.6.1 发布说明](Docs/RELEASE_NOTES_0.6.1.md)
 - [更新日志](CHANGELOG.md)
 - [安全政策](SECURITY.md)
 

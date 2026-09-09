@@ -1088,7 +1088,9 @@ public struct AndroidRuntimeInstaller: Sendable {
             key: key,
             generationID: generationID
         ) {
-            try await performInstallation(generationID: generationID)
+            let lease = try RuntimeMaintenanceLease(layout: layout)
+            defer { withExtendedLifetime(lease) {} }
+            return try await performInstallation(generationID: generationID)
         }
     }
 
@@ -1106,6 +1108,8 @@ public struct AndroidRuntimeInstaller: Sendable {
             key: key,
             generationID: generationID
         ) {
+            let lease = try RuntimeMaintenanceLease(layout: layout)
+            defer { withExtendedLifetime(lease) {} }
             let previous = readCurrentPointer()?.generationID
             try validateCommittedGeneration(generationID)
             try writePointer(generationID)

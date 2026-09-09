@@ -353,6 +353,8 @@ public actor AndroidManagedRuntimeManager {
     }
     private var installationFlight: InstallationFlight?
     private var licensesAccepted = false
+    private var maintenanceActive = false
+    public nonisolated let maintenance: RuntimeMaintenanceService
 
     public init(
         applicationSupportDirectory: URL,
@@ -368,6 +370,7 @@ public actor AndroidManagedRuntimeManager {
             applicationSupportDirectory: applicationSupportDirectory
         )
         self.catalog = catalog
+        maintenance = RuntimeMaintenanceService(applicationSupportDirectory: applicationSupportDirectory, catalog: catalog)
         self.downloader = downloader
         self.currentAppVersion = currentAppVersion
         self.materializer = materializer
@@ -466,6 +469,8 @@ public actor AndroidManagedRuntimeManager {
     }
 
     public func presentInstallOffer() throws {
+        guard !maintenanceActive else { throw RuntimeMaintenanceError.busy }
+        try RuntimeMaintenanceService.requireNoPendingTransaction(layout: layout)
         if (try? ManagedRuntimeSelection.resolve(
             layout: layout,
             catalog: catalog
@@ -485,6 +490,8 @@ public actor AndroidManagedRuntimeManager {
     }
 
     public func ensureReadyForDex() async throws {
+        guard !maintenanceActive else { throw RuntimeMaintenanceError.busy }
+        try RuntimeMaintenanceService.requireNoPendingTransaction(layout: layout)
         if (try? ManagedRuntimeSelection.resolve(
             layout: layout,
             catalog: catalog
@@ -509,6 +516,8 @@ public actor AndroidManagedRuntimeManager {
     }
 
     public func installDefault(acceptingLicenses: Bool) async throws {
+        guard !maintenanceActive else { throw RuntimeMaintenanceError.busy }
+        try RuntimeMaintenanceService.requireNoPendingTransaction(layout: layout)
         guard acceptingLicenses else {
             throw ManagedRuntimeProductError.licenseAcceptanceRequired
         }
@@ -578,6 +587,11 @@ public actor AndroidManagedRuntimeManager {
     }
 
     public func repair(acceptingLicenses: Bool) async throws {
+        guard installationFlight == nil else { throw RuntimeMaintenanceError.busy }
+        let repairLease = try RuntimeMaintenanceLease(layout: layout)
+        defer { withExtendedLifetime(repairLease) {} }
+        guard !maintenanceActive else { throw RuntimeMaintenanceError.busy }
+        try RuntimeMaintenanceService.requireNoPendingTransaction(layout: layout)
         guard acceptingLicenses || licensesAccepted else {
             throw ManagedRuntimeProductError.licenseAcceptanceRequired
         }
@@ -633,6 +647,20 @@ public actor AndroidManagedRuntimeManager {
             }
             throw error
         }
+    }
+
+    public func beginMaintenance() async throws {
+        guard !maintenanceActive, !state.isBusy, installationFlight == nil else {
+            throw RuntimeMaintenanceError.busy
+        }
+        maintenanceActive = true
+        resumeDexWaiters(with: .failure(RuntimeMaintenanceError.busy))
+    }
+
+    public func endMaintenance() {
+        maintenanceActive = false
+        state = .detecting
+        _ = try? refresh()
     }
 
     public func diagnosticReport() -> ManagedRuntimeDiagnosticReport {

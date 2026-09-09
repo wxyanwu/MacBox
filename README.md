@@ -2,27 +2,31 @@
 
 English | [简体中文](README_zh-CN.md)
 
-**A native macOS video and live-TV client for Apple Silicon, with
-Native Xtream-compatible APIs, selected TVBox-, CatVod-, and CatPaw-style
-providers, QuickJS and Node Spider runtimes,
-and optional managed Android support.**
+**A native macOS IPTV/VOD player for Apple Silicon with Xtream, M3U/XMLTV,
+selected TVBox/CatVod/CatPaw-style providers, and libmpv playback.**
 
 [![Latest release](https://img.shields.io/github/v/release/yaolin-dev/OKVideoMac?display_name=tag&sort=semver)](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 ![macOS 12+](https://img.shields.io/badge/macOS-12%2B-000000?logo=apple&logoColor=white)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-000000?logo=apple&logoColor=white)
 [![GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 
-Built with Swift, SwiftUI/AppKit, and libmpv—not an Android UI wrapper.
+Built with Swift and SwiftUI/AppKit. Android is an optional compatibility layer
+for selected Java/Dex providers.
 
-**Native macOS · VOD and live TV · libmpv playback · Multi-provider search ·
-QuickJS/Node Spiders · Optional Java/Dex compatibility**
+**Native macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · Multi-provider Search ·
+QuickJS/Node Spiders**
 
 ## Download
 
 ### [Download the latest stable release →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-The current release is **0.6.0 (Build 100)** · macOS 12.0+ · Apple Silicon
-(`arm64`) only · Developer ID signed · Apple notarized and stapled.
+The current source version is **0.6.1 (Build 101)** · macOS 12.0+ · Apple Silicon
+(`arm64`) only. This patch adds Android component storage management and uninstall.
+
+The latest published, Developer ID signed and Apple-notarized DMG remains
+[v0.6.0](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.6.0).
+The 0.6.1 source finalization and local Release verification do not publish a new
+notarized download; public assets follow the separate distribution gates.
 
 Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to
 disable Gatekeeper or SIP. Checksums, release notes, source archives, SBOMs,
@@ -31,24 +35,22 @@ and notices are published with each release.
 > OKVideoMac is a player and provider client. It does not include third-party
 > video sources, accounts, cookies, parsing services, or DRM keys.
 
-## New in 0.6.0
+## New in 0.6.1
 
-- **Native Xtream-compatible APIs:** add an account, browse Movies and Series,
-  navigate seasons/episodes, search both catalogs and play Basic Live channels.
-  Credentials stay in macOS Keychain; exports require credentials to be entered again.
-- **Native Live compatibility:** isolated static HTTP proxy handling, HTTPS CONNECT,
-  normal media redirects, bounded TS/HLS fallback, and cancellation/ownership guards.
-  Ordinary imported Live and VOD retain their existing startup policies.
-- **English and Simplified Chinese:** String Catalog resources, a persistent language
-  choice and a restart/relaunch flow. First launch follows the first system-preferred
-  language; unsupported languages, including Traditional Chinese, resolve to English.
-- **Simpler source setup and player panels:** grouped configuration entry points and
-  content-sized episode/audio/subtitle/settings panels across window sizes.
+- **Android storage categories:** view managed components, installation cache,
+  Android user data and backups separately, with an estimate for the selected removal.
+- **Safe managed-component uninstall:** remove recognized Android components managed
+  by OKVideoMac after its Android session has been confirmed stopped.
+- **Keep your Android data:** user data and login state, backing/encryption files,
+  Android home, private ADB identity, user-data backups and runtime selection stay.
+  External SDK files are never uninstall targets. Reinstall managed components later
+  when needed; a separate Android user-data deletion action is not offered.
+- **Recovery and documentation:** interrupted maintenance can be resumed; English
+  and Chinese project descriptions now give existing Native Xtream equal visibility.
 
-Native Xtream does not implement Xtream EPG, catch-up/timeshift or `direct_source`.
-Proxy support does not reproduce all PAC, SOCKS, authenticated-proxy or per-CDN
-routing behavior. Complex HLS masters can still start slowly; the bounded fallback
-handles only a conservative subset. See the [release notes](Docs/RELEASE_NOTES_0.6.0.md).
+Native Xtream was introduced in 0.6.0, including authentication, Movies, Series,
+Movie/Series search and Basic Live. Xtream EPG, catch-up/timeshift and `direct_source`
+remain unsupported. See the [0.6.1 release notes](Docs/RELEASE_NOTES_0.6.1.md).
 
 ## Screenshots
 
@@ -81,7 +83,7 @@ source—no third-party catalogue, account, or private URL is shown. See the
 - **libmpv playback.** VOD and live playback use libmpv/FFmpeg, with seeking,
   tracks, subtitles, playback speed, screenshots, fullscreen, and bounded
   fallback between available lines.
-- **Flexible provider runtimes.** Native CMS JSON plus selected TVBox/CatVod
+- **Flexible provider runtimes.** Native Xtream and CMS JSON plus selected TVBox/CatVod
   QuickJS, CatVod/CatPaw-style Node, and Java/Dex `csp_` Spider paths. The
   compatibility boundary is explicit rather than advertised as universal.
 - **Search and library.** Isolated multi-provider search, details, favorites,
@@ -109,6 +111,7 @@ source—no third-party catalogue, account, or private URL is shown. See the
 | Node Spider | Selected | CatVod/CatPaw-style video-interface subset |
 | Java/Dex `csp_` Spider | Experimental | Requires Managed Runtime or a confirmed External SDK |
 | Managed Android Runtime | Available | Recommended Android mode; installed only when needed |
+| Managed component storage / uninstall | Available | Categorized usage; preserves user data and external SDKs |
 | External Android SDK | Available | Explicit advanced-user choice; never auto-selected from `PATH` |
 | Intel Mac | Not supported | No Intel or Universal Binary release is provided |
 
@@ -134,6 +137,13 @@ Bridge:
   can select and confirm it in Settings. OKVideoMac does not silently switch
   modes because Android Studio, Homebrew, `PATH`, or environment variables
   expose another SDK.
+
+Android Compatibility can show categorized storage usage and safely uninstall
+Android components managed by OKVideoMac when they are no longer needed. Android
+user data and login state, private ADB identity, user-data backups, runtime selection,
+and external Android SDKs are preserved. The confirmation shows estimated reclaim
+based on the recognized installation; it does not promise a fixed amount of space.
+See [Android storage and uninstall](Docs/ANDROID_MANAGED_UNINSTALL.md).
 
 Managed installation is transactional and separate from Emulator session
 management. Full behavior, storage, repair, licensing, and current real-machine
@@ -257,12 +267,13 @@ checks; a local Debug compile is not a public release artifact.
 
 ## Release integrity
 
-The public **0.6.0 (Build 100)** assets are built from tag `v0.6.0`. The signed,
-notarized, and stapled DMG is published with a SHA-256 checksum, corresponding
-source, SBOMs, notices, and release manifests. See the
-[0.6.0 release notes](Docs/RELEASE_NOTES_0.6.0.md),
-[source release process](Docs/SOURCE_RELEASE_PROCESS.md), and
-[DMG release process](Docs/DMG_RELEASE_PROCESS.md).
+The 0.6.1 / Build 101 source update is verified separately from public binary
+publication. Its local ad-hoc Release checks do not imply Developer ID signing,
+Apple notarization, stapling or Gatekeeper approval. A public 0.6.1 DMG and tag must
+follow the [DMG release process](Docs/DMG_RELEASE_PROCESS.md) from the final clean
+commit, with matching source archives, SBOMs and hashes. The existing v0.6.0 release
+and its assets remain unchanged. See the [0.6.1 release notes](Docs/RELEASE_NOTES_0.6.1.md)
+and [source release process](Docs/SOURCE_RELEASE_PROCESS.md).
 
 ## Documentation
 
@@ -271,6 +282,8 @@ source, SBOMs, notices, and release manifests. See the
 - [Android Bridge Setup](OKVideoMac/macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP.md)
 - [Build from source](OKVideoMac/macOS/OKVideoMac/Docs/BUILDING.md)
 - [Architecture](OKVideoMac/macOS/OKVideoMac/Docs/ARCHITECTURE.md)
+- [Android storage and uninstall](Docs/ANDROID_MANAGED_UNINSTALL.md)
+- [0.6.1 release notes](Docs/RELEASE_NOTES_0.6.1.md)
 - [Changelog](CHANGELOG.md)
 - [Security policy](SECURITY.md)
 

@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.6.1] - 2026-09-09
+
+### Added
+
+- Categorized Android Compatibility storage reporting for managed components,
+  installation cache, user data and backups.
+- Safe uninstall of recognized Android components managed by OKVideoMac, with
+  estimated reclaimed space and later component reinstallation.
+
+### Safety / Changed
+
+- Preserve Android AVD/user data and login state, backing/encryption files, Android
+  home, private ADB keys, user-data backups and runtime selection during component uninstall.
+  External SDKs are excluded; Android user-data deletion is not offered.
+- Require the OKVideoMac Android session to stop before uninstall, including External
+  mode. Revalidate short-lived, single-use plans and use a separate Maintenance
+  transaction for interrupted-operation recovery and pending cleanup.
+- Preserve AVD backups when repair rollback cannot restore their contents; explicit
+  External mode does not inherit a coexisting Managed generation's AVD context.
+
+### Documentation
+
+- Synchronize English and Simplified Chinese README facts and release metadata.
+- Give existing Native Xtream support first-screen, provider-table and compatibility
+  visibility. Xtream was introduced in 0.6.0 and is not a new feature in this patch.
+- Document managed component storage, uninstall boundaries and retained user data.
+
+See [0.6.1 release notes](Docs/RELEASE_NOTES_0.6.1.md). Apple Silicon / arm64,
+macOS 12.0+; public notarized binaries remain a separate release gate.
+
 ## [0.6.0] - 2026-09-09
 
 ### Added
