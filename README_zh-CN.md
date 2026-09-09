@@ -50,26 +50,28 @@ Xtream EPG、回看/时移与 `direct_source` 仍不支持。详见
 
 ## 软件截图
 
-以下为 0.4.0 的历史截图，尚未反映新版来源和语言设置。
-
 <p align="center">
-  <img src="Docs/Media/v0.4.0/home.png" alt="OKVideoMac 原生 macOS 首页" width="100%">
+  <img src="Docs/Media/v0.6.1/zh-CN/home.jpg" alt="OKVideoMac 中文点播首页" width="100%">
 </p>
 
 <table>
   <tr>
-    <td width="33%"><img src="Docs/Media/v0.4.0/search.png" alt="多 Provider 搜索"><br><sub>多 Provider 搜索</sub></td>
-    <td width="33%"><img src="Docs/Media/v0.4.0/series-detail.png" alt="详情与长剧集导航"><br><sub>详情与长剧集导航</sub></td>
-    <td width="33%"><img src="Docs/Media/v0.4.0/live-channels.png" alt="直播频道浏览"><br><sub>直播频道浏览</sub></td>
+    <td width="33%"><img src="Docs/Media/v0.6.1/zh-CN/search.jpg" alt="中文多 Provider 搜索"><br><sub>多 Provider 搜索</sub></td>
+    <td width="33%"><img src="Docs/Media/v0.6.1/zh-CN/series-detail.jpg" alt="中文详情与选集导航"><br><sub>详情与选集导航</sub></td>
+    <td width="33%"><img src="Docs/Media/v0.6.1/zh-CN/live-channels.jpg" alt="中文直播频道浏览"><br><sub>直播频道浏览</sub></td>
   </tr>
 </table>
 
-这些截图来自真实 Release App，使用仓库内原创演示源，不包含第三方片库、账号或
-私人 URL。来源与生成信息见[截图清单](Docs/Media/v0.4.0/README.md)和
-[Demo Source](Docs/DemoSource/README.md)。完整截图还包括
-[点播播放](Docs/Media/v0.4.0/vod-playback.png)、
-[直播播放](Docs/Media/v0.4.0/live-playback.png)与
-[设置](Docs/Media/v0.4.0/settings.png)。
+<table>
+  <tr>
+    <td width="50%"><img src="Docs/Media/v0.6.1/zh-CN/vod-playback.jpg" alt="中文点播播放器"><br><sub>点播播放</sub></td>
+    <td width="50%"><img src="Docs/Media/v0.6.1/zh-CN/live-playback.jpg" alt="中文直播播放器"><br><sub>直播播放</sub></td>
+  </tr>
+</table>
+
+这些 0.6.1 截图使用简体中文界面和虚构风景演示数据，不包含第三方片库、
+账号、凭据或私人 URL。中英文完整文件对照与图像处理说明见
+[截图清单](Docs/Media/v0.6.1/README.md)。
 
 ## 为什么选择 OKVideoMac
 

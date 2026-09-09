@@ -54,25 +54,28 @@ remain unsupported. See the [0.6.1 release notes](Docs/RELEASE_NOTES_0.6.1.md).
 ## Screenshots
 
 <p align="center">
-  <img src="Docs/Media/v0.4.0/home.png" alt="OKVideoMac native macOS home screen" width="100%">
+  <img src="Docs/Media/v0.6.1/en/home.jpg" alt="OKVideoMac Browse screen in English" width="100%">
 </p>
 
 <table>
   <tr>
-    <td width="33%"><img src="Docs/Media/v0.4.0/search.png" alt="Multi-provider search"><br><sub>Multi-provider search</sub></td>
-    <td width="33%"><img src="Docs/Media/v0.4.0/series-detail.png" alt="Series detail and episode navigation"><br><sub>Detail and long-series navigation</sub></td>
-    <td width="33%"><img src="Docs/Media/v0.4.0/live-channels.png" alt="Live TV channel browser"><br><sub>Live channel browser</sub></td>
+    <td width="33%"><img src="Docs/Media/v0.6.1/en/search.jpg" alt="Multi-provider search in English"><br><sub>Multi-provider search</sub></td>
+    <td width="33%"><img src="Docs/Media/v0.6.1/en/series-detail.jpg" alt="Series detail and episode navigation in English"><br><sub>Detail and episode navigation</sub></td>
+    <td width="33%"><img src="Docs/Media/v0.6.1/en/live-channels.jpg" alt="Live TV channel browser in English"><br><sub>Live channel browser</sub></td>
   </tr>
 </table>
 
-These historical 0.4.0 screenshots predate the new source and language settings.
-They are real Release-app captures made with the repository's original demo
-source—no third-party catalogue, account, or private URL is shown. See the
-[screenshot manifest](Docs/Media/v0.4.0/README.md) and
-[demo source](Docs/DemoSource/README.md). The full set also includes
-[VOD playback](Docs/Media/v0.4.0/vod-playback.png),
-[live playback](Docs/Media/v0.4.0/live-playback.png), and
-[settings](Docs/Media/v0.4.0/settings.png).
+<table>
+  <tr>
+    <td width="50%"><img src="Docs/Media/v0.6.1/en/vod-playback.jpg" alt="VOD playback in English"><br><sub>VOD playback</sub></td>
+    <td width="50%"><img src="Docs/Media/v0.6.1/en/live-playback.jpg" alt="Live TV playback in English"><br><sub>Live TV playback</sub></td>
+  </tr>
+</table>
+
+These 0.6.1 captures use the English interface and fictional scenic demo data;
+they contain no third-party catalogue, account, credential or private URL. See
+the [screenshot manifest](Docs/Media/v0.6.1/README.md) for the complete bilingual
+file map and image-processing notes.
 
 ## Why OKVideoMac
 
