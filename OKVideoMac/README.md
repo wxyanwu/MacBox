@@ -155,6 +155,7 @@ SHA-256；本地开发包或来源不明的副本不属于正式发行 artifact�
 
 | 源 / 运行时 | 状态 | 说明 |
 | --- | --- | --- |
+| Native Xtream | ✅ Supported | 原生认证、Movies、Series、电影/剧集搜索和 Basic Live；不支持 Xtream EPG、回看/时移或 `direct_source` |
 | Native CMS JSON | ✅ Supported | 原生 Provider 路径 |
 | CMS XML API 响应 | ◐ Partial | 已覆盖核心响应映射；具体源行为可能不同 |
 | FongMi 风格 JSON 配置 | ◐ Supported with limitations | 部分字段仅解析或保留，并未进入功能执行链 |
@@ -175,8 +176,9 @@ SHA-256；本地开发包或来源不明的副本不属于正式发行 artifact�
 ### Native Mode
 
 OKVideoMac 的启动和主要 Native Mode 功能**不要求安装 Android SDK 或
-Emulator**。已由当前实现和 Phase 4 证据确认的 Native 能力包括：
+Emulator**。当前 Native 能力包括（具体边界见兼容矩阵）：
 
+- Native Xtream 认证、Movies、Series、电影/剧集搜索和 Basic Live；
 - Native CMS JSON、部分 CMS XML API 响应和指定的 FongMi 图片/Base64 包装 JSON；
 - M3U、TXT、JSON 直播源和 XMLTV；
 - QuickJS Spider 路径；
@@ -212,6 +214,7 @@ Runtime，或选择并确认 External SDK。历史上由 OKVideoMac 明确保存
 
 ## 主要能力
 
+- Native Xtream 账号接入、Movies、Series、电影/剧集搜索和 Basic Live，无需 Android；
 - 远程 URL、本地文件和粘贴 JSON 配置；
 - 首页、分类、筛选、详情、多站搜索、收藏和历史；
 - M3U/TXT/JSON 直播列表与 XMLTV EPG；
