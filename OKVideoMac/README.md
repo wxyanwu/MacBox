@@ -2,7 +2,7 @@
 
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
 原生 Xtream、M3U/XMLTV、配置格式和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
-等生态名称判断。当前源码版本为 **0.6.1（Build 101）**，支持
+等生态名称判断。最新稳定版本为 **0.6.1（Build 101）**，支持
 **arm64**，最低系统为 **macOS 12.0**。公开二进制通过 Developer ID 签名、Apple 公证、
 Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
@@ -30,11 +30,11 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 - AndroidRuntimeKit：57 total / 56 passed / 1 intentionally skipped / 0 failed
 - Node / CatPaw / Quark：30 passed / 0 failed
 - Android Release assemble 与 lint：通过；Android JVM unit tests：NO-SOURCE
-- 正式 Release packaging 会验证 29 个 Mach-O 的架构、部署目标、依赖闭包、
+- 正式 Release packaging 已验证 29 个 Mach-O 的架构、部署目标、依赖闭包、
   Developer ID 签名和 Hardened Runtime，并生成 DMG、SBOM 与对应源码集
-- 对外分发：最新已公开的 0.6.0 Build 100 已完成 Developer ID signing、Apple notarization、
-  staple、`stapler validate` 和 Gatekeeper 实物验收。0.6.1 本轮仅完成本地 Release 收口，
-  不声称公证通过；正式 DMG 与 tag 另行按分发门禁生成
+- 对外分发：0.6.1 Build 101 已完成 Developer ID signing、Apple notarization（`Accepted`）、
+  staple、`stapler validate`、Gatekeeper 和 DMG 安装 smoke 验收；签名使用临时专用
+  keychain，结束后已删除并恢复原 search list。详见[验证记录](../Docs/RELEASE_VALIDATION_0.6.1.md)
 
 ## 0.6.1 新增内容
 
@@ -122,22 +122,22 @@ Native Xtream 当前不提供 Xtream EPG、回看/时移或 `direct_source`。
 
 ## 安装
 
-最新已公开版本仍为 0.6.0；0.6.1 公证 DMG 尚未发布。正式版本安装：
+最新正式版本为 0.6.1（Build 101），已完成 Apple 公证。安装步骤：
 
-1. 只从本仓库 [v0.6.0 GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.6.0) 下载 macOS arm64 发布包；
-2. 打开 `OKVideoMac-0.6.0.dmg`；
+1. 只从本仓库 [v0.6.1 GitHub Release](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.6.1) 下载 macOS arm64 发布包；
+2. 打开 `OKVideoMac-0.6.1.dmg`；
 3. 将 `OKVideoMac.app` 移入 `/Applications`；
 4. 从 Applications 或 Finder 正常启动。
 
 不要使用来源不明或无法与本仓库发布哈希对应的第三方二进制。
 
-0.6.0（Build 100）的 DMG 与 Source Release 绑定到 tag `v0.6.0` 指向的 exact
+0.6.1（Build 101）的 DMG 与 Source Release 绑定到 tag `v0.6.1` 指向的 exact
 commit。最终公证并 Staple 后的 DMG SHA-256 由 GitHub Release 同名 `.sha256`
 文件提供。
 
 ### Gatekeeper 与 macOS 安全
 
-0.6.0（Build 100）正式 DMG 使用 Developer ID Application: Yao Lin
+0.6.1（Build 101）正式 DMG 使用 Developer ID Application: Yao Lin
 （KGG363ABK9）签名，启用 Hardened Runtime，并通过 Apple notarization、staple
 和 Gatekeeper 验证。安装和运行不需要关闭任何 macOS 安全机制。
 
@@ -285,7 +285,9 @@ Git tag 指向的 exact release commit 才是项目源码基准；不要把移�
 - license package：`OKVideoMac-0.6.1-build101-licenses.tar.gz`；
 - macOS artifact：`OKVideoMac-0.6.1.dmg`。
 
-0.6.1 的目标 tag 为 `v0.6.1`，仅在正式分发门禁通过后创建。
+Tag `v0.6.1` 在全部正式分发门禁通过后创建，固定提交
+`25155f52fb8c416f3245c9a829a93175dec9857b`。后续文档更新不改变已公证二进制、
+原始源码/发布说明快照及其哈希。
 0.6.1 Build 101 文件清单与生成规则见
 [`Docs/SOURCE_RELEASE_PROCESS.md`](../Docs/SOURCE_RELEASE_PROCESS.md)。Build 62/63
 发布准备阶段的历史工程状态保留在

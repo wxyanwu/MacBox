@@ -3,6 +3,43 @@
 OKVideoMac 0.6.1（Build 101）的正式用户下载格式固定为
 `OKVideoMac-0.6.1.dmg`。ZIP 仅为内部归档，不是 GitHub Release 的主下载。
 
+## 0.6.1 / Build 101 已完成验证 / Verified release
+
+Tag `v0.6.1` 固定提交 `25155f52fb8c416f3245c9a829a93175dec9857b`。正式 DMG 已通过
+Developer ID、Apple notarization `Accepted`、Staple、Gatekeeper 与安装 smoke。
+Submission：`6da1497c-d7c2-4e0f-b19c-3498e244ffa2`。
+最终 DMG SHA-256：`3fcaa402e434298a9fa224c9c4d8f3530be71278c4f0d99629dad40cc6a619f5`。
+详细结果见 [0.6.1 验证记录](RELEASE_VALIDATION_0.6.1.md)。
+
+The 0.6.1 DMG passed Developer ID signing, Apple notarization, stapling, Gatekeeper
+and installation smoke tests. The tag pins the release commit above. Later documentation
+updates preserve the signed binary, tag and build-time source/notes snapshots.
+
+## 临时专用钥匙串 / Temporary dedicated keychain
+
+1. 只读核对既有证书备份与此前发布证书身份，保存原 keychain search list 和 default。
+2. 在临时目录创建本次发布专用 keychain，使用随机密码，不改变默认 keychain。
+3. 将既有 `.p12` 仅导入该临时 keychain；通过本机安全界面取得密码，禁止放入聊天、
+   命令参数、脚本、日志或仓库。核对 Developer ID Application 身份和证书指纹。
+4. 仅对该 keychain 配置 codesign 所需的 key partition access。本次签名如需把它加入
+   search list，保留其他条目并设置成功、失败及中断均执行的清理。
+5. 复用 `OKVideoMac-Notary`；不重新创建证书或 notary credentials，不向
+   login/default/system 导入证书或私钥。按下方 distribution 流程完成所有门禁。
+6. 结束时恢复原 search list、删除临时 keychain，并复核 default 与 search list。
+   清理失败必须明确报告，不能宣称已恢复完成。
+
+Import the existing signing certificate only into a temporary dedicated keychain.
+Capture the original search list/default first, use local secure password entry,
+verify certificate identity, and grant codesign partition access only there. Keep
+the default keychain unchanged. If the temporary keychain is added to the search
+list, restore the original list on success, failure or interruption, delete the
+temporary keychain and verify cleanup. Reuse `OKVideoMac-Notary`; do not create
+certificates/profiles or import into login/default/system keychains.
+
+Apple 时间戳服务的明确瞬时错误允许有上限重试；不得移除 `--timestamp` 或忽略签名错误。
+Bounded retries may handle explicit transient timestamp-service failures; timestamp
+requirements and all other signing errors must remain enforced.
+
 ## Pipeline
 
 `OKVideoMac/macOS/OKVideoMac/Scripts/package-app.sh` 必须从干净 Git commit

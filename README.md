@@ -20,13 +20,12 @@ QuickJS/Node Spiders**
 
 ### [Download the latest stable release →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-The current source version is **0.6.1 (Build 101)** · macOS 12.0+ · Apple Silicon
+The latest stable release is **0.6.1 (Build 101)** · macOS 12.0+ · Apple Silicon
 (`arm64`) only. This patch adds Android component storage management and uninstall.
 
-The latest published, Developer ID signed and Apple-notarized DMG remains
-[v0.6.0](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.6.0).
-The 0.6.1 source finalization and local Release verification do not publish a new
-notarized download; public assets follow the separate distribution gates.
+Download the Developer ID signed and Apple-notarized
+[v0.6.1 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.6.1).
+This release passed stapling, Gatekeeper assessment and installation smoke tests.
 
 Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to
 disable Gatekeeper or SIP. Checksums, release notes, source archives, SBOMs,
@@ -267,12 +266,12 @@ checks; a local Debug compile is not a public release artifact.
 
 ## Release integrity
 
-The 0.6.1 / Build 101 source update is verified separately from public binary
-publication. Its local ad-hoc Release checks do not imply Developer ID signing,
-Apple notarization, stapling or Gatekeeper approval. A public 0.6.1 DMG and tag must
-follow the [DMG release process](Docs/DMG_RELEASE_PROCESS.md) from the final clean
-commit, with matching source archives, SBOMs and hashes. The existing v0.6.0 release
-and its assets remain unchanged. See the [0.6.1 release notes](Docs/RELEASE_NOTES_0.6.1.md)
+The 0.6.1 / Build 101 DMG passed Release packaging, Developer ID signing,
+Apple notarization (`Accepted`), stapling, Gatekeeper and installation smoke tests
+under the [DMG release process](Docs/DMG_RELEASE_PROCESS.md). Tag `v0.6.1` pins
+release commit `25155f52fb8c416f3245c9a829a93175dec9857b`; matching source archives,
+SBOMs and checksums accompany the download. Later documentation updates do not
+change that signed binary or its source snapshot. The v0.6.0 release remains unchanged. See the [0.6.1 release notes](Docs/RELEASE_NOTES_0.6.1.md)
 and [source release process](Docs/SOURCE_RELEASE_PROCESS.md).
 
 ## Documentation

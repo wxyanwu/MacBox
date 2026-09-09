@@ -1,8 +1,10 @@
 # Immutable Corresponding-Source Release Process
 
-> 0.6.1 source finalization validates a local Release. Public notarization, tag and
-> GitHub binary publication are separate gates; this specification is not evidence
-> that those gates have already passed. The v0.6.0 published set is unchanged.
+> The 0.6.1 DMG passed Developer ID signing, Apple notarization, stapling, Gatekeeper
+> and installation smoke tests. Tag `v0.6.1` pins release commit
+> `25155f52fb8c416f3245c9a829a93175dec9857b`; see the
+> [validation record](RELEASE_VALIDATION_0.6.1.md). Subsequent documentation updates
+> do not rewrite signed assets or build-time source/notes snapshots. The v0.6.0 set is unchanged.
 
 Each formal OKVideoMac binary must be published with a source set produced by
 `macOS/OKVideoMac/Scripts/create-source-release.sh` from the exact release Git

@@ -20,12 +20,12 @@ QuickJS/Node Spider**
 
 ### [下载最新稳定版本 →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-当前源码版本为 **0.6.1（Build 101）** · macOS 12.0+ · 仅支持 Apple Silicon
+最新稳定版本为 **0.6.1（Build 101）** · macOS 12.0+ · 仅支持 Apple Silicon
 （`arm64`）。本次补丁增加 Android 组件存储管理与卸载。
 
-最新已公开、完成 Developer ID 签名和 Apple 公证的 DMG 仍是
-[v0.6.0](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.6.0)。
-0.6.1 的源码收口与本地 Release 验证不代表新的公证下载包已发布；公开资产另行完成分发门禁。
+下载已完成 Developer ID 签名和 Apple 公证的
+[v0.6.1 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.6.1)。
+本版本已通过 Staple、Gatekeeper 评估和安装 smoke test。
 
 打开 DMG，将 `OKVideoMac.app` 拖入“应用程序”即可。无需关闭 Gatekeeper 或 SIP。
 每个 Release 同时提供校验和、发布说明、对应源码、SBOM 与第三方声明。
@@ -235,10 +235,11 @@ Managed Runtime 安装与 Android Emulator Session 分开；安装和 Session �
 
 ## 发布完整性
 
-0.6.1 / Build 101 源码更新与公开二进制发布分别验证。本地 ad-hoc Release 校验不代表
-Developer ID 签名、Apple 公证、Staple 或 Gatekeeper 验证通过。公开 0.6.1 DMG 与 tag
-必须从最终干净提交按 [DMG 发布流程](Docs/DMG_RELEASE_PROCESS.md)生成，并附带对应
-源码、SBOM 和哈希。已有 v0.6.0 发布和资产保持不变。详见
+0.6.1 / Build 101 DMG 已按 [DMG 发布流程](Docs/DMG_RELEASE_PROCESS.md)通过 Release
+打包、Developer ID 签名、Apple 公证（`Accepted`）、Staple、Gatekeeper 和安装 smoke test。
+Tag `v0.6.1` 固定发布提交 `25155f52fb8c416f3245c9a829a93175dec9857b`，下载随附对应
+源码归档、SBOM 和校验和。后续文档更新不改变已签名二进制或其源码快照。
+已有 v0.6.0 发布和资产保持不变。详见
 [0.6.1 发布说明](Docs/RELEASE_NOTES_0.6.1.md)与[源码发布流程](Docs/SOURCE_RELEASE_PROCESS.md)。
 
 ## 文档

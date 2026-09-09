@@ -28,7 +28,9 @@
 - Document managed component storage, uninstall boundaries and retained user data.
 
 See [0.6.1 release notes](Docs/RELEASE_NOTES_0.6.1.md). Apple Silicon / arm64,
-macOS 12.0+; public notarized binaries remain a separate release gate.
+macOS 12.0+. The Developer ID signed DMG passed Apple notarization (`Accepted`),
+stapling, Gatekeeper and installation smoke tests; see the
+[validation record](Docs/RELEASE_VALIDATION_0.6.1.md).
 
 ## [0.6.0] - 2026-09-09
 

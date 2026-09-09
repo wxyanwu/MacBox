@@ -4,7 +4,8 @@
 >
 > This document records the pre-finalization Build 62 state as assessed on
 > 2026-08-13. Its original findings are retained unchanged as historical
-> engineering evidence and do not describe the current 0.6.1 source candidate. The
+> engineering evidence and do not describe the current notarized 0.6.1 release (see the
+> [validation record](RELEASE_VALIDATION_0.6.1.md)). The
 > 0.3.41 Build 65 release is retained as a historical public baseline; Build 64
 > was its prior immutable build, and Build 63 was a pre-publication candidate.
 > The final binary, source-release, signing, notarization,

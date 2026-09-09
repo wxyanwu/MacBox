@@ -1,11 +1,12 @@
 # OKVideoMac 0.6.1（Build 101）Release Notes
 
-日期：2026-09-09 · 目标 Tag：`v0.6.1`（公开分发门禁通过后创建）
+日期：2026-09-09 · Tag：`v0.6.1`
 
 ## 版本定位
 
 0.6.1 是 0.6.0 的补丁版本，重点是可选 Android Compatibility 的存储管理与安全组件卸载。
-本次完成源码和版本收口；公证 DMG 的发布是独立步骤，不能用本地签名验证替代。
+正式 DMG 已通过 Release 构建、Developer ID 签名、Apple 公证（`Accepted`）、
+Staple、Gatekeeper 与安装 smoke test。
 
 ## Android Compatibility 存储管理
 
@@ -39,19 +40,22 @@ Apple Silicon（`arm64`），macOS 12.0 或以上；Android 只用于部分 Java
 [验证记录](RELEASE_VALIDATION_0.6.1.md)。
 
 技术边界见 [Android Managed 卸载说明](ANDROID_MANAGED_UNINSTALL.md)，
-公开资产必须经过 [DMG 发布流程](DMG_RELEASE_PROCESS.md)。既有 v0.6.0 tag 和发布记录不变。
+公开资产已通过 [DMG 发布流程](DMG_RELEASE_PROCESS.md)。既有 v0.6.0 tag 和发布记录不变。
+
+发布提交：`25155f52fb8c416f3245c9a829a93175dec9857b`。Release 附件中的发布说明和
+源码保留构建时快照；本页与 GitHub Release 正文补充后续公证及发布结果，不修改原始资产哈希。
 
 ---
 
 # OKVideoMac 0.6.1 (Build 101)
 
-Date: 2026-09-09 · Target tag: `v0.6.1` (after public distribution gates)
+Date: 2026-09-09 · Tag: `v0.6.1`
 
 ## Patch scope
 
 0.6.1 adds storage management and safe component uninstall to optional Android
-Compatibility. Source finalization is separate from publishing a notarized DMG;
-local signing verification does not replace Apple's distribution gates.
+Compatibility. The release DMG passed Release packaging, Developer ID signing,
+Apple notarization (`Accepted`), stapling, Gatekeeper and installation smoke tests.
 
 ## Android Compatibility storage management
 
@@ -90,3 +94,7 @@ This finalization does not uninstall the user's real Runtime. See the
 [managed uninstall design](ANDROID_MANAGED_UNINSTALL.md) and
 [DMG release process](DMG_RELEASE_PROCESS.md). The existing v0.6.0 tag and release
 history remain unchanged.
+
+Release commit: `25155f52fb8c416f3245c9a829a93175dec9857b`. Attached notes and source
+archives preserve the build-time snapshot. This page and the GitHub Release body
+record subsequent notarization and publication results without changing asset hashes.

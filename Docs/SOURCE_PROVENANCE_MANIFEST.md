@@ -2,7 +2,9 @@
 
 > The 0.6.1 third-party input set is unchanged from 0.6.0. Audited output hashes below are
 > historical evidence; the generated 0.6.1 source index and manifest bind current
-> binaries. This update does not claim a newly published notarized release.
+> binaries at tag `v0.6.1` (commit `25155f52fb8c416f3245c9a829a93175dec9857b`).
+> The DMG passed Apple notarization and installation gates; see the
+> [0.6.1 validation record](RELEASE_VALIDATION_0.6.1.md).
 
 Manifest date: 2026-09-09
 Baseline audit: `Docs/THIRD_PARTY_LICENSE_AUDIT.md`

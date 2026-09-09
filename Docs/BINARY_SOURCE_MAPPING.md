@@ -1,9 +1,11 @@
 # OKVideoMac 0.6.1 (Build 101) Binary → Source Mapping
 
-This document maps the 0.6.1 (Build 101) source candidate to packaged binaries.
-The generated `SOURCE_RELEASE_MANIFEST.json` records the exact per-package commit
-and hashes. Public assets and `v0.6.1` follow the formal distribution gates; the
-published v0.6.0 source set remains historical evidence. Native reproducibility
+This document maps the notarized 0.6.1 (Build 101) release to source commit
+`25155f52fb8c416f3245c9a829a93175dec9857b`, pinned by `v0.6.1`. The generated
+`SOURCE_RELEASE_MANIFEST.json` records the exact per-package commit and hashes.
+The DMG passed the [distribution gates](RELEASE_VALIDATION_0.6.1.md). Later
+documentation commits do not change the signed binary or archived source snapshot.
+The v0.6.0 source set remains historical evidence; native reproducibility
 limitations below remain explicit and unchanged.
 
 The historical project-code baseline is Git commit

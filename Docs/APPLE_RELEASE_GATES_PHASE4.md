@@ -1,7 +1,7 @@
 # Phase 4 Apple Release Gates
 
 > Historical 2026-08-13 / Build 62 evidence. These credential findings and the
-> former ZIP notarization workflow do not describe 0.6.0. The current workflow
+> former ZIP notarization workflow do not describe the current release. The current workflow
 > is documented in [DMG_RELEASE_PROCESS.md](DMG_RELEASE_PROCESS.md).
 
 Date: 2026-08-13

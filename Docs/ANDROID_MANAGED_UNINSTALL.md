@@ -53,7 +53,7 @@
   不计作自动测试通过，也不代表完整 macOS/Emulator/ADB offline 矩阵已覆盖。
 - 本轮版本收口不在用户真实 AndroidRuntime 上执行卸载。完整自动测试与构建记录见
   [0.6.1 验证记录](RELEASE_VALIDATION_0.6.1.md)。
-- App 测试使用隔离的 Debug 测试宿主；最终交付必须经过完整 Release 打包和 bundle 验证。
+- App 测试使用隔离的 Debug 测试宿主；0.6.1 正式交付已通过完整 Release 打包、bundle 验证及公证分发门禁。
 
 ## 卸载后的使用
 
@@ -63,3 +63,30 @@
 组件与数据分开管理：纯 generation backup 可以进入卸载计划，AVD/用户数据备份及
 无法确认类别的混合备份继续保留。`Maintenance/` 中的隔离内容是删除事务的一部分，
 不作为普通 Backup 展示；诊断保留事务状态，设置页提供待清理操作的继续入口。
+
+## English summary
+
+0.6.1 adds categorized storage usage and safe removal of recognized Managed Android
+components. A read-only dry-run records relative paths, estimated allocated size,
+preserved items and filesystem identities. Plans expire after 120 seconds, are
+single-use and are invalidated by another prepare. Execution accepts only the plan
+ID and rechecks the internal snapshot, mode, maintenance lock and filesystem state.
+
+All OKVideoMac Android sessions must stop, including sessions using External mode;
+uncertain shutdown prevents uninstall. Removal uses descriptor-based no-follow
+operations and a dedicated `Maintenance/<transaction-id>/quarantine/` transaction,
+with rollback before commit and resumable cleanup afterward. `Backups/` is not used
+for quarantine. Unrecognized or mixed backups are preserved.
+
+AVD/user data, login state, backing/encryption files, Android home, private ADB keys,
+user-data backups, runtime selection and external SDKs are preserved. The first
+release offers no user-data deletion action. Reinstalling Managed components remains
+available and retains the existing AVD compatibility checks. Space estimates reflect
+allocated blocks and do not guarantee the final APFS reclaim amount.
+
+Isolated regression tests cover plan expiry/reuse, file replacement, symlinks,
+External exclusion, locking, failed shutdown, rollback, interrupted cleanup and
+install–uninstall–reinstall with retained data. The notarized Release passed the
+[distribution checks](RELEASE_VALIDATION_0.6.1.md); this finalization did not uninstall
+the user's real Runtime. Maintainer-reported Emulator checks are recorded separately
+from automated results.

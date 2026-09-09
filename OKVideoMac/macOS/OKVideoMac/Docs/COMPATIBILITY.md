@@ -3,7 +3,7 @@
 - 对照版本：0.6.1（Build 101）
 - 最近更新：2026-09-09
 - 当前源码版本：0.6.1（Build 101），Apple Silicon / arm64 / macOS 12.0+
-- 最新公开公证 DMG：0.6.0；0.6.1 本地 Release 验证与公开分发门禁分别记录
+- 最新公开公证 DMG：0.6.1（Build 101）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
 
 ## 概述
 
@@ -350,10 +350,10 @@ App 支持范围和 Managed Android Runtime 实机验证是两个不同结论：
 | macOS 12.0+ | Supported | Info.plist 和全部 Mach-O `minos` 由包体脚本验证 |
 | Intel Mac / Universal Binary | Unsupported | 当前只交付 arm64 |
 | 本地 Hardened Runtime 包 | Supported | ad-hoc 签名，仅主 App 使用开发期 Library Validation 例外 |
-| Developer ID 分发 | Supported | 0.6.0（Build 100）正式 DMG 使用 Developer ID Application 与 secure timestamp 签名，Hardened Runtime、嵌套签名和权限边界由发布门禁验证 |
-| Notarization / Staple / Gatekeeper | Supported | 0.6.0（Build 100）只有在 Apple notarization 返回 `Accepted` 并通过 staple、`stapler validate` 与 Gatekeeper 后才发布 |
+| Developer ID 分发 | Supported | 0.6.1（Build 101）正式 DMG 使用 Developer ID Application 与 secure timestamp 签名，Hardened Runtime、嵌套签名和权限边界由发布门禁验证 |
+| Notarization / Staple / Gatekeeper | Supported | 0.6.1（Build 101）已取得 Apple notarization `Accepted`，并通过 staple、`stapler validate` 与 Gatekeeper |
 | 0.6.0（Build 100）正式发布 | Supported | DMG、内部 ZIP、源码、四份 SBOM、Notices 和 APK 由外层 manifest/SHA256SUMS 绑定到 tag `v0.6.0` 指向的 exact commit |
-| 0.6.1（Build 101）源码收口 | Supported | 默认测试及本地 Release 验证另行记录；tag `v0.6.1` 留待公证分发门禁；不沿用 0.6.0 的公证结论 |
+| 0.6.1（Build 101）正式发布 | Supported | 1060 项自动测试通过，9 项条件测试跳过；tag `v0.6.1` 固定提交 `25155f52fb8c416f3245c9a829a93175dec9857b`；正式 DMG 独立完成公证、Gatekeeper 与安装 smoke |
 | App Sandbox | Not Applicable | 当前为 Developer ID 外部分发目标；Sandbox 与 Hardened Runtime 是不同边界 |
 
 ## 明确不提供

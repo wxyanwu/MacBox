@@ -1,6 +1,6 @@
 # Building OKVideoMac
 
-## 0.6.1 source finalization verification
+## 0.6.1 release verification
 
 The complete default suite executes 721 App tests (713 passed, 8 conditional
 external/Android/renderer gates skipped), 261 OKVideoKit tests (all passed),
@@ -20,8 +20,11 @@ This temporary test setup is not the delivered Release bundle.
 
 The historical 0.6.0 validation remains in
 [its original record](../../../../Docs/RELEASE_VALIDATION_0.6.0.md).
-This source finalization does not repeat real Emulator uninstall or claim Apple
-notarization. A public release/tag still requires the distribution gates below.
+The 0.6.1 DMG built from `25155f52fb8c416f3245c9a829a93175dec9857b` passed
+Developer ID signing, Apple notarization (`Accepted`), stapling, Gatekeeper and
+installation smoke tests. Real Emulator uninstall was not repeated. Signing uses
+a temporary dedicated keychain as required by the
+[DMG release process](../../../../Docs/DMG_RELEASE_PROCESS.md).
 
 Formal distribution uses the existing command below. The default invocation is
 local ad-hoc packaging and is not a formal Release substitute:
