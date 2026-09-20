@@ -4,8 +4,8 @@
 
 ## 当前阶段
 
-10A-A、10A-B、10A-C、10A-D 已完成并通过；下一步为 10A-E Xtream、故障与竞态闭环。
-C 全程没有读取 Repository，也没有增加生产入口；生产数据接线从 D 开始。
+10A-A 至 10A-E 已完成并通过；下一步为 10A-F Release 性能与来源验收。C 全程没有读取
+Repository，也没有增加生产入口；生产数据接线从 D 开始。
 
 ## A：基线、分支、合同与测量协议
 
@@ -122,3 +122,41 @@ D 阶段全量验收：OKVideoKit **969 项执行，其中 20 项跳过，0 失�
 `testAndroidRealApplicationTerminationIsBoundedAndClean`。`git diff --check` 通过。
 
 结论：PASS，可进入 10A-E。
+
+## E：Xtream 短表、故障与竞态闭环
+
+- 新增 `EPGGuideXtreamLoader`，仍使用 B 阶段同一 `EPGGuideWorkCoordinator`：保存全部 desired rows，
+  runnable 不超过 8，实际 fetch/query 不超过 4；Now/Next 和 Guide 通过 Repository 的 channel-scoped
+  flight 与 5 分钟缓存合并，不创建第二套 Xtream 请求或缓存。
+- Xtream snapshot 固定为 `.perRowToken`。每行 token 绑定 service incarnation、配置修订、频道资源、
+  cache version 和 demand revision；两片中同一行 token 改变时废弃候选并最多整批重建一次，不伪造
+  跨频道 generation。
+- 缺少稳定 locator、服务端明确 unsupported、以及短表已有节目但目标时间窗在覆盖外，分别形成明确的
+  unsupported 行；只有服务端成功返回完整 0 programme payload 才是 empty。跨两个 12 小时片的同一
+  短表记录按 cache version + ordinal 去重。
+- AppState 按 capability 选择 XMLTV 或 Xtream adapter。运行时凭据只留在 `XtreamEPGAdapter.fetch`
+  闭包，Snapshot/Context 只携带 credential-free provider、server 和 stream identity；配置记录、provider
+  ID 与 locator 必须一致才准入。
+- `LiveGuideState` 同时验证 XMLTV 全局 token 和 Xtream per-row token。用户切源、切日期、快速滚动、
+  A→B→A、配置修订或 service incarnation 改变后，旧交付均不能发布；同源刷新仅按同一 service 与
+  capability 保留旧图，不错误要求旧图拥有新的 demand revision。
+- 需求合并采用 100 ms quiet interval 和从首个连续需求起最多 250 ms 的硬等待。像素级连续滚动可以
+  取消旧展示查询，但不能无限推迟实际加载；资源级 XMLTV 刷新仍不随 Guide 滚动取消。
+- sleep 先撤销交付资格、取消有限查询并保留同源 stale 图，再有界 pause Repository；wake 在 resume
+  后重建当前需求；shutdown 撤销输入并有界 close。Repository invalidation 会取消旧 Xtream flight，
+  迟到结果不能填入替代缓存。
+- UI 明示 Xtream 只提供近期节目，短覆盖之外不显示“没有节目”的虚假结论。所有 unsupported/failed
+  页面继续保留有限频道列表和“播放频道”。Guide activation 只调用既有 `playLive`/
+  `playImportedLive`；这两个入口直接进入播放 coordinator，不读取 Guide snapshot、等待 Repository
+  或等待 EPG 网络请求。
+
+E 阶段定向验收：Xtream Loader 3 项；预算、查询队列满/取消/换代、Repository stale/invalidation、
+pause/resume/close 等组合门禁 32 项；`LiveGuidePresentationStateTests` 7 项，全部 0 跳过、0 失败。
+其中覆盖 20 行全部进入终态且 fetch 峰值不超过 4、取消一个消费者不取消共享 flight、A→B→A、
+service 重启隔离、全 unsupported、旧图刷新保留和 250 ms 最大等待。
+
+E 阶段全量验收：OKVideoKit **972 项执行，其中 20 项跳过，0 失败**；macOS App **906 项执行，
+其中 8 项跳过，0 失败**，仅额外排除必须连接真实 Android 设备的既有集成测试
+`testAndroidRealApplicationTerminationIsBoundedAndClean`。`git diff --check` 通过。
+
+结论：PASS，可进入 10A-F。

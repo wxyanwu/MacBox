@@ -27989,6 +27989,19 @@ final class LiveGuideGridTests: XCTestCase {
 
 @MainActor
 final class LiveGuidePresentationStateTests: XCTestCase {
+    func testDemandDebounceHasQuietDelayAndFiniteMaximumWait() {
+        var debounce = LiveGuideDemandDebounce()
+        debounce.register(at: 1_000_000_000)
+        XCTAssertEqual(debounce.delay(at: 1_000_000_000), 100_000_000)
+        debounce.register(at: 1_090_000_000)
+        XCTAssertEqual(debounce.startedAt, 1_000_000_000)
+        XCTAssertEqual(debounce.delay(at: 1_240_000_000), 10_000_000)
+        XCTAssertEqual(debounce.delay(at: 1_250_000_000), 0)
+        debounce.reset()
+        XCTAssertNil(debounce.startedAt)
+        XCTAssertEqual(debounce.delay(at: 2_000_000_000), 100_000_000)
+    }
+
     func testLateDeliveryCannotReplaceCurrentDemand() throws {
         let state = LiveGuideState()
         let source = EPGSourceKey(.imported(UUID()))
@@ -28063,21 +28076,80 @@ final class LiveGuidePresentationStateTests: XCTestCase {
         XCTAssertNil(state.snapshot)
     }
 
-    private func identity(source: EPGSourceKey, incarnation: UUID)
+    func testXtreamPerRowTokensValidateServiceAndAllUnsupportedIsExplicit() throws {
+        let state = LiveGuideState()
+        let source = EPGSourceKey(.xtream(UUID()))
+        let identity = identity(source: source, incarnation: UUID(), capability: .xtreamShort)
+        state.begin(identity, refreshing: false)
+        XCTAssertFalse(state.publish(
+            try snapshot(identity, title: "Foreign", tokenIncarnation: UUID()),
+            identity: identity
+        ))
+        XCTAssertTrue(state.publish(try snapshot(identity, title: "Current"), identity: identity))
+        guard case .content = state.lifecycle else { return XCTFail("expected Xtream content") }
+
+        let unsupportedIdentity = self.identity(
+            source: source,
+            incarnation: identity.serviceIncarnation,
+            capability: .xtreamShort
+        )
+        state.begin(unsupportedIdentity, refreshing: false)
+        let start = Date(timeIntervalSince1970: 1_789_862_400)
+        let slice = try EPGGuideTimeSlice(start: start,
+            end: start.addingTimeInterval(43_200))
+        let unsupported = try EPGGuideSnapshot(source: source,
+            revision: unsupportedIdentity.revision,
+            demandRevision: unsupportedIdentity.demandRevision,
+            slices: [slice], coherence: .perRowToken,
+            rows: [EPGGuideRow(channel: EPGGuideChannel(LiveChannel(groupName: "",
+                name: "Unsupported", streams: [], explicitID: "unsupported")), token: nil,
+                match: EPGChannelMatch(kind: .unmatched, channelID: nil),
+                availability: .unsupported, programmes: [], state: .unsupported)])
+        XCTAssertTrue(state.publish(unsupported, identity: unsupportedIdentity))
+        XCTAssertEqual(state.lifecycle, .unsupported)
+    }
+
+    func testABAAndServiceRestartCannotPublishOrRetainOldSnapshot() throws {
+        let state = LiveGuideState()
+        let incarnation = UUID()
+        let sourceA = EPGSourceKey(.xtream(UUID()))
+        let sourceB = EPGSourceKey(.xtream(UUID()))
+        let firstA = identity(source: sourceA, incarnation: incarnation,
+                              capability: .xtreamShort)
+        state.begin(firstA, refreshing: false)
+        XCTAssertTrue(state.publish(try snapshot(firstA, title: "First A"), identity: firstA))
+        let b = identity(source: sourceB, incarnation: incarnation, capability: .xtreamShort)
+        state.begin(b, refreshing: false)
+        let secondA = identity(source: sourceA, incarnation: incarnation,
+                               capability: .xtreamShort)
+        state.begin(secondA, refreshing: false)
+        XCTAssertFalse(state.publish(try snapshot(firstA, title: "Late A"), identity: firstA))
+        XCTAssertTrue(state.publish(try snapshot(secondA, title: "Second A"), identity: secondA))
+
+        let restarted = identity(source: sourceA, incarnation: UUID(), capability: .xtreamShort)
+        state.begin(restarted, refreshing: false)
+        XCTAssertEqual(state.lifecycle, .loadingInitial)
+        XCTAssertNil(state.snapshot)
+    }
+
+    private func identity(source: EPGSourceKey, incarnation: UUID,
+                          capability: EPGGuideCapability = .xmltv)
         -> LiveGuideDeliveryIdentity {
         LiveGuideDeliveryIdentity(source: source, revision: String(repeating: "a", count: 64),
-            demandRevision: UUID(), serviceIncarnation: incarnation)
+            demandRevision: UUID(), serviceIncarnation: incarnation, capability: capability)
     }
 
     private func snapshot(_ identity: LiveGuideDeliveryIdentity, title: String?,
-                          includesFailedRow: Bool = false) throws -> EPGGuideSnapshot {
-        let token = EPGResultToken(serviceIncarnation: identity.serviceIncarnation,
+                          includesFailedRow: Bool = false,
+                          tokenIncarnation: UUID? = nil) throws -> EPGGuideSnapshot {
+        let token = EPGResultToken(serviceIncarnation: tokenIncarnation ?? identity.serviceIncarnation,
             resourceIdentity: "resource", sourceEpoch: "epoch", dataVersion: "version",
             demandRevision: identity.demandRevision)
         let start = Date(timeIntervalSince1970: 1_789_862_400)
         let slice = try EPGGuideTimeSlice(start: start, end: start.addingTimeInterval(43_200))
         let programme = title.map {
-            EPGWindowProgramme(id: EPGProgrammeRecordIdentity(kind: .xmltv,
+            EPGWindowProgramme(id: EPGProgrammeRecordIdentity(
+                kind: identity.capability == .xmltv ? .xmltv : .xtream,
                 resourceIdentity: token.resourceIdentity, sourceEpoch: token.sourceEpoch,
                 dataVersion: token.dataVersion, ordinal: 1),
                 programme: EPGProgramme(channelID: "a", title: $0, start: start,
@@ -28095,6 +28167,7 @@ final class LiveGuidePresentationStateTests: XCTestCase {
         }
         return try EPGGuideSnapshot(source: identity.source, revision: identity.revision,
             demandRevision: identity.demandRevision, slices: [slice],
-            coherence: .xmltv(token), rows: rows)
+            coherence: identity.capability == .xmltv ? .xmltv(token) : .perRowToken,
+            rows: rows)
     }
 }

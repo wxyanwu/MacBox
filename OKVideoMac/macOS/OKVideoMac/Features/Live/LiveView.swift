@@ -424,6 +424,13 @@ struct LiveGuideScreen: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
+            if sourceID.isXtream {
+                Text(L10n.string("live.guide.xtream-nearby-only",
+                                 fallback: "This source provides nearby programmes only"))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
             statusLabel
         }
         .padding(.horizontal, 14)

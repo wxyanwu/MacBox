@@ -2,6 +2,25 @@ import AppKit
 import OKVideoCore
 import SwiftUI
 
+struct LiveGuideDemandDebounce: Equatable {
+    static let quietInterval: UInt64 = 100_000_000
+    static let maximumWait: UInt64 = 250_000_000
+    private(set) var startedAt: UInt64?
+
+    mutating func register(at uptime: UInt64) {
+        if startedAt == nil { startedAt = uptime }
+    }
+
+    func delay(at uptime: UInt64) -> UInt64 {
+        guard let startedAt else { return Self.quietInterval }
+        let elapsed = uptime >= startedAt ? uptime - startedAt : Self.maximumWait
+        let remaining = elapsed < Self.maximumWait ? Self.maximumWait - elapsed : 0
+        return min(Self.quietInterval, remaining)
+    }
+
+    mutating func reset() { startedAt = nil }
+}
+
 enum LiveGuideFreshness: Equatable {
     case fresh
     case stale
@@ -40,6 +59,7 @@ struct LiveGuideDeliveryIdentity: Equatable {
     let revision: String
     let demandRevision: UUID
     let serviceIncarnation: UUID
+    let capability: EPGGuideCapability
 }
 
 /// Main-actor publication boundary. It owns only one bounded snapshot and
@@ -60,10 +80,11 @@ final class LiveGuideState: ObservableObject {
     var retainedSnapshotCost: Int { snapshot?.estimatedByteCost ?? 0 }
 
     func begin(_ identity: LiveGuideDeliveryIdentity, refreshing: Bool) {
-        let canRetain = snapshot?.source == identity.source
+        let retainable = snapshot?.source == identity.source
             && snapshot?.revision == identity.revision
+            && snapshot.map { canRetain($0, for: identity) } == true
         expectedIdentity = identity
-        guard canRetain else {
+        guard retainable else {
             lifecycle = .loadingInitial
             return
         }
@@ -103,26 +124,27 @@ final class LiveGuideState: ObservableObject {
               value.source == identity.source,
               value.revision == identity.revision,
               value.demandRevision == identity.demandRevision,
-              case .xmltv(let token) = value.coherence,
-              token.serviceIncarnation == identity.serviceIncarnation,
-              token.demandRevision == identity.demandRevision else { return false }
+              validatesCoherence(value, identity: identity) else { return false }
 
         let failures = Dictionary(uniqueKeysWithValues: value.rows.compactMap { row in
             if case .failed(let failure) = row.state { return (row.id, failure) }
             return nil
         })
-        let successfulRows = value.rows.filter { row in
+        let usableRows = value.rows.filter { row in
             if case .failed = row.state { return false }
+            if row.state == .unsupported { return false }
             return true
         }
-        guard !successfulRows.isEmpty else {
-            lifecycle = .failed(failures.values.first ?? .unavailable)
+        guard !usableRows.isEmpty else {
+            lifecycle = value.rows.contains(where: { $0.state == .unsupported })
+                ? .unsupported
+                : .failed(failures.values.first ?? .unavailable)
             return true
         }
         let freshness: LiveGuideFreshness = value.rows.contains(where: {
             $0.availability == .stale || $0.availability == .failed
         }) ? .stale : .fresh
-        if successfulRows.allSatisfy({ $0.programmes.isEmpty }) {
+        if usableRows.allSatisfy({ $0.programmes.isEmpty }) {
             lifecycle = .empty(LiveGuideEmptyState(
                 snapshot: value, freshness: freshness, refreshPhase: .idle
             ))
@@ -133,6 +155,38 @@ final class LiveGuideState: ObservableObject {
             ))
         }
         return true
+    }
+
+    private func validatesCoherence(_ value: EPGGuideSnapshot,
+                                    identity: LiveGuideDeliveryIdentity) -> Bool {
+        switch (identity.capability, value.coherence) {
+        case (.xmltv, .xmltv(let token)):
+            return token.serviceIncarnation == identity.serviceIncarnation
+                && token.demandRevision == identity.demandRevision
+        case (.xtreamShort, .perRowToken):
+            return value.rows.allSatisfy { row in
+                guard let token = row.token else { return row.programmes.isEmpty }
+                return token.serviceIncarnation == identity.serviceIncarnation
+                    && token.demandRevision == identity.demandRevision
+            }
+        default:
+            return false
+        }
+    }
+
+    private func canRetain(_ value: EPGGuideSnapshot,
+                           for identity: LiveGuideDeliveryIdentity) -> Bool {
+        switch (identity.capability, value.coherence) {
+        case (.xmltv, .xmltv(let token)):
+            return token.serviceIncarnation == identity.serviceIncarnation
+        case (.xtreamShort, .perRowToken):
+            return value.rows.allSatisfy {
+                $0.token?.serviceIncarnation == identity.serviceIncarnation
+                    || ($0.token == nil && $0.programmes.isEmpty)
+            }
+        default:
+            return false
+        }
     }
 
     func fail(_ failure: EPGGuideFailure,

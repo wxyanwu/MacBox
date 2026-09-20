@@ -4833,7 +4833,6 @@ private struct LiveGuideDemandInput: Equatable {
 private struct LiveGuideRequestSpec: Equatable {
     let input: LiveGuideDemandInput
     let identity: LiveGuideDeliveryIdentity
-    let key: EPGRequestKey
 }
 
 @MainActor
@@ -5171,6 +5170,7 @@ final class AppState: ObservableObject {
     private var liveGuideTask: Task<Void, Never>?
     private var liveGuideInput: LiveGuideDemandInput?
     private var liveGuideRequest: LiveGuideRequestSpec?
+    private var liveGuideDebounce = LiveGuideDemandDebounce()
     private var epgRefreshGeneration = UUID()
     private var epgSleeping = false
     private var epgBrowserSource: LiveSourceID?
@@ -14808,6 +14808,7 @@ final class AppState: ObservableObject {
         liveGuideTask = nil
         liveGuideRequest = nil
         liveGuideInput = nil
+        liveGuideDebounce.reset()
         liveGuide.deactivate()
         if let repository = environment?.productionEPGRepository {
             _ = await repository.close(deadlineNanoseconds: 2_000_000_000)
@@ -14931,6 +14932,7 @@ final class AppState: ObservableObject {
         liveGuideTask?.cancel()
         liveGuideTask = nil
         liveGuideRequest = nil
+        liveGuideDebounce.reset()
         liveGuide.suspend()
         if let repository = environment?.productionEPGRepository {
             _ = await repository.pause(deadlineNanoseconds: 750_000_000)
@@ -18474,6 +18476,7 @@ final class AppState: ObservableObject {
         )
         guard input != liveGuideInput else { return }
         liveGuideInput = input
+        liveGuideDebounce.register(at: DispatchTime.now().uptimeNanoseconds)
         startLiveGuideDemand(input)
     }
 
@@ -18482,6 +18485,7 @@ final class AppState: ObservableObject {
         liveGuideTask = nil
         liveGuideInput = nil
         liveGuideRequest = nil
+        liveGuideDebounce.reset()
         liveGuide.deactivate()
     }
 
@@ -18491,24 +18495,25 @@ final class AppState: ObservableObject {
             liveGuide.suspend()
             return
         }
-        guard case .imported = input.source else {
-            liveGuideRequest = nil
-            liveGuide.setUnsupported()
-            return
-        }
         guard let revision = epgRevision(for: input.source) else {
             liveGuideRequest = nil
+            liveGuideDebounce.reset()
             liveGuide.setUnsupported()
             return
         }
-        let key = EPGRequestKey(source: input.source, revision: revision, resource: "xmltv")
+        let capability: EPGGuideCapability
+        switch input.source {
+        case .imported: capability = .xmltv
+        case .xtream: capability = .xtreamShort
+        }
         let identity = LiveGuideDeliveryIdentity(
-            source: key.source,
+            source: EPGSourceKey(input.source),
             revision: revision,
             demandRevision: UUID(),
-            serviceIncarnation: environment.productionEPGRepository.incarnation
+            serviceIncarnation: environment.productionEPGRepository.incarnation,
+            capability: capability
         )
-        let request = LiveGuideRequestSpec(input: input, identity: identity, key: key)
+        let request = LiveGuideRequestSpec(input: input, identity: identity)
         liveGuideRequest = request
         liveGuide.begin(identity, refreshing: false)
         let retainedCost = liveGuide.retainedSnapshotCost
@@ -18516,38 +18521,21 @@ final class AppState: ObservableObject {
         liveGuideTask = Task(priority: .userInitiated) { @MainActor [weak self] in
             guard let self else { return }
             do {
-                try await Task.sleep(nanoseconds: 100_000_000)
+                let now = DispatchTime.now().uptimeNanoseconds
+                let delay = self.liveGuideDebounce.delay(at: now)
+                if delay > 0 { try await Task.sleep(nanoseconds: delay) }
                 guard !Task.isCancelled, self.liveGuideRequest == request,
                       self.epgRevision(for: input.source) == revision else { return }
-                let status = await environment.productionEPGRepository.status(for: key)
-                guard !Task.isCancelled, self.liveGuideRequest == request,
-                      self.epgRevision(for: input.source) == revision else { return }
-                self.liveEPG.setStatus(status)
-                if case .imported(let sourceID) = input.source {
-                    self.updateImportedEPGStatus(status, sourceID: sourceID)
-                }
-                let shouldRefresh = status.nextRetryAt <= Date()
-                    && self.resolvedEPGSource(for: input.source)?.url != nil
-                self.liveGuide.begin(identity, refreshing: shouldRefresh)
-                if shouldRefresh,
-                   let url = self.resolvedEPGSource(for: input.source)?.url {
-                    self.beginXMLTVResourceRefresh(key: key, url: url)
-                }
-                guard status.summary != nil else {
-                    if status.consecutiveFailures > 0 {
-                        self.liveGuide.fail(.unavailable, identity: identity)
-                    }
-                    return
-                }
+                self.liveGuideDebounce.reset()
                 let slices = try Self.liveGuideSlices(
                     from: input.windowStart,
                     to: input.windowEnd
                 )
                 let demand = try EPGGuideDemand(
-                    source: key.source,
+                    source: identity.source,
                     revision: revision,
                     demandRevision: identity.demandRevision,
-                    capability: .xmltv,
+                    capability: capability,
                     channels: input.channels,
                     visibleRange: input.visibleRange,
                     focusedChannelID: input.focusedChannelID,
@@ -18555,13 +18543,82 @@ final class AppState: ObservableObject {
                         ? self.livePlaybackChannel?.id : nil,
                     slices: slices
                 )
-                let snapshot = try await EPGGuideXMLTVLoader.load(
-                    repository: environment.productionEPGRepository,
-                    key: key,
-                    demand: demand,
-                    availability: status.availability,
-                    retainedSnapshotCost: retainedCost
-                )
+                let snapshot: EPGGuideSnapshot
+                switch input.source {
+                case .imported(let sourceID):
+                    let key = EPGRequestKey(
+                        source: input.source,
+                        revision: revision,
+                        resource: "xmltv"
+                    )
+                    let status = await environment.productionEPGRepository.status(for: key)
+                    guard !Task.isCancelled, self.liveGuideRequest == request,
+                          self.epgRevision(for: input.source) == revision else { return }
+                    self.liveEPG.setStatus(status)
+                    self.updateImportedEPGStatus(status, sourceID: sourceID)
+                    let shouldRefresh = status.nextRetryAt <= Date()
+                        && self.resolvedEPGSource(for: input.source)?.url != nil
+                    self.liveGuide.begin(identity, refreshing: shouldRefresh)
+                    if shouldRefresh,
+                       let url = self.resolvedEPGSource(for: input.source)?.url {
+                        self.beginXMLTVResourceRefresh(key: key, url: url)
+                    }
+                    guard status.summary != nil else {
+                        if status.consecutiveFailures > 0 {
+                            self.liveGuide.fail(.unavailable, identity: identity)
+                        }
+                        return
+                    }
+                    snapshot = try await EPGGuideXMLTVLoader.load(
+                        repository: environment.productionEPGRepository,
+                        key: key,
+                        demand: demand,
+                        availability: status.availability,
+                        retainedSnapshotCost: retainedCost
+                    )
+
+                case .xtream(let providerID):
+                    guard let record = self.activeConfigurationRecord,
+                          record.id == providerID,
+                          let configuration = try? XtreamProviderConfiguration(data: record.rawData),
+                          configuration.providerID == providerID else {
+                        self.liveGuide.setUnsupported()
+                        return
+                    }
+                    let streamIDs = Dictionary(uniqueKeysWithValues:
+                        input.channels.compactMap { channel -> (String, String)? in
+                            guard let locator = self.nativeChannelLocator(
+                                sourceID: input.source,
+                                channel: channel
+                            ) else { return nil }
+                            return (channel.id, locator.streamID)
+                        }
+                    )
+                    let context = EPGGuideXtreamContext(
+                        accountIdentity: configuration.providerID.uuidString,
+                        serverIdentity: configuration.serverBaseURL.absoluteString,
+                        configurationRevision: revision,
+                        streamIDByChannelID: streamIDs
+                    )
+                    let store = environment.xtreamCredentialStore
+                    let client = environment.xtreamHTTPClient
+                    let userAgent = Self.xtreamUserAgent
+                    snapshot = try await EPGGuideXtreamLoader.load(
+                        repository: environment.productionEPGRepository,
+                        demand: demand,
+                        context: context,
+                        retainedSnapshotCost: retainedCost,
+                        fetch: { streamID in
+                            try await XtreamEPGAdapter.fetch(
+                                configuration: configuration,
+                                streamID: streamID,
+                                credentialStore: store,
+                                httpClient: client,
+                                userAgent: userAgent
+                            )
+                        }
+                    )
+                }
                 guard !Task.isCancelled, self.liveGuideRequest == request,
                       self.epgRevision(for: input.source) == revision else { return }
                 _ = self.liveGuide.publish(snapshot, identity: identity)
