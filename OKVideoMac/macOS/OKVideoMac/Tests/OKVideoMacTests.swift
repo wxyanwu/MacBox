@@ -1,4 +1,6 @@
 import AppKit
+import CoreVideo
+import Darwin
 import Network
 import Combine
 import CryptoKit
@@ -27868,12 +27870,13 @@ final class LiveGuideGridTests: XCTestCase {
         XCTAssertEqual(initial.totalProgrammes, 1_152)
         XCTAssertGreaterThan(initial.visibleProgrammeViews, 0)
         XCTAssertLessThan(initial.visibleProgrammeViews, initial.totalProgrammes)
-        XCTAssertGreaterThanOrEqual(initial.realizedProgrammeViews, initial.visibleProgrammeViews)
+        XCTAssertGreaterThan(initial.realizedProgrammeViews, 0)
+        XCTAssertLessThan(initial.realizedProgrammeViews, initial.visibleProgrammeViews)
         XCTAssertLessThanOrEqual(initial.realizedProgrammeViews, 200)
         XCTAssertLessThan(initial.emittedLayoutAttributes, initial.totalProgrammes)
         XCTAssertLessThanOrEqual(initial.cachedTimeLabels, 64)
         XCTAssertEqual(try XCTUnwrap(view.debugNowLineX),
-                       6 * LiveGuideGridView.pointsPerHour, accuracy: 0.001)
+                       12 * LiveGuideGridView.minimumProgrammeWidth, accuracy: 0.001)
 
         for point in [NSPoint(x: 400, y: 640), NSPoint(x: 800, y: 1_280),
                       NSPoint(x: 1_200, y: 1_900), NSPoint(x: 1_000, y: 2_400)] {
@@ -27896,7 +27899,9 @@ final class LiveGuideGridTests: XCTestCase {
         view.layoutSubtreeIfNeeded()
         let resized = view.debugFixedFrames
         XCTAssertEqual(resized.timeHeader.width,
-                       720 - LiveGuideGridView.channelColumnWidth, accuracy: 0.001)
+                       720 - LiveGuideGridView.channelColumnWidth
+                           - NSScroller.scrollerWidth(for: .small, scrollerStyle: .overlay),
+                       accuracy: 0.001)
         XCTAssertEqual(resized.channelHeader.minY, LiveGuideGridView.timeHeaderHeight,
                        accuracy: 0.001)
     }
@@ -27927,7 +27932,8 @@ final class LiveGuideGridTests: XCTestCase {
         XCTAssertEqual(activated?.0, "channel-1")
         XCTAssertFalse(view.debugVisibleAccessibilityLabels.isEmpty)
         XCTAssertTrue(view.debugVisibleAccessibilityLabels.allSatisfy { $0.contains("Channel") })
-        XCTAssertEqual(view.layer?.contentsScale, 2)
+        XCTAssertEqual(view.convertToBacking(NSSize(width: 1, height: 1)).width,
+                       window.backingScaleFactor)
         XCTAssertLessThan(view.debugMetrics.visibleProgrammeViews,
                           view.debugMetrics.totalProgrammes)
     }
@@ -28169,5 +28175,848 @@ final class LiveGuidePresentationStateTests: XCTestCase {
             demandRevision: identity.demandRevision, slices: [slice],
             coherence: identity.capability == .xmltv ? .xmltv(token) : .perRowToken,
             rows: rows)
+    }
+}
+
+private struct LiveGuideResourceMemoryPoint {
+    let rss: UInt64
+    let footprint: UInt64
+}
+
+private final class LiveGuideResourceSampler: @unchecked Sendable {
+    private let lock = NSLock()
+    private var timer: DispatchSourceTimer?
+    private(set) var baseline = LiveGuideResourceMemoryPoint(rss: 0, footprint: 0)
+    private var peak = LiveGuideResourceMemoryPoint(rss: 0, footprint: 0)
+    private var sampleCount = 0
+
+    static func memory() -> LiveGuideResourceMemoryPoint {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size
+        )
+        let status = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        precondition(status == KERN_SUCCESS)
+        return LiveGuideResourceMemoryPoint(rss: info.resident_size,
+                                            footprint: info.phys_footprint)
+    }
+
+    func start() {
+        let point = Self.memory()
+        lock.lock()
+        baseline = point
+        peak = point
+        lock.unlock()
+        let timer = DispatchSource.makeTimerSource(
+            queue: DispatchQueue(label: "com.okvideomac.epg10a.memory", qos: .utility)
+        )
+        timer.schedule(deadline: .now(), repeating: .milliseconds(10))
+        timer.setEventHandler { [weak self] in self?.sample() }
+        self.timer = timer
+        timer.resume()
+    }
+
+    func sample() {
+        let point = Self.memory()
+        lock.lock()
+        peak = LiveGuideResourceMemoryPoint(rss: max(peak.rss, point.rss),
+                                            footprint: max(peak.footprint, point.footprint))
+        sampleCount += 1
+        lock.unlock()
+    }
+
+    func stop() -> (baseline: LiveGuideResourceMemoryPoint,
+                    peak: LiveGuideResourceMemoryPoint, samples: Int) {
+        timer?.cancel()
+        timer = nil
+        sample()
+        lock.lock()
+        defer { lock.unlock() }
+        return (baseline, peak, sampleCount)
+    }
+}
+
+private final class LiveGuideDisplayProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var link: CVDisplayLink?
+    private var accepting = false
+    private var mainSamplePending = false
+    private var executedTicks: [UInt64] = []
+    private var dispatchDelays: [Double] = []
+    private(set) var nominalRefreshHz: Double = 0
+
+    func start() throws {
+        var created: CVDisplayLink?
+        let createStatus = CVDisplayLinkCreateWithCGDisplay(CGMainDisplayID(), &created)
+        guard createStatus == kCVReturnSuccess, let created else {
+            throw NSError(domain: "EPG10A.DisplayLink", code: Int(createStatus))
+        }
+        let period = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(created)
+        if period.timeValue > 0, period.timeScale > 0 {
+            nominalRefreshHz = Double(period.timeScale) / Double(period.timeValue)
+        }
+        lock.lock()
+        accepting = true
+        lock.unlock()
+        let callback: CVDisplayLinkOutputCallback = { _, _, outputTime, _, _, context in
+            guard let context else { return kCVReturnError }
+            let probe = Unmanaged<LiveGuideDisplayProbe>.fromOpaque(context)
+                .takeUnretainedValue()
+            probe.enqueue(hostTime: outputTime.pointee.hostTime)
+            return kCVReturnSuccess
+        }
+        let callbackStatus = CVDisplayLinkSetOutputCallback(
+            created, callback, Unmanaged.passUnretained(self).toOpaque()
+        )
+        guard callbackStatus == kCVReturnSuccess else {
+            throw NSError(domain: "EPG10A.DisplayLink", code: Int(callbackStatus))
+        }
+        link = created
+        let startStatus = CVDisplayLinkStart(created)
+        guard startStatus == kCVReturnSuccess else {
+            link = nil
+            throw NSError(domain: "EPG10A.DisplayLink", code: Int(startStatus))
+        }
+    }
+
+    func stop() {
+        lock.lock()
+        accepting = false
+        lock.unlock()
+        if let link { CVDisplayLinkStop(link) }
+        link = nil
+    }
+
+    func metrics() -> (intervals: [Double], delays: [Double]) {
+        lock.lock()
+        defer { lock.unlock() }
+        let intervals = zip(executedTicks.dropFirst(), executedTicks).map { current, previous in
+            Double(current - previous) / 1_000_000
+        }
+        return (intervals, dispatchDelays)
+    }
+
+    private func enqueue(hostTime _: UInt64) {
+        let scheduled = DispatchTime.now().uptimeNanoseconds
+        lock.lock()
+        let shouldAccept = accepting && !mainSamplePending
+        if shouldAccept { mainSamplePending = true }
+        lock.unlock()
+        guard shouldAccept else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let executed = DispatchTime.now().uptimeNanoseconds
+            self.lock.lock()
+            self.mainSamplePending = false
+            if self.accepting {
+                self.executedTicks.append(executed)
+                self.dispatchDelays.append(Double(executed - scheduled) / 1_000_000)
+            }
+            self.lock.unlock()
+        }
+    }
+}
+
+private final class LiveGuideFrameRunner: @unchecked Sendable {
+    struct Result {
+        let frameTimestamps: [UInt64]
+        let drawDurations: [Double]
+        let displayIntervals: [Double]
+        let dispatchDelays: [Double]
+    }
+
+    private let lock = NSLock()
+    private let gridView: LiveGuideGridView
+    private let sizes: [NSSize]
+    private var link: CVDisplayLink?
+    private var accepting = false
+    private var mainFramePending = false
+    private var displayHostTimes: [UInt64] = []
+    private var dispatchDelays: [Double] = []
+    private var continuation: CheckedContinuation<Result, Never>?
+    private var step = 0
+    private var timestamps: [UInt64] = []
+    private var drawDurations: [Double] = []
+    private(set) var nominalRefreshHz: Double = 0
+
+    @MainActor
+    init(gridView: LiveGuideGridView, sizes: [NSSize]) {
+        self.gridView = gridView
+        self.sizes = sizes
+    }
+
+    @MainActor
+    func run() async throws -> Result {
+        var created: CVDisplayLink?
+        let createStatus = CVDisplayLinkCreateWithCGDisplay(CGMainDisplayID(), &created)
+        guard createStatus == kCVReturnSuccess, let created else {
+            throw NSError(domain: "EPG10A.FrameRunner", code: Int(createStatus))
+        }
+        let period = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(created)
+        if period.timeValue > 0, period.timeScale > 0 {
+            nominalRefreshHz = Double(period.timeScale) / Double(period.timeValue)
+        }
+        let callback: CVDisplayLinkOutputCallback = { _, _, outputTime, _, _, context in
+            guard let context else { return kCVReturnError }
+            let runner = Unmanaged<LiveGuideFrameRunner>.fromOpaque(context)
+                .takeUnretainedValue()
+            runner.enqueue(hostTime: outputTime.pointee.hostTime)
+            return kCVReturnSuccess
+        }
+        let callbackStatus = CVDisplayLinkSetOutputCallback(
+            created, callback, Unmanaged.passUnretained(self).toOpaque()
+        )
+        guard callbackStatus == kCVReturnSuccess else {
+            throw NSError(domain: "EPG10A.FrameRunner", code: Int(callbackStatus))
+        }
+        link = created
+        lock.lock()
+        accepting = true
+        lock.unlock()
+        let startStatus = CVDisplayLinkStart(created)
+        guard startStatus == kCVReturnSuccess else {
+            link = nil
+            throw NSError(domain: "EPG10A.FrameRunner", code: Int(startStatus))
+        }
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    private func enqueue(hostTime: UInt64) {
+        let scheduled = DispatchTime.now().uptimeNanoseconds
+        lock.lock()
+        let shouldAccept = accepting && !mainFramePending
+        if shouldAccept { mainFramePending = true }
+        lock.unlock()
+        guard shouldAccept else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let executed = DispatchTime.now().uptimeNanoseconds
+            self.lock.lock()
+            self.mainFramePending = false
+            let shouldRun = self.accepting
+            if shouldRun {
+                self.displayHostTimes.append(hostTime)
+                self.dispatchDelays.append(Double(executed - scheduled) / 1_000_000)
+            }
+            self.lock.unlock()
+            guard shouldRun else { return }
+            MainActor.assumeIsolated { self.tick(executedAt: executed) }
+        }
+    }
+
+    @MainActor
+    private func tick(executedAt: UInt64) {
+        timestamps.append(executedAt)
+        let duration = autoreleasepool { () -> Double in
+            if step % 60 == 0 {
+                gridView.frame.size = sizes[step / 60]
+            }
+            let began = DispatchTime.now().uptimeNanoseconds
+            let x = CGFloat((step * 113) % 3_600)
+            let y = CGFloat((step * 79) % 2_400)
+            gridView.scroll(to: NSPoint(x: x, y: y))
+            gridView.layoutSubtreeIfNeeded()
+            gridView.displayIfNeeded()
+            return Double(DispatchTime.now().uptimeNanoseconds - began) / 1_000_000
+        }
+        drawDurations.append(duration)
+        step += 1
+        guard step == 180 else { return }
+        lock.lock()
+        accepting = false
+        let displayHostTimes = self.displayHostTimes
+        let dispatchDelays = self.dispatchDelays
+        lock.unlock()
+        if let link { CVDisplayLinkStop(link) }
+        link = nil
+        let displayIntervals = zip(displayHostTimes.dropFirst(), displayHostTimes).map {
+            current, previous in
+            CVGetHostClockFrequency() > 0
+                ? Double(current - previous) / CVGetHostClockFrequency() * 1_000
+                : 0
+        }
+        let result = Result(frameTimestamps: timestamps,
+            drawDurations: drawDurations, displayIntervals: displayIntervals,
+            dispatchDelays: dispatchDelays)
+        continuation?.resume(returning: result)
+        continuation = nil
+    }
+}
+
+@MainActor
+final class LiveGuideReleaseResourceTests: XCTestCase {
+    func testReleaseProductionGuideRenderResourceGate() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["OKVIDEO_EPG_10A_APP_RESOURCE"] == "1",
+              let fixtureURL = environment["OKVIDEO_EPG_10A_FIXTURE_URL"].flatMap(URL.init(string:)),
+              let fixtureDigest = environment["OKVIDEO_EPG_10A_FIXTURE_SHA256"],
+              let output = environment["OKVIDEO_EPG_10A_APP_OUTPUT"] else {
+            throw XCTSkip("Explicit 10A independent Release App resource gate")
+        }
+        guard !isDebugBuild else {
+            XCTFail("10A App resource gate must use a Release test binary")
+            return
+        }
+
+        let fileManager = FileManager.default
+        let cacheDirectory = fileManager.temporaryDirectory.appendingPathComponent(
+            "EPGCache-10A-App-\(UUID().uuidString)", isDirectory: true
+        )
+        defer { try? fileManager.removeItem(at: cacheDirectory) }
+        try fileManager.createDirectory(at: cacheDirectory,
+                                        withIntermediateDirectories: true)
+        let liveSource = LiveSourceID.imported(UUID())
+        let source = EPGSourceKey(liveSource)
+        let revision = String(repeating: "a", count: 64)
+        let key = EPGRequestKey(source: liveSource, revision: revision, resource: "xmltv")
+        let repository = EPGProductionRepository(cacheDirectory: cacheDirectory)
+        let repositoryAvailable = await repository.isAvailable
+        XCTAssertTrue(repositoryAvailable)
+        let imported = try await repository.refreshXMLTV(key: key, url: fixtureURL, force: true)
+        XCTAssertEqual(imported.summary?.programmeCount, 200_000)
+
+        let channels = (0..<EPGGuideLimits.maximumDesiredRows).map {
+            LiveChannel(groupName: "Release Matrix", name: "C\($0)", tvgID: "c\($0)",
+                        streams: [], explicitID: "guide-channel-\($0)")
+        }
+        let anchor = Date(timeIntervalSince1970: 1_767_225_600)
+        let slices = [
+            try EPGGuideTimeSlice(start: anchor, end: anchor.addingTimeInterval(43_200)),
+            try EPGGuideTimeSlice(start: anchor.addingTimeInterval(43_200),
+                                  end: anchor.addingTimeInterval(86_400))
+        ]
+        let demand = try EPGGuideDemand(source: source, revision: revision,
+            demandRevision: UUID(), capability: .xmltv, channels: channels,
+            visibleRange: 0..<10, focusedChannelID: channels[0].id,
+            playingChannelID: channels[0].id, slices: slices)
+        let status = await repository.status(for: key)
+
+        var repositoryQueryDurations: [Double] = []
+        for sample in 0..<100 {
+            let began = DispatchTime.now().uptimeNanoseconds
+            _ = try await repository.queryXMLTVWindow(channels[sample % channels.count],
+                for: key, from: anchor, to: anchor.addingTimeInterval(43_200),
+                limit: EPGGuideLimits.pageSize, demandRevision: demand.demandRevision)
+            repositoryQueryDurations.append(
+                Double(DispatchTime.now().uptimeNanoseconds - began) / 1_000_000
+            )
+        }
+
+        let binaryDigest = try executableDigest()
+        let fullSize = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1_440, height: 900)
+        let baselineContent = NSView(frame: NSRect(origin: .zero, size: fullSize))
+        baselineContent.wantsLayer = true
+        baselineContent.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        var window: NSWindow? = NSWindow(
+            contentRect: baselineContent.frame, styleMask: [.borderless],
+            backing: .buffered, defer: false
+        )
+        window?.isReleasedWhenClosed = false
+        window?.contentView = baselineContent
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+        window?.display()
+        try await Task.sleep(nanoseconds: 250_000_000)
+        let sampler = LiveGuideResourceSampler()
+        sampler.start()
+        let guideBegan = DispatchTime.now().uptimeNanoseconds
+        var memoryCheckpoints: [String: LiveGuideResourceMemoryPoint] = [:]
+
+        var snapshot: EPGGuideSnapshot? = try await EPGGuideXMLTVLoader.load(
+            repository: repository, key: key, demand: demand,
+            availability: status.availability
+        )
+        XCTAssertEqual(snapshot?.rows.count, EPGGuideLimits.maximumDesiredRows)
+        XCTAssertEqual(snapshot?.rows.reduce(0) { $0 + $1.programmes.count },
+                       EPGGuideLimits.maximumProgrammes)
+        memoryCheckpoints["snapshot"] = LiveGuideResourceSampler.memory()
+
+        var firstModel: LiveGuideGridModel?
+        if let snapshot {
+            firstModel = try await Task.detached(priority: .userInitiated) {
+                try Self.makeModel(snapshot)
+            }.value
+        }
+        memoryCheckpoints["firstModel"] = LiveGuideResourceSampler.memory()
+        var secondModel: LiveGuideGridModel?
+        var gridView: LiveGuideGridView? = LiveGuideGridView(
+            frame: NSRect(x: 0, y: 0, width: 1_280, height: 720)
+        )
+        baselineContent.addSubview(gridView!)
+        if let firstModel {
+            autoreleasepool {
+                gridView?.apply(firstModel, now: anchor.addingTimeInterval(21_600))
+                gridView?.layoutSubtreeIfNeeded()
+                gridView?.displayIfNeeded()
+            }
+        } else {
+            return XCTFail("expected initial Guide model")
+        }
+        sampler.sample()
+        memoryCheckpoints["firstDraw"] = LiveGuideResourceSampler.memory()
+        let firstDrawMilliseconds = Double(
+            DispatchTime.now().uptimeNanoseconds - guideBegan
+        ) / 1_000_000
+
+        var drawDurations: [Double] = [firstDrawMilliseconds]
+        let sizes = [NSSize(width: 720, height: 420),
+                     NSSize(width: 1_280, height: 720), fullSize]
+        let frameRunner = LiveGuideFrameRunner(gridView: try XCTUnwrap(gridView), sizes: sizes)
+        let frameResult = try await frameRunner.run()
+        drawDurations.append(contentsOf: frameResult.drawDurations)
+        memoryCheckpoints["scrollMatrix"] = LiveGuideResourceSampler.memory()
+
+        let sourceModel = try XCTUnwrap(firstModel)
+        secondModel = try await Task.detached(priority: .userInitiated) {
+            try Self.shiftedModel(sourceModel, seconds: 43_200)
+        }.value
+        memoryCheckpoints["secondModel"] = LiveGuideResourceSampler.memory()
+        let generationBegan = DispatchTime.now().uptimeNanoseconds
+        if let secondModel {
+            autoreleasepool {
+                gridView?.apply(secondModel, now: anchor.addingTimeInterval(64_800))
+                gridView?.layoutSubtreeIfNeeded()
+                gridView?.displayIfNeeded()
+            }
+        } else {
+            return XCTFail("expected replacement Guide model")
+        }
+        drawDurations.append(Double(DispatchTime.now().uptimeNanoseconds - generationBegan) / 1_000_000)
+        let viewMetrics = gridView?.debugMetrics
+        sampler.sample()
+        memoryCheckpoints["generationReplacement"] = LiveGuideResourceSampler.memory()
+
+        autoreleasepool {
+            gridView?.removeFromSuperview()
+            gridView = nil
+            firstModel = nil
+            secondModel = nil
+            snapshot = nil
+        }
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        sampler.sample()
+        memoryCheckpoints["teardown"] = LiveGuideResourceSampler.memory()
+        try await Task.sleep(nanoseconds: 4_000_000_000)
+        let settled = LiveGuideResourceSampler.memory()
+        memoryCheckpoints["settled"] = settled
+        let memoryMetrics = sampler.stop()
+        window?.orderOut(nil)
+        window?.contentView = nil
+        window?.close()
+        window = nil
+        let rssDelta = memoryMetrics.peak.rss > memoryMetrics.baseline.rss
+            ? memoryMetrics.peak.rss - memoryMetrics.baseline.rss : 0
+        let footprintDelta = memoryMetrics.peak.footprint > memoryMetrics.baseline.footprint
+            ? memoryMetrics.peak.footprint - memoryMetrics.baseline.footprint : 0
+        let frameIntervals = frameResult.displayIntervals
+        let frameP95 = percentile95(frameIntervals)
+        let drawP95 = percentile95(drawDurations)
+        let queryP95 = percentile95(repositoryQueryDurations)
+        let stalls = frameResult.dispatchDelays.filter { $0 > 100 }.count
+        let dropped = frameIntervals.filter { $0 > 25 }.count
+
+        let result: [String: Any] = [
+            "schemaVersion": 1,
+            "configuration": "Release",
+            "binarySHA256": binaryDigest,
+            "fixtureSHA256": fixtureDigest,
+            "fixtureProgrammeCount": imported.summary?.programmeCount ?? -1,
+            "deviceModel": hardwareModel(),
+            "operatingSystem": ProcessInfo.processInfo.operatingSystemVersionString,
+            "architecture": "arm64",
+            "displayScale": NSScreen.main?.backingScaleFactor ?? 0,
+            "nominalRefreshHz": frameRunner.nominalRefreshHz,
+            "percentileAlgorithm": "nearest-rank ceil(N*0.95)-1",
+            "desiredRows": channels.count,
+            "snapshotProgrammes": EPGGuideLimits.maximumProgrammes,
+            "firstVisibleDrawMilliseconds": firstDrawMilliseconds,
+            "drawSampleCount": drawDurations.count,
+            "drawP95Milliseconds": drawP95,
+            "drawMaximumMilliseconds": drawDurations.max() ?? 0,
+            "repositoryQuerySampleCount": repositoryQueryDurations.count,
+            "repositoryQueryP95Milliseconds": queryP95,
+            "repositoryQueryMaximumMilliseconds": repositoryQueryDurations.max() ?? 0,
+            "frameSampleCount": frameIntervals.count,
+            "frameIntervalP95Milliseconds": frameP95,
+            "frameIntervalMaximumMilliseconds": frameIntervals.max() ?? 0,
+            "frameIntervalsOver25Milliseconds": dropped,
+            "frameIntervalsOver25Rate": frameIntervals.isEmpty ? 0
+                : Double(dropped) / Double(frameIntervals.count),
+            "displayProbeCallbackIntervalP95Milliseconds": percentile95(frameResult.displayIntervals),
+            "mainDispatchDelayOver100Milliseconds": stalls,
+            "mainDispatchDelayMaximumMilliseconds": frameResult.dispatchDelays.max() ?? 0,
+            "rssBaselineBytes": memoryMetrics.baseline.rss,
+            "rssPeakBytes": memoryMetrics.peak.rss,
+            "rssPeakDeltaBytes": rssDelta,
+            "rssSettledBytes": settled.rss,
+            "rssSettledDeltaBytes": Int64(settled.rss) - Int64(memoryMetrics.baseline.rss),
+            "footprintBaselineBytes": memoryMetrics.baseline.footprint,
+            "footprintPeakBytes": memoryMetrics.peak.footprint,
+            "footprintPeakDeltaBytes": footprintDelta,
+            "footprintSettledBytes": settled.footprint,
+            "footprintSettledDeltaBytes": Int64(settled.footprint)
+                - Int64(memoryMetrics.baseline.footprint),
+            "memorySampleCount": memoryMetrics.samples,
+            "memoryCheckpoints": memoryCheckpoints.mapValues { point in
+                ["rssBytes": point.rss, "footprintBytes": point.footprint]
+            },
+            "maximumVisibleProgrammeViews": viewMetrics?.maximumVisibleProgrammeViews ?? -1,
+            "realizedProgrammeViews": viewMetrics?.realizedProgrammeViews ?? -1,
+            "emittedLayoutAttributes": viewMetrics?.emittedLayoutAttributes ?? -1,
+            "matrix": ["narrow", "wide", "full-screen-sized", "native-retina",
+                       "two-axis-scroll", "date-jump", "generation-replacement"]
+        ]
+        let data = try JSONSerialization.data(withJSONObject: result,
+                                              options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: URL(fileURLWithPath: output), options: .atomic)
+
+        XCTAssertLessThanOrEqual(firstDrawMilliseconds, 500)
+        XCTAssertLessThanOrEqual(drawP95, 25)
+        XCTAssertLessThanOrEqual(frameP95, 25)
+        XCTAssertEqual(stalls, 0)
+        XCTAssertLessThanOrEqual(rssDelta, 32 * 1_024 * 1_024)
+        XCTAssertLessThanOrEqual(viewMetrics?.realizedProgrammeViews ?? .max, 600)
+        let closed = await repository.close()
+        XCTAssertTrue(closed)
+    }
+
+    nonisolated private static func makeModel(_ snapshot: EPGGuideSnapshot) throws
+        -> LiveGuideGridModel {
+        try LiveGuideGridModel(snapshot: snapshot, timeZone: .current)
+    }
+
+    nonisolated private static func shiftedModel(_ model: LiveGuideGridModel,
+                                                 seconds: TimeInterval) throws
+        -> LiveGuideGridModel {
+        let rows = model.rows.map { row in
+            LiveGuideGridRow(id: row.id, title: row.title, subtitle: row.subtitle,
+                state: row.state, programmes: row.programmes.map { value in
+                    let identity = EPGProgrammeRecordIdentity(kind: value.id.kind,
+                        resourceIdentity: value.id.resourceIdentity,
+                        sourceEpoch: value.id.sourceEpoch,
+                        dataVersion: value.id.dataVersion + "-replacement",
+                        ordinal: value.id.ordinal)
+                    return LiveGuideGridProgramme(EPGWindowProgramme(id: identity,
+                        programme: EPGProgramme(channelID: row.id, title: value.title,
+                            start: value.start.addingTimeInterval(seconds),
+                            end: value.end.addingTimeInterval(seconds))))
+                })
+        }
+        return try LiveGuideGridModel(
+            windowStart: model.windowStart.addingTimeInterval(seconds),
+            windowEnd: model.windowEnd.addingTimeInterval(seconds),
+            timeZone: model.timeZone, rows: rows
+        )
+    }
+
+    private func percentile95(_ values: [Double]) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        return sorted[max(0, Int(ceil(Double(sorted.count) * 0.95)) - 1)]
+    }
+
+    private func executableDigest() throws -> String {
+        let url = try XCTUnwrap(Bundle.main.executableURL)
+        let digest = SHA256.hash(data: try Data(contentsOf: url))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private var isDebugBuild: Bool {
+#if DEBUG
+        true
+#else
+        false
+#endif
+    }
+
+    private func hardwareModel() -> String {
+        var size = 0
+        guard sysctlbyname("hw.model", nil, &size, nil, 0) == 0, size > 1 else {
+            return "unknown"
+        }
+        var bytes = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("hw.model", &bytes, &size, nil, 0) == 0 else {
+            return "unknown"
+        }
+        return String(cString: bytes)
+    }
+}
+
+@MainActor
+private final class LiveGuidePlaybackObserver {
+    private(set) var latest = PlayerSnapshot()
+    private(set) var failureMessages: [String] = []
+    private(set) var snapshotCount = 0
+
+    func consume(_ event: PlayerEvent) {
+        guard case .snapshot(let snapshot, _) = event else { return }
+        latest = snapshot
+        snapshotCount += 1
+        if case .failed(let message) = snapshot.status {
+            failureMessages.append(message)
+        }
+    }
+}
+
+@MainActor
+final class LiveGuidePlaybackAcceptanceTests: XCTestCase {
+    func testThirtyMinuteLocalPlaybackRemainsIndependentFromEPG() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["OKVIDEO_EPG_10A_PLAYBACK"] == "1",
+              let mediaPath = environment["OKVIDEO_EPG_10A_MEDIA"],
+              let fixtureURL = environment["OKVIDEO_EPG_10A_FIXTURE_URL"].flatMap(URL.init(string:)),
+              let output = environment["OKVIDEO_EPG_10A_PLAYBACK_OUTPUT"] else {
+            throw XCTSkip("Explicit 10A 30-minute local playback acceptance")
+        }
+        guard !isDebugBuild else {
+            XCTFail("10A playback acceptance must use a Release test binary")
+            return
+        }
+        let totalSeconds = max(6, Double(environment["OKVIDEO_EPG_10A_PLAYBACK_SECONDS"] ?? "1800") ?? 1_800)
+        let segmentSeconds = totalSeconds / 6
+        let mediaURL = URL(fileURLWithPath: mediaPath)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: mediaURL.path))
+
+        let cacheDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "EPGCache-10A-Playback-\(UUID().uuidString)", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: cacheDirectory,
+                                                withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: cacheDirectory) }
+        let sourceID = LiveSourceID.imported(UUID())
+        let source = EPGSourceKey(sourceID)
+        let revision = String(repeating: "b", count: 64)
+        let key = EPGRequestKey(source: sourceID, revision: revision, resource: "xmltv")
+        let repository = EPGProductionRepository(cacheDirectory: cacheDirectory)
+        let initialImport = try await repository.refreshXMLTV(
+            key: key, url: fixtureURL, force: true
+        )
+        XCTAssertEqual(initialImport.summary?.programmeCount, 200_000)
+
+        let channels = (0..<EPGGuideLimits.maximumDesiredRows).map {
+            LiveChannel(groupName: "Playback Acceptance", name: "C\($0)", tvgID: "c\($0)",
+                        streams: [], explicitID: "playback-guide-channel-\($0)")
+        }
+        let guideModel = try makeGuideModel(channels: channels)
+        let guideView = LiveGuideGridView(frame: NSRect(x: 0, y: 0, width: 1_280, height: 720))
+        let guideWindow = NSWindow(contentRect: guideView.frame, styleMask: [.borderless],
+                                   backing: .buffered, defer: false)
+        guideWindow.isReleasedWhenClosed = false
+        guideWindow.contentView = guideView
+        guideWindow.setFrameOrigin(NSPoint(x: -4_000, y: -4_000))
+
+        let player = try MPVPlayerClient(teardownMode: .fullDestroy)
+        try await player.setMuted(true)
+        let renderWindow = NSWindow(contentRect: NSRect(x: -2_000, y: -2_000,
+            width: 640, height: 360), styleMask: [.borderless], backing: .buffered, defer: false)
+        renderWindow.isReleasedWhenClosed = false
+        let renderView = MPVOpenGLView(player: player,
+            onError: { XCTFail("Renderer: \($0)") },
+            onSurfaceReady: { _ in }, onSurfaceUnavailable: { _ in })
+        renderWindow.contentView = renderView
+        renderView.frame = NSRect(x: 0, y: 0, width: 640, height: 360)
+        renderView.prepareOpenGL()
+        let observer = LiveGuidePlaybackObserver()
+        let reader = Task { @MainActor in
+            for await event in player.events { observer.consume(event) }
+        }
+        let renderer = Task { @MainActor in
+            while !Task.isCancelled {
+                autoreleasepool { renderView.draw(renderView.bounds) }
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+        }
+
+        let media = ResolvedMedia(url: mediaURL, headers: [:], format: "mp4",
+            siteKey: "epg-10a-playback", sourceName: "Local deterministic media",
+            episodeName: "Acceptance loop")
+        let conditions: [(epg: Bool, guide: Bool, action: String)] = [
+            (false, false, "baseline"),
+            (true, false, "epg-query"),
+            (true, true, "guide-visible"),
+            (true, true, "successful-refresh"),
+            (true, true, "failed-refresh"),
+            (false, false, "post-failure-baseline")
+        ]
+        var segments: [[String: Any]] = []
+        var successfulRefreshes = 0
+        var expectedRefreshFailures = 0
+        let testBegan = Date()
+
+        do {
+            for (index, condition) in conditions.enumerated() {
+                if condition.guide {
+                    guideView.apply(guideModel, now: guideModel.windowStart.addingTimeInterval(6 * 3_600))
+                    guideWindow.orderFrontRegardless()
+                    guideView.layoutSubtreeIfNeeded()
+                    guideView.displayIfNeeded()
+                } else {
+                    guideWindow.orderOut(nil)
+                }
+
+                let requestID = UUID()
+                let snapshotCountBeforeLoad = observer.snapshotCount
+                let loadBegan = DispatchTime.now().uptimeNanoseconds
+                try await player.load(media, startPosition: nil, requestID: requestID)
+                let firstFrameDeadline = Date().addingTimeInterval(15)
+                while (observer.snapshotCount <= snapshotCountBeforeLoad
+                       || observer.latest.status != .playing
+                       || observer.latest.position <= 0.2
+                       || (index == 0 && observer.latest.videoWidth <= 0)),
+                      Date() < firstFrameDeadline {
+                    try await Task.sleep(nanoseconds: 20_000_000)
+                }
+                XCTAssertGreaterThan(observer.snapshotCount, snapshotCountBeforeLoad)
+                XCTAssertEqual(observer.latest.status, .playing)
+                XCTAssertGreaterThan(observer.latest.position, 0.2)
+                if index == 0 { XCTAssertGreaterThan(observer.latest.videoWidth, 0) }
+                let firstFrameMilliseconds = Double(
+                    DispatchTime.now().uptimeNanoseconds - loadBegan
+                ) / 1_000_000
+
+                if condition.action == "successful-refresh" {
+                    let refreshed = try await repository.refreshXMLTV(
+                        key: key, url: fixtureURL, force: true
+                    )
+                    XCTAssertEqual(refreshed.summary?.programmeCount, 200_000)
+                    successfulRefreshes += 1
+                } else if condition.action == "failed-refresh" {
+                    let failedRefresh = try await repository.refreshXMLTV(
+                        key: key, url: URL(string: "http://127.0.0.1:1/broken.xml")!,
+                        force: true
+                    )
+                    XCTAssertGreaterThan(failedRefresh.consecutiveFailures, 0)
+                    XCTAssertNotNil(failedRefresh.summary)
+                    expectedRefreshFailures += 1
+                }
+
+                let segmentBegan = Date()
+                var queryCount = 0
+                var nextQuery = Date()
+                while Date().timeIntervalSince(segmentBegan) < segmentSeconds {
+                    if condition.epg, Date() >= nextQuery {
+                        let page = try await repository.queryXMLTVWindow(
+                            channels[(queryCount * 7) % channels.count], for: key,
+                            from: guideModel.windowStart, to: guideModel.windowEnd,
+                            limit: EPGGuideLimits.pageSize,
+                            demandRevision: UUID()
+                        )
+                        XCTAssertLessThanOrEqual(page.page.programmes.count,
+                                                 EPGGuideLimits.pageSize)
+                        queryCount += 1
+                        nextQuery = Date().addingTimeInterval(min(30, max(1, segmentSeconds / 4)))
+                    }
+                    if condition.guide {
+                        let elapsed = Date().timeIntervalSince(segmentBegan)
+                        guideView.scroll(to: NSPoint(x: elapsed * 18,
+                            y: CGFloat((Int(elapsed) * 19) % 2_400)))
+                        guideView.layoutSubtreeIfNeeded()
+                        guideView.displayIfNeeded()
+                    }
+                    if !observer.failureMessages.isEmpty { break }
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                }
+                let endPosition = observer.latest.position
+                let decoderDrops = await player.diagnosticPropertyForTesting(
+                    "decoder-frame-drop-count"
+                ) ?? "unavailable"
+                let rendererDrops = await player.diagnosticPropertyForTesting(
+                    "frame-drop-count"
+                ) ?? "unavailable"
+                segments.append([
+                    "index": index,
+                    "action": condition.action,
+                    "epgEnabled": condition.epg,
+                    "guideVisible": condition.guide,
+                    "firstFrameMilliseconds": firstFrameMilliseconds,
+                    "endPositionSeconds": endPosition,
+                    "epgQueryCount": queryCount,
+                    "decoderFrameDrops": decoderDrops,
+                    "rendererFrameDrops": rendererDrops
+                ])
+                XCTAssertGreaterThanOrEqual(endPosition, max(0.5, segmentSeconds - 8))
+                XCTAssertTrue(observer.failureMessages.isEmpty)
+                print("10A_PLAYBACK segment=\(index + 1)/6 action=\(condition.action) first_frame_ms=\(firstFrameMilliseconds) position=\(endPosition) decoder_drops=\(decoderDrops) renderer_drops=\(rendererDrops)")
+            }
+        } catch {
+            renderer.cancel()
+            reader.cancel()
+            await renderer.value
+            await reader.value
+            renderView.tearDown()
+            renderWindow.close()
+            guideWindow.close()
+            await player.shutdown()
+            _ = await repository.close()
+            throw error
+        }
+
+        let wallSeconds = Date().timeIntervalSince(testBegan)
+        let result: [String: Any] = [
+            "schemaVersion": 1,
+            "configuration": "Release",
+            "requestedPlaybackSeconds": totalSeconds,
+            "wallSeconds": wallSeconds,
+            "segmentCount": segments.count,
+            "segments": segments,
+            "snapshotCount": observer.snapshotCount,
+            "playbackFailureCount": observer.failureMessages.count,
+            "playbackFailures": observer.failureMessages,
+            "successfulRefreshes": successfulRefreshes,
+            "expectedRefreshFailures": expectedRefreshFailures,
+            "fixtureProgrammeCount": initialImport.summary?.programmeCount ?? -1
+        ]
+        let data = try JSONSerialization.data(withJSONObject: result,
+                                              options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: URL(fileURLWithPath: output), options: .atomic)
+        XCTAssertEqual(segments.count, conditions.count)
+        XCTAssertEqual(successfulRefreshes, 1)
+        XCTAssertEqual(expectedRefreshFailures, 1)
+        XCTAssertEqual(observer.failureMessages.count, 0)
+        XCTAssertGreaterThanOrEqual(wallSeconds, totalSeconds)
+        renderer.cancel()
+        reader.cancel()
+        await renderer.value
+        await reader.value
+        renderView.tearDown()
+        renderWindow.close()
+        guideWindow.close()
+        await player.shutdown()
+        let closed = await repository.close()
+        XCTAssertTrue(closed)
+    }
+
+    private func makeGuideModel(channels: [LiveChannel]) throws -> LiveGuideGridModel {
+        let start = Date(timeIntervalSince1970: 1_767_225_600)
+        let rows = channels.enumerated().map { rowIndex, channel in
+            LiveGuideGridRow(id: channel.id, title: channel.name,
+                programmes: (0..<96).map { item in
+                    let programmeStart = start.addingTimeInterval(Double(item) * 15 * 60)
+                    let identity = EPGProgrammeRecordIdentity(kind: .xmltv,
+                        resourceIdentity: "playback", sourceEpoch: "acceptance",
+                        dataVersion: "fixture", ordinal: rowIndex * 100 + item)
+                    return LiveGuideGridProgramme(EPGWindowProgramme(id: identity,
+                        programme: EPGProgramme(channelID: channel.id,
+                            title: "Programme \(rowIndex)-\(item)", start: programmeStart,
+                            end: programmeStart.addingTimeInterval(15 * 60))))
+                })
+        }
+        return try LiveGuideGridModel(windowStart: start,
+            windowEnd: start.addingTimeInterval(24 * 3_600),
+            timeZone: TimeZone(secondsFromGMT: 0)!, rows: rows)
+    }
+
+    private var isDebugBuild: Bool {
+#if DEBUG
+        true
+#else
+        false
+#endif
     }
 }

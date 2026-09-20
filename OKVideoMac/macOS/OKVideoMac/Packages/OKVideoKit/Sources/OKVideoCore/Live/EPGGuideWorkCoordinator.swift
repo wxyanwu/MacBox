@@ -124,9 +124,10 @@ public struct EPGGuideWorkCoordinator: Sendable {
         return result
     }
 
+    @discardableResult
     public mutating func completePage(_ id: EPGGuideWorkID, acceptedProgrammes: Int,
                                       acceptedBytes: Int, hasMore: Bool,
-                                      terminalState: EPGGuideRowState? = nil) throws {
+                                      terminalState: EPGGuideRowState? = nil) throws -> Bool {
         guard let index = rows.firstIndex(where: { $0.id == id }), rows[index].running,
               reservations.removeValue(forKey: id) != nil,
               acceptedProgrammes >= 0, acceptedBytes >= 0 else {
@@ -138,7 +139,7 @@ public struct EPGGuideWorkCoordinator: Sendable {
             rows[index].terminal = true
             metrics.completedRows += 1
             refillRunnable()
-            return
+            return true
         }
         let rowRemaining = EPGGuideLimits.maximumProgrammesPerRow - rows[index].programmeCount
         let globalRemaining = EPGGuideLimits.maximumProgrammes - acceptedProgrammeCount
@@ -149,7 +150,7 @@ public struct EPGGuideWorkCoordinator: Sendable {
             rows[index].terminal = true
             metrics.completedRows += 1
             refillRunnable()
-            return
+            return false
         }
         rows[index].programmeCount += acceptedProgrammes
         acceptedProgrammeCount += acceptedProgrammes
@@ -172,6 +173,7 @@ public struct EPGGuideWorkCoordinator: Sendable {
         }
         if rows[index].terminal { metrics.completedRows += 1 }
         refillRunnable()
+        return true
     }
 
     public mutating func fail(_ id: EPGGuideWorkID, _ failure: EPGGuideFailure) throws {

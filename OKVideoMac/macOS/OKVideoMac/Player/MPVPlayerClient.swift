@@ -1551,6 +1551,20 @@ final class MPVPlayerClient: PlayerClient {
         }
     }
 
+#if DEBUG || OKVIDEO_PERFORMANCE_TEST
+    func diagnosticPropertyForTesting(_ name: String) async -> String? {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                guard self.isRunning, let client = self.client else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                continuation.resume(returning: self.propertyString(name, client: client))
+            }
+        }
+    }
+#endif
+
     func shutdown() async {
         playbackStartSignal.cancel()
         guard beginShutdown() else {

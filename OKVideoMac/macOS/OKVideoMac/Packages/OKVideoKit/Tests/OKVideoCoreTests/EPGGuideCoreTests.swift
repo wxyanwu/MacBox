@@ -77,17 +77,20 @@ final class EPGGuideCoreTests: XCTestCase {
 
         var global = try EPGGuideWorkCoordinator(demand: demand(count: 48))
         var guardCount = 0
+        var rejectedLatePages = 0
         while !global.isFinished {
             let assignments = global.nextAssignments()
             XCTAssertFalse(assignments.isEmpty)
             for assignment in assignments {
-                try global.completePage(assignment.id, acceptedProgrammes: 64,
+                let accepted = try global.completePage(assignment.id, acceptedProgrammes: 64,
                     acceptedBytes: 64, hasMore: true)
+                if !accepted { rejectedLatePages += 1 }
             }
             guardCount += 1
             XCTAssertLessThan(guardCount, 200)
         }
         XCTAssertTrue(global.terminalStates.contains(.truncated(.globalItemLimit)))
+        XCTAssertGreaterThan(rejectedLatePages, 0)
     }
 
     func testSnapshotRejectsMixedXMLTVGenerationAndDuplicateRecordIdentity() throws {

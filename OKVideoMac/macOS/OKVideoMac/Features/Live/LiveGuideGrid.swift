@@ -220,7 +220,7 @@ final class LiveGuideState: ObservableObject {
     }
 }
 
-struct LiveGuideGridProgramme: Equatable, Identifiable {
+struct LiveGuideGridProgramme: Equatable, Identifiable, Sendable {
     let id: EPGProgrammeRecordIdentity
     let title: String
     let start: Date
@@ -234,7 +234,7 @@ struct LiveGuideGridProgramme: Equatable, Identifiable {
     }
 }
 
-struct LiveGuideGridRow: Equatable, Identifiable {
+struct LiveGuideGridRow: Equatable, Identifiable, Sendable {
     let id: String
     let title: String
     let subtitle: String?
@@ -251,7 +251,7 @@ struct LiveGuideGridRow: Equatable, Identifiable {
     }
 }
 
-struct LiveGuideGridModel: Equatable {
+struct LiveGuideGridModel: Equatable, Sendable {
     let windowStart: Date
     let windowEnd: Date
     let timeZone: TimeZone
@@ -276,6 +276,24 @@ struct LiveGuideGridModel: Equatable {
         self.windowEnd = windowEnd
         self.timeZone = timeZone
         self.rows = rows
+    }
+
+    init(snapshot: EPGGuideSnapshot, timeZone: TimeZone,
+         subtitles: [String: String] = [:]) throws {
+        try self.init(
+            windowStart: snapshot.slices.first?.start ?? .distantPast,
+            windowEnd: snapshot.slices.last?.end ?? .distantFuture,
+            timeZone: timeZone,
+            rows: snapshot.rows.map { row in
+                LiveGuideGridRow(
+                    id: row.id,
+                    title: row.channel.name,
+                    subtitle: subtitles[row.id] ?? row.channel.number,
+                    state: row.state,
+                    programmes: row.programmes.map(LiveGuideGridProgramme.init)
+                )
+            }
+        )
     }
 }
 
@@ -329,23 +347,24 @@ struct LiveGuideGridFixedFrames: Equatable {
     let content: NSRect
 }
 
-final class LiveGuideGridView: NSView, NSCollectionViewDataSource, NSCollectionViewDelegate {
+final class LiveGuideGridView: NSView {
     static let rowHeight: CGFloat = 64
     static let timeHeaderHeight: CGFloat = 42
     static let channelColumnWidth: CGFloat = 188
     static let pointsPerHour: CGFloat = 180
+    static let minimumProgrammeWidth: CGFloat = 128
 
     private let cornerLabel = NSTextField(labelWithString: "Program Guide")
     private let timeHeader = LiveGuideTimeHeaderView()
     private let channelHeader = LiveGuideChannelHeaderView()
-    private let scrollView = NSScrollView()
-    private let grid = LiveGuideCollectionView()
-    private let gridLayout = LiveGuideCollectionLayout()
-    private let itemIdentifier = NSUserInterfaceItemIdentifier("LiveGuideProgrammeItem")
-    private var boundsObserver: NSObjectProtocol?
+    private let grid = LiveGuideViewportView()
+    private let horizontalScroller = NSScroller()
+    private let verticalScroller = NSScroller()
     private(set) var model: LiveGuideGridModel?
     private var maximumVisibleProgrammeViews = 0
-    private var realizedProgrammeViews: Set<ObjectIdentifier> = []
+    private var selectedProgrammeIndexPath: IndexPath?
+    private var virtualOffset = NSPoint.zero
+    private var updatingScrollers = false
     var onProgrammeActivated: ((LiveGuideGridRow, LiveGuideGridProgramme) -> Void)?
     var onProgrammeSelected: ((LiveGuideGridRow, LiveGuideGridProgramme) -> Void)?
     var onChannelActivated: ((LiveGuideGridRow) -> Void)? {
@@ -358,8 +377,6 @@ final class LiveGuideGridView: NSView, NSCollectionViewDataSource, NSCollectionV
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
         cornerLabel.alignment = .left
         cornerLabel.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -367,80 +384,76 @@ final class LiveGuideGridView: NSView, NSCollectionViewDataSource, NSCollectionV
         cornerLabel.setAccessibilityRole(.staticText)
         cornerLabel.setAccessibilityLabel("Program Guide")
 
-        grid.collectionViewLayout = gridLayout
-        grid.dataSource = self
-        grid.delegate = self
-        grid.isSelectable = true
-        grid.allowsMultipleSelection = false
-        grid.backgroundColors = [.clear]
-        grid.register(LiveGuideProgrammeItem.self, forItemWithIdentifier: itemIdentifier)
         grid.onMoveSelection = { [weak self] horizontal, vertical in
             self?.moveSelection(horizontal: horizontal, vertical: vertical)
         }
         grid.onActivateSelection = { [weak self] in self?.activateSelection() }
-        grid.setAccessibilityRole(.grid)
-        grid.setAccessibilityLabel("Programme schedule")
-
-        scrollView.documentView = grid
-        scrollView.hasHorizontalScroller = true
-        scrollView.hasVerticalScroller = true
-        scrollView.autohidesScrollers = true
-        scrollView.drawsBackground = false
-        scrollView.contentView.postsBoundsChangedNotifications = true
-        boundsObserver = NotificationCenter.default.addObserver(
-            forName: NSView.boundsDidChangeNotification,
-            object: scrollView.contentView, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.synchronizeFixedViews() }
+        grid.onSelectProgramme = { [weak self] programmeIndex, rowIndex, activate in
+            self?.selectProgramme(item: programmeIndex, section: rowIndex, activate: activate)
         }
+        grid.onScroll = { [weak self] delta in self?.scroll(by: delta) }
+
+        horizontalScroller.scrollerStyle = .overlay
+        horizontalScroller.knobStyle = .default
+        horizontalScroller.target = self
+        horizontalScroller.action = #selector(scrollerChanged(_:))
+        verticalScroller.scrollerStyle = .overlay
+        verticalScroller.knobStyle = .default
+        verticalScroller.target = self
+        verticalScroller.action = #selector(scrollerChanged(_:))
 
         addSubview(cornerLabel)
         addSubview(timeHeader)
         addSubview(channelHeader)
-        addSubview(scrollView)
+        addSubview(grid)
+        addSubview(horizontalScroller)
+        addSubview(verticalScroller)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.windowBackgroundColor.setFill()
+        dirtyRect.fill()
     }
 
     required init?(coder: NSCoder) { nil }
-
-    deinit {
-        if let boundsObserver { NotificationCenter.default.removeObserver(boundsObserver) }
-    }
 
     override func layout() {
         super.layout()
         let headerHeight = min(Self.timeHeaderHeight, bounds.height)
         let columnWidth = min(Self.channelColumnWidth, bounds.width)
-        cornerLabel.frame = NSRect(x: 12, y: 0, width: max(0, columnWidth - 20), height: headerHeight)
+        let scrollerThickness = NSScroller.scrollerWidth(for: .small, scrollerStyle: .overlay)
+        let contentWidth = max(0, bounds.width - columnWidth - scrollerThickness)
+        let contentHeight = max(0, bounds.height - headerHeight - scrollerThickness)
+        cornerLabel.frame = NSRect(x: 12, y: 0,
+            width: max(0, columnWidth - 20), height: headerHeight)
         timeHeader.frame = NSRect(x: columnWidth, y: 0,
-                                  width: max(0, bounds.width - columnWidth), height: headerHeight)
-        channelHeader.frame = NSRect(x: 0, y: headerHeight, width: columnWidth,
-                                     height: max(0, bounds.height - headerHeight))
-        scrollView.frame = NSRect(x: columnWidth, y: headerHeight,
-                                  width: max(0, bounds.width - columnWidth),
-                                  height: max(0, bounds.height - headerHeight))
-        gridLayout.invalidateLayout()
-        synchronizeFixedViews()
+            width: contentWidth, height: headerHeight)
+        channelHeader.frame = NSRect(x: 0, y: headerHeight,
+            width: columnWidth, height: contentHeight)
+        grid.frame = NSRect(x: columnWidth, y: headerHeight,
+            width: contentWidth, height: contentHeight)
+        horizontalScroller.frame = NSRect(x: columnWidth,
+            y: headerHeight + contentHeight, width: contentWidth,
+            height: scrollerThickness)
+        verticalScroller.frame = NSRect(x: columnWidth + contentWidth,
+            y: headerHeight, width: scrollerThickness, height: contentHeight)
+        setVirtualOffset(virtualOffset)
     }
 
     func apply(_ model: LiveGuideGridModel, now: Date = Date()) {
         self.model = model
-        grid.rows = model.rows
-        grid.windowStart = model.windowStart
-        grid.windowEnd = model.windowEnd
-        grid.now = now
-        gridLayout.rows = model.rows
-        gridLayout.windowStart = model.windowStart
-        gridLayout.windowEnd = model.windowEnd
+        let pointsPerHour = Self.layoutPointsPerHour(for: model)
+        grid.configure(rows: model.rows, windowStart: model.windowStart,
+            windowEnd: model.windowEnd, pointsPerHour: pointsPerHour,
+            timeZone: model.timeZone, now: now)
         timeHeader.configure(start: model.windowStart, end: model.windowEnd,
-                             timeZone: model.timeZone, pointsPerHour: Self.pointsPerHour)
+            timeZone: model.timeZone, pointsPerHour: pointsPerHour)
         channelHeader.rows = model.rows
-        grid.reloadData()
-        gridLayout.invalidateLayout()
-        scrollView.contentView.scroll(to: .zero)
-        scrollView.reflectScrolledClipView(scrollView.contentView)
         maximumVisibleProgrammeViews = 0
-        realizedProgrammeViews.removeAll(keepingCapacity: true)
-        synchronizeFixedViews()
+        selectedProgrammeIndexPath = nil
+        virtualOffset = .zero
+        lastVisibleRange = nil
+        setVirtualOffset(.zero)
     }
 
     func updateNow(_ date: Date) {
@@ -448,102 +461,115 @@ final class LiveGuideGridView: NSView, NSCollectionViewDataSource, NSCollectionV
         grid.needsDisplay = true
     }
 
-    func scroll(to point: NSPoint) {
-        let documentSize = gridLayout.collectionViewContentSize
-        let viewport = scrollView.contentView.bounds.size
-        let clamped = NSPoint(x: min(max(0, point.x), max(0, documentSize.width - viewport.width)),
-                              y: min(max(0, point.y), max(0, documentSize.height - viewport.height)))
-        scrollView.contentView.scroll(to: clamped)
-        scrollView.reflectScrolledClipView(scrollView.contentView)
-        synchronizeFixedViews()
-        grid.layoutSubtreeIfNeeded()
-    }
+    func scroll(to point: NSPoint) { setVirtualOffset(point) }
 
-    var scrollOffset: NSPoint { scrollView.contentView.bounds.origin }
+    var scrollOffset: NSPoint { virtualOffset }
 
     var debugFixedFrames: LiveGuideGridFixedFrames {
         LiveGuideGridFixedFrames(corner: cornerLabel.frame, timeHeader: timeHeader.frame,
-                                 channelHeader: channelHeader.frame, content: scrollView.frame)
+                                 channelHeader: channelHeader.frame, content: grid.frame)
     }
 
-    var debugSelectedIndexPath: IndexPath? { grid.selectionIndexPaths.first }
+    var debugSelectedIndexPath: IndexPath? { selectedProgrammeIndexPath }
 
     var debugNowLineX: CGFloat? {
-        guard let model, model.windowStart <= grid.now, grid.now <= model.windowEnd else { return nil }
-        return CGFloat(grid.now.timeIntervalSince(model.windowStart) / 3600) * Self.pointsPerHour
+        guard let model, model.windowStart <= grid.now, grid.now <= model.windowEnd else {
+            return nil
+        }
+        return CGFloat(grid.now.timeIntervalSince(model.windowStart) / 3_600)
+            * grid.pointsPerHour
     }
 
     var debugVisibleAccessibilityLabels: [String] {
-        grid.visibleItems().compactMap { $0.view.accessibilityLabel() }
+        grid.visibleAccessibilityLabels
     }
 
     func debugSelect(item: Int, section: Int) {
-        let indexPath = IndexPath(item: item, section: section)
-        grid.selectionIndexPaths = [indexPath]
+        selectProgramme(item: item, section: section, activate: false)
     }
 
     func debugMoveSelection(horizontal: Int, vertical: Int) {
         moveSelection(horizontal: horizontal, vertical: vertical)
     }
 
-    func debugActivateSelection() {
-        activateSelection()
-    }
+    func debugActivateSelection() { activateSelection() }
 
     var debugMetrics: LiveGuideGridDebugMetrics {
-        let visible = grid.visibleItems().count
+        let visible = grid.visibleProgrammeCount
         maximumVisibleProgrammeViews = max(maximumVisibleProgrammeViews, visible)
         return LiveGuideGridDebugMetrics(
             totalProgrammes: model?.rows.reduce(0, { $0 + $1.programmes.count }) ?? 0,
             visibleProgrammeViews: visible,
-            realizedProgrammeViews: realizedProgrammeViews.count,
+            realizedProgrammeViews: model == nil ? 0 : 1,
             maximumVisibleProgrammeViews: maximumVisibleProgrammeViews,
-            emittedLayoutAttributes: gridLayout.lastEmittedAttributeCount,
+            emittedLayoutAttributes: visible,
             cachedTimeLabels: timeHeader.cachedLabelCount)
     }
 
-    func numberOfSections(in collectionView: NSCollectionView) -> Int {
-        model?.rows.count ?? 0
+    @objc private func scrollerChanged(_ sender: NSScroller) {
+        guard !updatingScrollers else { return }
+        let maximum = maximumOffset
+        var proposed = virtualOffset
+        if sender === horizontalScroller {
+            proposed.x = CGFloat(sender.doubleValue) * maximum.x
+        } else {
+            proposed.y = CGFloat(sender.doubleValue) * maximum.y
+        }
+        setVirtualOffset(proposed)
     }
 
-    func collectionView(_ collectionView: NSCollectionView,
-                        numberOfItemsInSection section: Int) -> Int {
-        guard let rows = model?.rows, rows.indices.contains(section) else { return 0 }
-        return rows[section].programmes.count
+    private func scroll(by delta: NSPoint) {
+        setVirtualOffset(NSPoint(x: virtualOffset.x + delta.x,
+                                 y: virtualOffset.y + delta.y))
     }
 
-    func collectionView(_ collectionView: NSCollectionView,
-                        itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
-        let item = collectionView.makeItem(withIdentifier: itemIdentifier, for: indexPath)
-        guard let item = item as? LiveGuideProgrammeItem,
-              let row = model?.rows[indexPath.section],
-              row.programmes.indices.contains(indexPath.item) else { return item }
-        realizedProgrammeViews.insert(ObjectIdentifier(item))
-        item.configure(programme: row.programmes[indexPath.item], channelTitle: row.title,
-                       timeZone: model?.timeZone ?? .current)
-        return item
+    private var contentSize: NSSize {
+        guard let model else { return .zero }
+        return NSSize(
+            width: CGFloat(model.windowEnd.timeIntervalSince(model.windowStart) / 3_600)
+                * grid.pointsPerHour,
+            height: CGFloat(model.rows.count) * Self.rowHeight)
     }
 
-    func collectionView(_ collectionView: NSCollectionView,
-                        didSelectItemsAt indexPaths: Set<IndexPath>) {
+    private var maximumOffset: NSPoint {
+        NSPoint(x: max(0, contentSize.width - grid.bounds.width),
+                y: max(0, contentSize.height - grid.bounds.height))
+    }
+
+    private func setVirtualOffset(_ proposed: NSPoint) {
+        let maximum = maximumOffset
+        virtualOffset = NSPoint(x: min(max(0, proposed.x), maximum.x),
+                                y: min(max(0, proposed.y), maximum.y))
+        grid.virtualOffset = virtualOffset
+        timeHeader.horizontalOffset = virtualOffset.x
+        channelHeader.verticalOffset = virtualOffset.y
+        updateScrollers(maximum: maximum)
+        updateVisibleRange()
         maximumVisibleProgrammeViews = max(maximumVisibleProgrammeViews,
-                                           collectionView.visibleItems().count)
-        guard let indexPath = indexPaths.first,
-              let rows = model?.rows, rows.indices.contains(indexPath.section),
-              rows[indexPath.section].programmes.indices.contains(indexPath.item) else { return }
-        onProgrammeSelected?(rows[indexPath.section], rows[indexPath.section].programmes[indexPath.item])
+                                           grid.visibleProgrammeCount)
     }
 
-    private func synchronizeFixedViews() {
-        let offset = scrollView.contentView.bounds.origin
-        timeHeader.horizontalOffset = offset.x
-        channelHeader.verticalOffset = offset.y
-        maximumVisibleProgrammeViews = max(maximumVisibleProgrammeViews,
-                                           grid.visibleItems().count)
-        guard let rows = model?.rows, !rows.isEmpty else { return }
-        let viewport = scrollView.contentView.bounds
-        let first = min(rows.count - 1, max(0, Int(floor(viewport.minY / Self.rowHeight))))
-        let last = min(rows.count, max(first + 1, Int(ceil(viewport.maxY / Self.rowHeight))))
+    private func updateScrollers(maximum: NSPoint) {
+        updatingScrollers = true
+        defer { updatingScrollers = false }
+        horizontalScroller.knobProportion = contentSize.width > 0
+            ? min(1, grid.bounds.width / contentSize.width) : 1
+        verticalScroller.knobProportion = contentSize.height > 0
+            ? min(1, grid.bounds.height / contentSize.height) : 1
+        horizontalScroller.doubleValue = maximum.x > 0
+            ? Double(virtualOffset.x / maximum.x) : 0
+        verticalScroller.doubleValue = maximum.y > 0
+            ? Double(virtualOffset.y / maximum.y) : 0
+        horizontalScroller.isEnabled = maximum.x > 0
+        verticalScroller.isEnabled = maximum.y > 0
+    }
+
+    private func updateVisibleRange() {
+        guard let rows = model?.rows, !rows.isEmpty, grid.bounds.height > 0 else { return }
+        let first = min(rows.count - 1,
+            max(0, Int(floor(virtualOffset.y / Self.rowHeight))))
+        let last = min(rows.count,
+            max(first + 1, Int(ceil((virtualOffset.y + grid.bounds.height) / Self.rowHeight))))
         let range = first..<last
         if range != lastVisibleRange {
             lastVisibleRange = range
@@ -553,7 +579,7 @@ final class LiveGuideGridView: NSView, NSCollectionViewDataSource, NSCollectionV
 
     private func moveSelection(horizontal: Int, vertical: Int) {
         guard let rows = model?.rows, !rows.isEmpty else { return }
-        let current = grid.selectionIndexPaths.first
+        let current = selectedProgrammeIndexPath
         var section = current?.section ?? 0
         var item = current?.item ?? 0
         if vertical == 0 {
@@ -564,12 +590,14 @@ final class LiveGuideGridView: NSView, NSCollectionViewDataSource, NSCollectionV
             let sourceDate: Date
             if rows[section].programmes.indices.contains(item) {
                 let value = rows[section].programmes[item]
-                sourceDate = value.start.addingTimeInterval(value.end.timeIntervalSince(value.start) / 2)
+                sourceDate = midpoint(value)
             } else {
                 sourceDate = model?.windowStart ?? Date()
             }
             var target = section + vertical
-            while rows.indices.contains(target), rows[target].programmes.isEmpty { target += vertical }
+            while rows.indices.contains(target), rows[target].programmes.isEmpty {
+                target += vertical
+            }
             guard rows.indices.contains(target), !rows[target].programmes.isEmpty else { return }
             section = target
             item = rows[section].programmes.enumerated().min { left, right in
@@ -577,103 +605,174 @@ final class LiveGuideGridView: NSView, NSCollectionViewDataSource, NSCollectionV
                     < abs(midpoint(right.element).timeIntervalSince(sourceDate))
             }?.offset ?? 0
         }
-        let destination = IndexPath(item: item, section: section)
-        grid.selectionIndexPaths = [destination]
-        grid.scrollToItems(at: [destination], scrollPosition: [.centeredHorizontally, .centeredVertically])
+        selectProgramme(item: item, section: section, activate: false)
+        scrollSelectedProgrammeToVisible()
     }
 
     private func activateSelection() {
-        guard let indexPath = grid.selectionIndexPaths.first,
+        guard let indexPath = selectedProgrammeIndexPath,
               let rows = model?.rows, rows.indices.contains(indexPath.section),
               rows[indexPath.section].programmes.indices.contains(indexPath.item) else { return }
         onProgrammeActivated?(rows[indexPath.section], rows[indexPath.section].programmes[indexPath.item])
     }
 
+    private func selectProgramme(item: Int, section: Int, activate: Bool) {
+        guard let rows = model?.rows, rows.indices.contains(section),
+              rows[section].programmes.indices.contains(item) else { return }
+        selectedProgrammeIndexPath = IndexPath(item: item, section: section)
+        window?.makeFirstResponder(grid)
+        grid.selectedProgrammeID = rows[section].programmes[item].id
+        let row = rows[section]
+        let programme = row.programmes[item]
+        onProgrammeSelected?(row, programme)
+        if activate { onProgrammeActivated?(row, programme) }
+    }
+
+    private func scrollSelectedProgrammeToVisible() {
+        guard let selectedProgrammeIndexPath,
+              let model, model.rows.indices.contains(selectedProgrammeIndexPath.section),
+              model.rows[selectedProgrammeIndexPath.section].programmes.indices
+                .contains(selectedProgrammeIndexPath.item) else { return }
+        let programme = model.rows[selectedProgrammeIndexPath.section]
+            .programmes[selectedProgrammeIndexPath.item]
+        let start = max(0, programme.start.timeIntervalSince(model.windowStart))
+        let end = min(model.windowEnd.timeIntervalSince(model.windowStart),
+                      programme.end.timeIntervalSince(model.windowStart))
+        let x = CGFloat(start / 3_600) * grid.pointsPerHour
+        let width = max(Self.minimumProgrammeWidth,
+                        CGFloat(max(0, end - start) / 3_600) * grid.pointsPerHour - 2)
+        let y = CGFloat(selectedProgrammeIndexPath.section) * Self.rowHeight
+        var proposed = virtualOffset
+        if x < proposed.x { proposed.x = x }
+        if x + width > proposed.x + grid.bounds.width {
+            proposed.x = x + width - grid.bounds.width
+        }
+        if y < proposed.y { proposed.y = y }
+        if y + Self.rowHeight > proposed.y + grid.bounds.height {
+            proposed.y = y + Self.rowHeight - grid.bounds.height
+        }
+        setVirtualOffset(proposed)
+    }
+
     private func midpoint(_ value: LiveGuideGridProgramme) -> Date {
         value.start.addingTimeInterval(value.end.timeIntervalSince(value.start) / 2)
     }
-}
 
-private final class LiveGuideCollectionLayout: NSCollectionViewLayout {
-    var rows: [LiveGuideGridRow] = []
-    var windowStart = Date()
-    var windowEnd = Date()
-    private(set) var lastEmittedAttributeCount = 0
-
-    override var collectionViewContentSize: NSSize {
-        let hours = max(0, windowEnd.timeIntervalSince(windowStart) / 3600)
-        return NSSize(width: CGFloat(hours) * LiveGuideGridView.pointsPerHour,
-                      height: CGFloat(rows.count) * LiveGuideGridView.rowHeight)
-    }
-
-    override func layoutAttributesForElements(in rect: NSRect) -> [NSCollectionViewLayoutAttributes] {
-        guard !rows.isEmpty else { lastEmittedAttributeCount = 0; return [] }
-        let first = max(0, Int(floor(rect.minY / LiveGuideGridView.rowHeight)))
-        let last = min(rows.count - 1, Int(floor(rect.maxY / LiveGuideGridView.rowHeight)))
-        guard first <= last else { lastEmittedAttributeCount = 0; return [] }
-        var result: [NSCollectionViewLayoutAttributes] = []
-        for section in first...last {
-            for item in rows[section].programmes.indices {
-                let indexPath = IndexPath(item: item, section: section)
-                let frame = frameForItem(at: indexPath)
-                if frame.intersects(rect) {
-                    let attributes = NSCollectionViewLayoutAttributes(forItemWith: indexPath)
-                    attributes.frame = frame
-                    result.append(attributes)
-                } else if frame.minX > rect.maxX {
-                    break
-                }
-            }
+    private static func layoutPointsPerHour(for model: LiveGuideGridModel) -> CGFloat {
+        let shortest = model.rows.lazy.flatMap(\.programmes).reduce(nil as TimeInterval?) {
+            current, programme in
+            let clippedStart = max(programme.start, model.windowStart)
+            let clippedEnd = min(programme.end, model.windowEnd)
+            let duration = clippedEnd.timeIntervalSince(clippedStart)
+            guard duration > 0 else { return current }
+            return min(current ?? duration, duration)
         }
-        lastEmittedAttributeCount = result.count
-        return result
-    }
-
-    override func layoutAttributesForItem(at indexPath: IndexPath)
-        -> NSCollectionViewLayoutAttributes? {
-        guard rows.indices.contains(indexPath.section),
-              rows[indexPath.section].programmes.indices.contains(indexPath.item) else { return nil }
-        let attributes = NSCollectionViewLayoutAttributes(forItemWith: indexPath)
-        attributes.frame = frameForItem(at: indexPath)
-        return attributes
-    }
-
-    override func shouldInvalidateLayout(forBoundsChange newBounds: NSRect) -> Bool { false }
-
-    private func frameForItem(at indexPath: IndexPath) -> NSRect {
-        let item = rows[indexPath.section].programmes[indexPath.item]
-        let start = max(0, item.start.timeIntervalSince(windowStart))
-        let end = min(windowEnd.timeIntervalSince(windowStart),
-                      item.end.timeIntervalSince(windowStart))
-        let x = CGFloat(start / 3600) * LiveGuideGridView.pointsPerHour
-        let durationWidth = CGFloat(max(0, end - start) / 3600) * LiveGuideGridView.pointsPerHour
-        return NSRect(x: x, y: CGFloat(indexPath.section) * LiveGuideGridView.rowHeight + 2,
-                      width: max(44, durationWidth - 2), height: LiveGuideGridView.rowHeight - 4)
+        guard let shortest else { return pointsPerHour }
+        return max(pointsPerHour, minimumProgrammeWidth * 3_600 / CGFloat(shortest))
     }
 }
 
-private final class LiveGuideCollectionView: NSCollectionView {
-    var rows: [LiveGuideGridRow] = []
-    var windowStart = Date()
-    var windowEnd = Date()
+private struct LiveGuideVisibleProgramme {
+    let rowIndex: Int
+    let programmeIndex: Int
+    let row: LiveGuideGridRow
+    let programme: LiveGuideGridProgramme
+    let frame: NSRect
+    let timeRange: String
+}
+
+/// A fixed-size viewport whose backing surface is bounded by the window.
+/// It virtualizes rows and time horizontally using `virtualOffset`; the
+/// potentially very large logical guide never becomes an AppKit view or layer.
+private final class LiveGuideViewportView: NSCollectionView {
+    private(set) var rows: [LiveGuideGridRow] = []
+    private(set) var windowStart = Date()
+    private(set) var windowEnd = Date()
+    private(set) var pointsPerHour = LiveGuideGridView.pointsPerHour
+    private var timeZone = TimeZone.current
     var now = Date()
+    var virtualOffset = NSPoint.zero { didSet { needsDisplay = true } }
+    var selectedProgrammeID: EPGProgrammeRecordIdentity? {
+        didSet { if oldValue != selectedProgrammeID { needsDisplay = true } }
+    }
     var onMoveSelection: ((Int, Int) -> Void)?
     var onActivateSelection: (() -> Void)?
+    var onSelectProgramme: ((Int, Int, Bool) -> Void)?
+    var onScroll: ((NSPoint) -> Void)?
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        backgroundColors = [.clear]
+        isSelectable = false
+        setAccessibilityElement(true)
+        setAccessibilityRole(.grid)
+        setAccessibilityLabel("Programme schedule")
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func configure(rows: [LiveGuideGridRow], windowStart: Date, windowEnd: Date,
+                   pointsPerHour: CGFloat, timeZone: TimeZone, now: Date) {
+        self.rows = rows
+        self.windowStart = windowStart
+        self.windowEnd = windowEnd
+        self.pointsPerHour = pointsPerHour
+        self.timeZone = timeZone
+        self.now = now
+        selectedProgrammeID = nil
+        needsDisplay = true
+    }
+
+    var visibleProgrammeCount: Int { visibleProgrammes().count }
+    var visibleAccessibilityLabels: [String] {
+        visibleProgrammes().map { "\($0.row.title), \($0.programme.title)" }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        guard windowStart <= now, now <= windowEnd else { return }
-        let seconds = now.timeIntervalSince(windowStart)
-        let x = CGFloat(seconds / 3600) * LiveGuideGridView.pointsPerHour
-        NSColor.systemRed.setStroke()
-        let path = NSBezierPath()
-        path.lineWidth = 1
-        path.move(to: NSPoint(x: x, y: dirtyRect.minY))
-        path.line(to: NSPoint(x: x, y: dirtyRect.maxY))
-        path.stroke()
+        NSColor.windowBackgroundColor.setFill()
+        dirtyRect.fill()
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        for value in visibleProgrammes() where value.frame.intersects(dirtyRect) {
+            let selected = value.programme.id == selectedProgrammeID
+            let background = selected ? NSColor.controlAccentColor : NSColor.controlBackgroundColor
+            background.setFill()
+            NSBezierPath(roundedRect: value.frame, xRadius: 7, yRadius: 7).fill()
+            let foreground = selected
+                ? NSColor.alternateSelectedControlTextColor : NSColor.labelColor
+            let secondary = selected
+                ? NSColor.alternateSelectedControlTextColor : NSColor.secondaryLabelColor
+            value.programme.title.draw(
+                in: NSRect(x: value.frame.minX + 10, y: value.frame.minY + 8,
+                           width: max(0, value.frame.width - 20), height: 20),
+                withAttributes: [.font: NSFont.systemFont(ofSize: 13, weight: .medium),
+                                 .foregroundColor: foreground,
+                                 .paragraphStyle: paragraph]
+            )
+            value.timeRange.draw(
+                in: NSRect(x: value.frame.minX + 10, y: value.frame.minY + 31,
+                           width: max(0, value.frame.width - 20), height: 16),
+                withAttributes: [.font: NSFont.monospacedDigitSystemFont(
+                                     ofSize: 10, weight: .regular),
+                                 .foregroundColor: secondary,
+                                 .paragraphStyle: paragraph]
+            )
+        }
+        if windowStart <= now, now <= windowEnd {
+            let x = CGFloat(now.timeIntervalSince(windowStart) / 3_600)
+                * pointsPerHour - virtualOffset.x
+            if bounds.minX...bounds.maxX ~= x {
+                NSColor.systemRed.setStroke()
+                let path = NSBezierPath()
+                path.lineWidth = 1
+                path.move(to: NSPoint(x: x, y: dirtyRect.minY))
+                path.line(to: NSPoint(x: x, y: dirtyRect.maxY))
+                path.stroke()
+            }
+        }
     }
 
     override func keyDown(with event: NSEvent) {
@@ -688,8 +787,82 @@ private final class LiveGuideCollectionView: NSCollectionView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        super.mouseDown(with: event)
-        if event.clickCount >= 2 { onActivateSelection?() }
+        let point = convert(event.locationInWindow, from: nil)
+        guard let value = visibleProgrammes().last(where: { $0.frame.contains(point) }) else {
+            return super.mouseDown(with: event)
+        }
+        onSelectProgramme?(value.programmeIndex, value.rowIndex, event.clickCount >= 2)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        let horizontal = event.hasPreciseScrollingDeltas
+            ? -event.scrollingDeltaX : -event.deltaX * 12
+        let vertical = event.hasPreciseScrollingDeltas
+            ? -event.scrollingDeltaY : -event.deltaY * 12
+        if event.modifierFlags.contains(.shift), abs(vertical) > abs(horizontal) {
+            onScroll?(NSPoint(x: vertical, y: 0))
+        } else {
+            onScroll?(NSPoint(x: horizontal, y: vertical))
+        }
+    }
+
+    override func accessibilityChildren() -> [Any]? {
+        visibleProgrammes().map { value in
+            let element = LiveGuideProgrammeAccessibilityElement { [weak self] in
+                self?.onSelectProgramme?(value.programmeIndex, value.rowIndex, true)
+            }
+            element.setAccessibilityParent(self)
+            element.setAccessibilityRole(.button)
+            element.setAccessibilityLabel("\(value.row.title), \(value.programme.title)")
+            element.setAccessibilityValue(value.timeRange)
+            let windowFrame = convert(value.frame, to: nil)
+            element.setAccessibilityFrame(window?.convertToScreen(windowFrame) ?? .zero)
+            return element
+        }
+    }
+
+    private func visibleProgrammes() -> [LiveGuideVisibleProgramme] {
+        guard !rows.isEmpty, bounds.width > 0, bounds.height > 0 else { return [] }
+        let firstRow = max(0, Int(floor(virtualOffset.y / LiveGuideGridView.rowHeight)))
+        let lastRow = min(rows.count - 1,
+            Int(floor((virtualOffset.y + bounds.height - 0.001)
+                / LiveGuideGridView.rowHeight)))
+        guard firstRow <= lastRow else { return [] }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "HH:mm"
+        let minimumX = virtualOffset.x
+        let maximumX = virtualOffset.x + bounds.width
+        var result: [LiveGuideVisibleProgramme] = []
+        result.reserveCapacity((lastRow - firstRow + 1) * 12)
+        for rowIndex in firstRow...lastRow {
+            let row = rows[rowIndex]
+            for (programmeIndex, programme) in row.programmes.enumerated() {
+                let clippedStart = max(windowStart, programme.start)
+                let clippedEnd = min(windowEnd, programme.end)
+                guard clippedStart < clippedEnd else { continue }
+                let startX = CGFloat(clippedStart.timeIntervalSince(windowStart) / 3_600)
+                    * pointsPerHour
+                let durationWidth = CGFloat(clippedEnd.timeIntervalSince(clippedStart) / 3_600)
+                    * pointsPerHour
+                let width = max(LiveGuideGridView.minimumProgrammeWidth, durationWidth - 2)
+                guard startX + width >= minimumX, startX <= maximumX else { continue }
+                let frame = NSRect(
+                    x: startX - virtualOffset.x,
+                    y: CGFloat(rowIndex) * LiveGuideGridView.rowHeight - virtualOffset.y + 2,
+                    width: width,
+                    height: LiveGuideGridView.rowHeight - 4
+                ).intersection(bounds)
+                guard !frame.isNull, !frame.isEmpty else { continue }
+                result.append(LiveGuideVisibleProgramme(
+                    rowIndex: rowIndex, programmeIndex: programmeIndex,
+                    row: row, programme: programme, frame: frame,
+                    timeRange: "\(formatter.string(from: programme.start))–\(formatter.string(from: programme.end))"
+                ))
+            }
+        }
+        return result
     }
 }
 
@@ -731,60 +904,17 @@ struct LiveGuideGridRepresentable: NSViewRepresentable {
     }
 }
 
-private final class LiveGuideProgrammeItem: NSCollectionViewItem {
-    private let titleLabel = NSTextField(labelWithString: "")
-    private let timeLabel = NSTextField(labelWithString: "")
+private final class LiveGuideProgrammeAccessibilityElement: NSAccessibilityElement {
+    private let press: () -> Void
 
-    override func loadView() {
-        view = NSView()
-        view.wantsLayer = true
-        view.layer?.cornerRadius = 7
-        titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        titleLabel.lineBreakMode = .byTruncatingTail
-        timeLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
-        timeLabel.textColor = .secondaryLabelColor
-        view.addSubview(titleLabel)
-        view.addSubview(timeLabel)
-        view.setAccessibilityElement(true)
-        view.setAccessibilityRole(.button)
+    init(press: @escaping () -> Void) {
+        self.press = press
+        super.init()
     }
 
-    override func viewDidLayout() {
-        super.viewDidLayout()
-        titleLabel.frame = NSRect(x: 10, y: 8, width: max(0, view.bounds.width - 20), height: 20)
-        timeLabel.frame = NSRect(x: 10, y: 31, width: max(0, view.bounds.width - 20), height: 16)
-    }
-
-    override var isSelected: Bool {
-        didSet { updateColors() }
-    }
-
-    override func prepareForReuse() {
-        super.prepareForReuse()
-        titleLabel.stringValue = ""
-        timeLabel.stringValue = ""
-        view.setAccessibilityLabel(nil)
-        view.setAccessibilityValue(nil)
-    }
-
-    func configure(programme: LiveGuideGridProgramme, channelTitle: String, timeZone: TimeZone) {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = timeZone
-        formatter.dateFormat = "HH:mm"
-        let range = "\(formatter.string(from: programme.start))–\(formatter.string(from: programme.end))"
-        titleLabel.stringValue = programme.title
-        timeLabel.stringValue = range
-        view.setAccessibilityLabel("\(channelTitle), \(programme.title)")
-        view.setAccessibilityValue(range)
-        updateColors()
-    }
-
-    private func updateColors() {
-        view.layer?.backgroundColor = (isSelected
-            ? NSColor.controlAccentColor : NSColor.controlBackgroundColor).cgColor
-        titleLabel.textColor = isSelected ? .alternateSelectedControlTextColor : .labelColor
-        timeLabel.textColor = isSelected ? .alternateSelectedControlTextColor : .secondaryLabelColor
+    override func accessibilityPerformPress() -> Bool {
+        press()
+        return true
     }
 }
 

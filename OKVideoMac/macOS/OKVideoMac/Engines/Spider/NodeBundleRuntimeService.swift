@@ -4282,7 +4282,7 @@ actor NodeBundleRuntimeService {
     }
 
     private func nodeExecutableURL() throws -> URL {
-        #if DEBUG
+        #if DEBUG || OKVIDEO_PERFORMANCE_TEST
         if let nodeExecutableOverride {
             guard FileManager.default.isExecutableFile(
                 atPath: nodeExecutableOverride.path

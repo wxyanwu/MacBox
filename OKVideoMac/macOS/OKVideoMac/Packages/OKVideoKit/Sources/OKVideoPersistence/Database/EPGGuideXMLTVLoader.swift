@@ -179,26 +179,28 @@ public enum EPGGuideXMLTVLoader {
                             terminalState: .unmatched
                         )
                     case .exact, .normalizedUnique:
-                        var acceptedCount = 0
-                        var acceptedBytes = 0
-                        for record in value.page.records where assembly.records[record.id] == nil {
-                            assembly.records[record.id] = record
-                            acceptedCount += 1
-                            acceptedBytes += EPGGuideCost.programme(record)
+                        let candidates = value.page.records.filter {
+                            assembly.records[$0.id] == nil
                         }
-                        rows[rowIndex] = assembly
+                        let acceptedBytes = candidates.reduce(0) {
+                            $0 + EPGGuideCost.programme($1)
+                        }
                         let cursorKey = CursorKey(
                             workID: assignment.id,
                             sliceIndex: assignment.sliceIndex
                         )
-                        if let cursor = value.nextCursor { cursors[cursorKey] = cursor }
-                        else { cursors[cursorKey] = nil }
-                        try coordinator.completePage(
+                        let accepted = try coordinator.completePage(
                             assignment.id,
-                            acceptedProgrammes: acceptedCount,
+                            acceptedProgrammes: candidates.count,
                             acceptedBytes: acceptedBytes,
                             hasMore: value.nextCursor != nil
                         )
+                        if accepted {
+                            for record in candidates { assembly.records[record.id] = record }
+                            if let cursor = value.nextCursor { cursors[cursorKey] = cursor }
+                            else { cursors[cursorKey] = nil }
+                        }
+                        rows[rowIndex] = assembly
                     }
                 }
             }

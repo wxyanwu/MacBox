@@ -18,16 +18,22 @@ final class EPGCacheQueryResourceTests: XCTestCase {
         LiveChannel(groupName: "Resource", name: id, tvgID: id, streams: [])
     }
 
-    private func publishRegular(count: Int, store: EPGCacheStore,
+    private func publishRegular(count: Int, channelCount: Int = 100,
+                                store: EPGCacheStore,
                                 key: EPGRequestKey) throws -> EPGCacheImportHandle {
         let handle = try store.begin(key)
-        let channels = (0..<100).map { EPGChannel(id: "channel-\($0)", displayName: "Channel \($0)") }
-        try store.appendChannels(channels, to: handle)
+        let channels = (0..<channelCount).map {
+            EPGChannel(id: "channel-\($0)", displayName: "Channel \($0)")
+        }
+        for base in stride(from: 0, to: channels.count, by: 512) {
+            try store.appendChannels(Array(channels[base..<min(base + 512, channels.count)]),
+                                     to: handle)
+        }
         for base in stride(from: 0, to: count, by: 512) {
             let upper = min(base + 512, count)
             let batch = (base..<upper).map { ordinal -> EPGCacheRecord in
-                let channel = ordinal % 100
-                let slot = ordinal / 100
+                let channel = ordinal % channelCount
+                let slot = ordinal / channelCount
                 return EPGCacheRecord(ordinal: ordinal, programme: EPGProgramme(
                     channelID: "channel-\(channel)", title: "Programme \(ordinal)",
                     start: Date(timeIntervalSince1970: Double(slot * 60)),
@@ -35,7 +41,7 @@ final class EPGCacheQueryResourceTests: XCTestCase {
             }
             try store.append(batch, to: handle)
         }
-        let slots = (count + 99) / 100
+        let slots = (count + channelCount - 1) / channelCount
         try store.validate(handle, summary: EPGCacheValidation(rawProgrammeCount: count,
             emittedProgrammeCount: count, minimumStart: Date(timeIntervalSince1970: 0),
             maximumEnd: Date(timeIntervalSince1970: Double(slots * 60)),
@@ -202,5 +208,98 @@ final class EPGCacheQueryResourceTests: XCTestCase {
                                              at: Date(timeIntervalSince1970: 60_000)).entries[0]
         XCTAssertEqual(overlap.current?.ordinal, 149_999)
         XCTAssertNil(overlap.next)
+    }
+
+    func test10AGuideWindowQueryReleaseMatrix() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["OKVIDEO_EPG_10A_QUERY_RESOURCE"] == "1",
+              let output = environment["OKVIDEO_EPG_10A_QUERY_OUTPUT"] else {
+            throw XCTSkip("Explicit 10A independent Release query gate")
+        }
+        guard !isDebugBuild else {
+            XCTFail("10A resource gate must use a Release test binary")
+            return
+        }
+
+        var results: [[String: Any]] = []
+        for channelCount in [100, 500, 1_000] {
+            for size in [10_000, 50_000, 100_000, 200_000] {
+                let root = directory("10a-\(channelCount)-\(size)")
+                defer { try? FileManager.default.removeItem(at: root) }
+                let store = try EPGCacheStore(directory: root)
+                let request = key(String(channelCount).first ?? "g")
+                _ = try publishRegular(count: size, channelCount: channelCount,
+                                       store: store, key: request)
+                let channels = (0..<channelCount).map { live("channel-\($0)") }
+                let nowNextBatch = Array(channels.prefix(100))
+                let slots = max(1, (size + channelCount - 1) / channelCount)
+                let queryDate = Date(timeIntervalSince1970: Double(slots / 2 * 60 + 30))
+                let windowEnd = Date(timeIntervalSince1970: 24 * 60 * 60)
+
+                _ = try store.queryNowNext(nowNextBatch, for: request, at: queryDate)
+                _ = try store.queryWindow(channels[0], for: request,
+                    from: Date(timeIntervalSince1970: 0), to: windowEnd,
+                    limit: EPGGuideLimits.pageSize)
+                let before = footprint()
+                var nowDurations: [Double] = []
+                var windowDurations: [Double] = []
+                for sample in 0..<100 {
+                    let channel = channels[sample % channels.count]
+                    nowDurations.append(try milliseconds {
+                        _ = try store.queryNowNext(nowNextBatch, for: request, at: queryDate)
+                    })
+                    windowDurations.append(try milliseconds {
+                        let page = try store.queryWindow(channel, for: request,
+                            from: Date(timeIntervalSince1970: 0), to: windowEnd,
+                            limit: EPGGuideLimits.pageSize)
+                        XCTAssertLessThanOrEqual(page.programmes.count,
+                                                 EPGGuideLimits.pageSize)
+                    })
+                }
+                let after = footprint()
+                let windowP95 = percentile95(windowDurations)
+                let windowMaximum = windowDurations.max() ?? 0
+                let diagnostics = store.lastQueryDiagnosticsForTesting
+                let record: [String: Any] = [
+                    "channelCount": channelCount,
+                    "programmeCount": size,
+                    "sampleCount": windowDurations.count,
+                    "nowP95Milliseconds": percentile95(nowDurations),
+                    "nowMaximumMilliseconds": nowDurations.max() ?? 0,
+                    "windowP95Milliseconds": windowP95,
+                    "windowMaximumMilliseconds": windowMaximum,
+                    "footprintGrowthBytes": after > before ? after - before : 0,
+                    "virtualMachineSteps": diagnostics.virtualMachineSteps,
+                    "fullScanSteps": diagnostics.fullScanSteps,
+                    "sortOperations": diagnostics.sortOperations,
+                    "automaticIndexRows": diagnostics.automaticIndexRows
+                ]
+                results.append(record)
+                print("10A_QUERY channels=\(channelCount) programmes=\(size) window_p95_ms=\(windowP95) window_max_ms=\(windowMaximum)")
+                XCTAssertLessThanOrEqual(windowP95, 10)
+                XCTAssertLessThanOrEqual(windowMaximum, 50)
+                XCTAssertEqual(diagnostics.fullScanSteps, 0)
+                XCTAssertEqual(diagnostics.sortOperations, 0)
+                XCTAssertEqual(diagnostics.automaticIndexRows, 0)
+                store.close()
+            }
+        }
+        let payload: [String: Any] = [
+            "schemaVersion": 1,
+            "configuration": "Release",
+            "percentileAlgorithm": "nearest-rank ceil(N*0.95)-1",
+            "matrix": results
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload,
+                                              options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: URL(fileURLWithPath: output), options: .atomic)
+    }
+
+    private var isDebugBuild: Bool {
+#if DEBUG
+        true
+#else
+        false
+#endif
     }
 }

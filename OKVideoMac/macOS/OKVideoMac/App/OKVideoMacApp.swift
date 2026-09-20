@@ -343,7 +343,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         _ = ensureWindowShell()
     }
 
-#if DEBUG
+#if DEBUG || OKVIDEO_PERFORMANCE_TEST
     var isWindowShellPreparedForTesting: Bool {
         window != nil
     }

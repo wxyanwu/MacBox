@@ -4,8 +4,8 @@
 
 ## 当前阶段
 
-10A-A 至 10A-E 已完成并通过；下一步为 10A-F Release 性能与来源验收。C 全程没有读取
-Repository，也没有增加生产入口；生产数据接线从 D 开始。
+10A-A 至 10A-F 已完成并通过；下一步为 10A-G 全量回归、Release 打包和桌面安装验证。
+C 全程没有读取 Repository，也没有增加生产入口；生产数据接线从 D 开始。
 
 ## A：基线、分支、合同与测量协议
 
@@ -68,9 +68,11 @@ B 阶段全量验收：OKVideoKit 966 项执行，其中 20 项跳过，0 失败
 
 ## C：纯 fixture AppKit 网格
 
-- 新增 `LiveGuideGridView`，节目块由 `NSCollectionView` 和自定义 layout 虚拟化；layout 只为当前
-  可见矩形生成 attributes，不为屏幕外节目创建 view。
-- 顶部时间轴和左侧频道列是独立轻量 AppKit view，单向读取同一个内容 clip view 的滚动坐标。
+- 新增 `LiveGuideGridView`。C 阶段首先使用只为可见矩形生成 attributes 的
+  `NSCollectionView` 验证逻辑虚拟化；F 阶段 Release 量测发现超大 document 仍会促使
+  Core Animation 为 24 小时逻辑画布建立过大背板。最终改为固定尺寸 AppKit viewport，
+  通过虚拟滚动偏移只绘制可见节目。
+- 顶部时间轴和左侧频道列是独立轻量 AppKit view，单向读取同一个虚拟滚动坐标。
   横向滚动只改变时间轴绘制偏移，纵向滚动只改变频道列绘制偏移，没有互相回写 scroll position 的
   反馈循环。
 - 网格使用真实 `Date` 时间差定位节目和当前时间线；民用时钟只用于标签。DST 秋季回拨时，重复的
@@ -160,3 +162,41 @@ E 阶段全量验收：OKVideoKit **972 项执行，其中 20 项跳过，0 失�
 `testAndroidRealApplicationTerminationIsBoundedAndClean`。`git diff --check` 通过。
 
 结论：PASS，可进入 10A-F。
+
+## F：Release 资源、查询、来源与播放验收
+
+- 在 `iMac21,1` / arm64 / macOS 14.8.9 (23J631) 上运行三个独立 Release App
+  进程。同一 200K fixture，48 行、6144 条有限 snapshot programme，覆盖窄/宽/全屏尺寸、
+  Retina、双轴滚动、日期跳转、generation 替换、退出和 settled。
+- 首次可见绘制最大 69.951 ms，draw P95 最大 1.169 ms，CVDisplayLink 帧间隔
+  P95 最大 16.666 ms，RSS 峰值增量最大 17.92 MiB，Guide 可归因的主线程 >100 ms
+  停顿为 0；全部低于预先冻结门禁。
+- phys_footprint 峰值增量约 828–830 MiB，5 s settled 增量约 32.0–32.4 MiB。该指标
+  没有预先冻结硬门禁，报告保留原值。早期超大 document/layer 方案被固定 viewport
+  替换后，三次测量才被接受。
+- 100/500/1000 频道 × 10K/50K/100K/200K programme 的 Store 矩阵每点三个独立
+  Release 进程、每进程 100 次。最差 P95 0.156 ms，单次最大 0.437 ms，通过
+  10/50 ms 两级门禁。
+- 在冻结 9C.4 提交的隔离 worktree 使用完全相同的 Release 测量函数重跑三次。
+  10A/9C.4 最大 P95 比例 1.61×，最大绝对回退 0.048 ms；两者均为亚毫秒级，
+  且没有随数据规模增长。
+- 公开冻结 XMLTV plain/gzip 均通过当前 Release Repository 重放：6 频道、133 条
+  programme，和 legacy oracle 一致。这是冻结样本，不代表当天实时网络。
+- 30 分钟本地确定性媒体验收实际执行 1879.427 s：纯播放、EPG 查询、Guide
+  显示/滚动、播放中 200K 成功刷新、失败刷新保留旧数据、故障后纯播放共六段。
+  六段均达到不少于 300 s 媒体进度，VideoToolbox 硬解，decoder/renderer drop 全为 0，
+  播放 failure 为 0。
+- 本次没有可用且已授权的 TVBox/CatPaw/Xtream 私有真实源样本，该范围明确记为
+  **未验证**，不用自动化 PASS 替代真实来源结论。
+
+完整口径、12 点查询对照、六段播放数据、原始哈希、失败修正和未验证范围见
+`EPG_10A_F_ACCEPTANCE_EVIDENCE.md`。临时原始证据分别位于
+`/private/tmp/OKVideoMac-EPG10A-F-v21`、`/private/tmp/OKVideoMac-EPG10A-9C4-Paired` 和
+`/private/tmp/OKVideoMac-EPG10A-Playback-30m`。
+
+F 阶段定向验收：Release AppKit/App 资源进程 3 次，Store 查询矩阵 3 次，9C.4
+同协议配对 3 次，公开 XMLTV plain/gzip 2 项，30 分钟播放 1 项，全部 0 失败。
+`git diff --check` 通过。
+
+结论：Release 自动化/资源门禁 PASS，公开冻结来源重放 PASS，私有真实来源未验证；
+可进入 10A-G。

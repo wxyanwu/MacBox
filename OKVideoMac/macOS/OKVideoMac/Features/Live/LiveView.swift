@@ -367,6 +367,8 @@ struct LiveGuideScreen: View {
     let channels: [LiveChannel]
     let importedCatalog: AcceptedImportedCatalog?
     @State private var selection: LiveGuideSelection?
+    @State private var gridModel: LiveGuideGridModel?
+    @State private var gridModelRevision: UUID?
 
     private var boundedChannels: [LiveChannel] {
         Array(channels.prefix(EPGGuideLimits.maximumDesiredRows))
@@ -495,26 +497,19 @@ struct LiveGuideScreen: View {
     }
 
     private func grid(_ snapshot: EPGGuideSnapshot) -> some View {
-        let rows = snapshot.rows.map { row in
-            LiveGuideGridRow(
-                id: row.id,
-                title: row.channel.name,
-                subtitle: rowSubtitle(row.state),
-                state: row.state,
-                programmes: row.programmes.map(LiveGuideGridProgramme.init)
-            )
-        }
-        let model = try? LiveGuideGridModel(
-            windowStart: snapshot.slices.first?.start ?? session.guideWindowStart,
-            windowEnd: snapshot.slices.last?.end ?? windowEnd,
-            timeZone: .current,
-            rows: rows
-        )
+        let revision = snapshot.demandRevision
+        let subtitles = Dictionary(uniqueKeysWithValues: snapshot.rows.compactMap { row in
+            rowSubtitle(row.state).map { (row.id, $0) }
+        })
+        let timeZone = TimeZone.current
         return Group {
-            if let model {
+            if gridModelRevision != revision {
+                AppActivityLabel(L10n.string("live.guide.loading", fallback: "Loading programme guide…"))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let gridModel {
                 TimelineView(.periodic(from: .now, by: 30)) { context in
                     LiveGuideGridRepresentable(
-                        model: model,
+                        model: gridModel,
                         now: context.date,
                         onProgrammeSelected: { row, programme in
                             selection = LiveGuideSelection(
@@ -539,6 +534,16 @@ struct LiveGuideScreen: View {
                     systemImage: "exclamationmark.triangle"
                 )
             }
+        }
+        .task(id: revision) {
+            let candidate = await Task.detached(priority: .userInitiated) {
+                try? LiveGuideGridModel(snapshot: snapshot, timeZone: timeZone,
+                                        subtitles: subtitles)
+            }.value
+            guard !Task.isCancelled,
+                  guide.snapshot?.demandRevision == revision else { return }
+            gridModel = candidate
+            gridModelRevision = revision
         }
     }
 
@@ -1093,7 +1098,7 @@ final class LiveEPGState: ObservableObject {
         order.removeAll { $0.source == source }
     }
 
-    #if DEBUG
+    #if DEBUG || OKVIDEO_PERFORMANCE_TEST
     var storedResultCountForTesting: Int { results.count }
     func containsForTesting(source: LiveSourceID, channel: LiveChannel) -> Bool {
         results[ChannelKey(source: EPGSourceKey(source), channelID: channel.id)] != nil

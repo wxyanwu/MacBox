@@ -148,4 +148,67 @@ final class EPGGuideXMLTVLoaderTests: XCTestCase {
         let closed = await repository.close()
         XCTAssertTrue(closed)
     }
+
+    func testConcurrentPagesRejectedAtGlobalLimitDoNotEnterSnapshot() async throws {
+        let directory = cacheDirectory()
+        let channelCount = 25
+        let slotCount = 257
+        var xml = "<tv>"
+        for channel in 0..<channelCount {
+            xml += "<channel id=\"c\(channel)\"><display-name>C\(channel)</display-name></channel>"
+        }
+        for slot in 0..<slotCount {
+            let startHour = slot / 60
+            let startMinute = slot % 60
+            let endSlot = slot + 1
+            let endHour = endSlot / 60
+            let endMinute = endSlot % 60
+            for channel in 0..<channelCount {
+                xml += String(format: "<programme channel=\"c%d\" start=\"20260101%02d%02d00 +0000\" stop=\"20260101%02d%02d00 +0000\"><title>P%d-%d</title></programme>",
+                              channel, startHour, startMinute, endHour, endMinute,
+                              channel, slot)
+            }
+        }
+        xml += "</tv>"
+        let server = try EPGImportTestServer(xml: Data(xml.utf8), gzip: Data())
+        let repository = EPGProductionRepository(cacheDirectory: directory)
+        defer {
+            server.close()
+            if FileManager.default.fileExists(atPath: directory.path) {
+                try? FileManager.default.removeItem(at: directory)
+            }
+        }
+        let source = LiveSourceID.imported(UUID())
+        let revision = String(repeating: "a", count: 64)
+        let key = EPGRequestKey(source: source, revision: revision, resource: "xmltv")
+        let status = try await repository.refreshXMLTV(
+            key: key, url: server.url("fixture.xml"), force: true
+        )
+        let anchor = Date(timeIntervalSince1970: 1_767_225_600)
+        let channels = (0..<channelCount).map {
+            LiveChannel(groupName: "", name: "C\($0)", tvgID: "c\($0)",
+                        streams: [], explicitID: "row-\($0)")
+        }
+        let demand = try EPGGuideDemand(
+            source: EPGSourceKey(source), revision: revision,
+            demandRevision: UUID(), capability: .xmltv,
+            channels: channels, visibleRange: 0..<10,
+            slices: [try EPGGuideTimeSlice(start: anchor,
+                end: anchor.addingTimeInterval(12 * 3_600))]
+        )
+
+        let snapshot = try await EPGGuideXMLTVLoader.load(
+            repository: repository, key: key, demand: demand,
+            availability: status.availability
+        )
+
+        XCTAssertEqual(snapshot.rows.reduce(0) { $0 + $1.programmes.count },
+                       EPGGuideLimits.maximumProgrammes)
+        XCTAssertTrue(snapshot.rows.contains { $0.state == .truncated(.globalItemLimit) })
+        XCTAssertTrue(snapshot.rows.allSatisfy {
+            $0.programmes.count <= EPGGuideLimits.maximumProgrammesPerRow
+        })
+        let closed = await repository.close()
+        XCTAssertTrue(closed)
+    }
 }

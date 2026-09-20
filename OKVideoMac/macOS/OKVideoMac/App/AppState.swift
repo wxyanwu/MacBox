@@ -5261,7 +5261,7 @@ final class AppState: ObservableObject {
     private var importedIdentityGeneration: ImportedCatalogGeneration?
     private var deletingImportedSourceIDs = Set<UUID>()
     private var importedRefreshDownloads: [UUID: Task<LoadedLiveSource, Error>] = [:]
-    #if DEBUG
+    #if DEBUG || OKVIDEO_PERFORMANCE_TEST
     var importedRetirementBeforeTransactionForTesting: (() async throws -> Void)?
     #endif
 
@@ -5322,7 +5322,7 @@ final class AppState: ObservableObject {
         importedIdentityMapping = updated
     }
 
-    #if DEBUG
+    #if DEBUG || OKVIDEO_PERFORMANCE_TEST
     // Intercepts only the final load boundary. Tests exercise the production
     // selection/flow/recovery path without a window, network, or user database.
     var importedRouteLoadForTesting: ((LivePlaybackCandidate, ResolvedMedia, UUID) async throws -> Void)?
@@ -11283,7 +11283,7 @@ final class AppState: ObservableObject {
         isSearching = false
     }
 
-#if DEBUG
+#if DEBUG || OKVIDEO_PERFORMANCE_TEST
     func seedSearchResultsForTesting(_ results: [VideoSummary]) {
         searchResults = results
         searchClusters = SearchResultAggregator.cluster(results)
@@ -12800,7 +12800,7 @@ final class AppState: ObservableObject {
         await closePlayer()
     }
 
-    #if DEBUG
+    #if DEBUG || OKVIDEO_PERFORMANCE_TEST
     func setLiveConfigurationForTesting(_ record: StoredConfiguration?, providers: [String: SiteProvider]) {
         invalidateXtreamLiveCatalog()
         activeConfigurationRecord = record
@@ -12970,7 +12970,7 @@ final class AppState: ObservableObject {
         cancelLiveSourceValidation(id)
         defer { deletingImportedSourceIDs.remove(id) }
         do {
-            #if DEBUG
+            #if DEBUG || OKVIDEO_PERFORMANCE_TEST
             try await importedRetirementBeforeTransactionForTesting?()
             #endif
             try await database.retireImportedSource(id: id, revokedGeneration: revoked)
@@ -13104,7 +13104,7 @@ final class AppState: ObservableObject {
                   self.liveSources.contains(where: { $0.id == sourceID }) else { return }
             self.liveValidationActivity.transition(.processing(completed: result.completed, total: result.total), sourceID: sourceID, runID: permit.id)
             do {
-                #if DEBUG
+                #if DEBUG || OKVIDEO_PERFORMANCE_TEST
                 try await self.liveValidationBeforeWriteForTesting?()
                 #endif
                 try await self.applyAutomaticallyUnavailableLiveChannels(result.unavailableIDs,
@@ -13145,7 +13145,7 @@ final class AppState: ObservableObject {
         favoriteLiveChannelIDs = updated.favorites
     }
 
-    #if DEBUG
+    #if DEBUG || OKVIDEO_PERFORMANCE_TEST
     var liveValidationBeforeWriteForTesting: (() async throws -> Void)?
     func startLiveValidationForTesting(sourceID: UUID, playlist: LivePlaylist, service: LiveValidationService) {
         self.liveValidationService = service
@@ -13229,7 +13229,7 @@ final class AppState: ObservableObject {
     }
 
     private var hasLivePlaybackLoader: Bool {
-        #if DEBUG
+        #if DEBUG || OKVIDEO_PERFORMANCE_TEST
         if importedRouteLoadForTesting != nil { return true }
         #endif
         return environment != nil
@@ -13296,7 +13296,7 @@ final class AppState: ObservableObject {
         playbackSessionID = clickRequestID
         activePlayerRequestID = clickRequestID
         isPlayerRenderSurfaceMountEnabled = true
-        #if DEBUG
+        #if DEBUG || OKVIDEO_PERFORMANCE_TEST
         if importedRouteLoadForTesting != nil {
             isPlayerPresented = true
         } else {
@@ -13470,7 +13470,7 @@ final class AppState: ObservableObject {
                 }
                 guard liveFlowMayLoad(context) else { throw CancellationError() }
                 do {
-                    #if DEBUG
+                    #if DEBUG || OKVIDEO_PERFORMANCE_TEST
                     if let loader = importedRouteLoadForTesting, context.importedCatalog != nil {
                         try await loader(candidate, media, requestID)
                     } else {
@@ -18793,7 +18793,7 @@ final class AppState: ObservableObject {
         restartLiveGuideDemandIfNeeded()
     }
 
-    #if DEBUG
+    #if DEBUG || OKVIDEO_PERFORMANCE_TEST
     func setEPGInputsForTesting(sources: [StoredLiveSource], playlists: [UUID: LivePlaylist]) {
         liveSources = sources
         acceptedImportedCatalogs = Dictionary(uniqueKeysWithValues: playlists.map {
