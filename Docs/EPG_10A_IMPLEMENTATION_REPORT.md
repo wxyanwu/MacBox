@@ -4,8 +4,8 @@
 
 ## 当前阶段
 
-10A-A、10A-B、10A-C 已完成并通过；下一步为 10A-D 生产数据接线。C 全程没有读取 Repository，
-也没有增加生产入口。
+10A-A、10A-B、10A-C、10A-D 已完成并通过；下一步为 10A-E Xtream、故障与竞态闭环。
+C 全程没有读取 Repository，也没有增加生产入口；生产数据接线从 D 开始。
 
 ## A：基线、分支、合同与测量协议
 
@@ -89,3 +89,36 @@ C 阶段全量验收：macOS App 899 项执行，其中 8 项跳过，0 失败�
 退出集成测试 `testAndroidRealApplicationTerminationIsBoundedAndClean`。`git diff --check` 通过。
 
 结论：PASS，可进入 10A-D。
+
+## D：XMLTV 生产查询、状态和 UI 接线
+
+- 新增 `EPGGuideXMLTVLoader`，通过 9C.4 的生产 Repository 执行窗口分页查询；最多 4 个查询同时
+  运行，按 Coordinator 的 desired/runnable/running 合同补充后续行，两个相邻切片按稳定 programme
+  identity 去重。
+- XMLTV 全需求只接受同一个 service incarnation、resource identity、source epoch、generation 和
+  demand revision。查询中发生 generation 变化时只允许整批重建一次；交付前再次读取 active status，
+  旧 generation 的迟到结果不能发布。
+- 精确频道 ID、规范化名称、歧义、未匹配和查询失败保持不同状态。完整且合法的 0 programme active
+  generation 会发布为真正的空表；损坏刷新会保留并继续查询上一份合法 active generation。
+- 新增 `LiveGuideState` 生命周期状态机。顶层状态为 inactive/loading/content/empty/unsupported/failed，
+  content 内单独表达 fresh/stale 和 idle/loading/backoff，避免布尔组合爆炸。发布时只比较一个统一交付
+  identity；换源、换 revision、换 demand 后的旧结果全部丢弃，同源刷新失败则保留旧 snapshot 并标 stale。
+- `AppState` 将 Guide 窗口查询接到既有 XMLTV refresh owner。100 ms debounce、最多 48 行和 1～2 个
+  12 小时切片只取消展示需求，不取消几十 MiB 的共享刷新；sleep 会暂停查询并保留 stale 内容，wake
+  从同一 Repository 重建需求，shutdown 取消并退出。
+- Live 页面新增频道/Guide 切换、前后 12 小时、日期跳转和 Now；搜索、分组、收藏先于 48 行上限生效。
+  网格可见范围驱动有限预取，选择节目只显示轻量详情。节目、频道双击或 Return 最终都调用既有直播
+  播放入口，按钮文案固定为“播放频道”，EPG 查询和刷新不进入播放等待链。
+- AppKit 网格补充 production representable、节目与频道 activation 和可见行回调，继续保持滚动位置只
+  在局部 AppKit/Live 会话中，不进入全局 `AppState` 高频发布。
+- 修复测试 loopback server 的无界 `Process.waitUntilExit()`：先 TERM，有界等待 2 秒，再在必要时
+  KILL 并有界等待。原先偶发挂住的 supersede/shared-waiter 用例恢复正常执行，没有被永久排除。
+
+D 阶段定向验收：`EPGGuideXMLTVLoaderTests` 3 项、`LiveGuidePresentationStateTests` 与
+`LiveGuideGridTests` 8 项，均为 0 跳过、0 失败；macOS App Debug 构建成功。
+
+D 阶段全量验收：OKVideoKit **969 项执行，其中 20 项跳过，0 失败**，不排除任何用例；macOS App
+**903 项执行，其中 8 项跳过，0 失败**，仅额外排除必须连接真实 Android 设备的既有集成测试
+`testAndroidRealApplicationTerminationIsBoundedAndClean`。`git diff --check` 通过。
+
+结论：PASS，可进入 10A-E。

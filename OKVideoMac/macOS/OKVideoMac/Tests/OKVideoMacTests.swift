@@ -27986,3 +27986,115 @@ final class LiveGuideGridTests: XCTestCase {
         return LiveGuideGridProgramme(record)
     }
 }
+
+@MainActor
+final class LiveGuidePresentationStateTests: XCTestCase {
+    func testLateDeliveryCannotReplaceCurrentDemand() throws {
+        let state = LiveGuideState()
+        let source = EPGSourceKey(.imported(UUID()))
+        let incarnation = UUID()
+        let first = identity(source: source, incarnation: incarnation)
+        let second = identity(source: source, incarnation: incarnation)
+        state.begin(first, refreshing: false)
+        state.begin(second, refreshing: false)
+
+        XCTAssertFalse(state.publish(try snapshot(first, title: "Late"), identity: first))
+        XCTAssertNil(state.snapshot)
+        XCTAssertTrue(state.publish(try snapshot(second, title: "Current"), identity: second))
+        XCTAssertEqual(state.snapshot?.rows.first?.programmes.first?.title, "Current")
+    }
+
+    func testRefreshFailureRetainsOldSnapshotAsStaleBackoff() throws {
+        let state = LiveGuideState()
+        let source = EPGSourceKey(.imported(UUID()))
+        let incarnation = UUID()
+        let first = identity(source: source, incarnation: incarnation)
+        state.begin(first, refreshing: false)
+        XCTAssertTrue(state.publish(try snapshot(first, title: "Saved"), identity: first))
+
+        let refresh = identity(source: source, incarnation: incarnation)
+        state.begin(refresh, refreshing: true)
+        state.fail(.busy, identity: refresh)
+        guard case .content(let content) = state.lifecycle else {
+            return XCTFail("expected retained content")
+        }
+        XCTAssertEqual(content.snapshot.rows.first?.programmes.first?.title, "Saved")
+        XCTAssertEqual(content.freshness, .stale)
+        XCTAssertEqual(content.refreshPhase, .backoff)
+    }
+
+    func testLegalEmptyAndPartialFailureRemainDistinct() throws {
+        let state = LiveGuideState()
+        let source = EPGSourceKey(.imported(UUID()))
+        let incarnation = UUID()
+        let emptyIdentity = identity(source: source, incarnation: incarnation)
+        state.begin(emptyIdentity, refreshing: false)
+        XCTAssertTrue(state.publish(try snapshot(emptyIdentity, title: nil), identity: emptyIdentity))
+        guard case .empty = state.lifecycle else { return XCTFail("expected legal empty") }
+
+        let partialIdentity = identity(source: source, incarnation: incarnation)
+        state.begin(partialIdentity, refreshing: true)
+        XCTAssertTrue(state.publish(
+            try snapshot(partialIdentity, title: "Programme", includesFailedRow: true),
+            identity: partialIdentity
+        ))
+        guard case .content(let content) = state.lifecycle else {
+            return XCTFail("expected partial content")
+        }
+        XCTAssertEqual(content.failures.count, 1)
+        XCTAssertEqual(content.snapshot.rows.first?.programmes.first?.title, "Programme")
+    }
+
+    func testCrossSourceDemandDropsRetainedSnapshotAndSuspendKeepsSameSourceData() throws {
+        let state = LiveGuideState()
+        let incarnation = UUID()
+        let first = identity(source: EPGSourceKey(.imported(UUID())), incarnation: incarnation)
+        state.begin(first, refreshing: false)
+        XCTAssertTrue(state.publish(try snapshot(first, title: "Saved"), identity: first))
+        state.suspend()
+        guard case .content(let suspended) = state.lifecycle else {
+            return XCTFail("expected suspended content")
+        }
+        XCTAssertEqual(suspended.freshness, .stale)
+
+        let other = identity(source: EPGSourceKey(.imported(UUID())), incarnation: incarnation)
+        state.begin(other, refreshing: false)
+        XCTAssertEqual(state.lifecycle, .loadingInitial)
+        XCTAssertNil(state.snapshot)
+    }
+
+    private func identity(source: EPGSourceKey, incarnation: UUID)
+        -> LiveGuideDeliveryIdentity {
+        LiveGuideDeliveryIdentity(source: source, revision: String(repeating: "a", count: 64),
+            demandRevision: UUID(), serviceIncarnation: incarnation)
+    }
+
+    private func snapshot(_ identity: LiveGuideDeliveryIdentity, title: String?,
+                          includesFailedRow: Bool = false) throws -> EPGGuideSnapshot {
+        let token = EPGResultToken(serviceIncarnation: identity.serviceIncarnation,
+            resourceIdentity: "resource", sourceEpoch: "epoch", dataVersion: "version",
+            demandRevision: identity.demandRevision)
+        let start = Date(timeIntervalSince1970: 1_789_862_400)
+        let slice = try EPGGuideTimeSlice(start: start, end: start.addingTimeInterval(43_200))
+        let programme = title.map {
+            EPGWindowProgramme(id: EPGProgrammeRecordIdentity(kind: .xmltv,
+                resourceIdentity: token.resourceIdentity, sourceEpoch: token.sourceEpoch,
+                dataVersion: token.dataVersion, ordinal: 1),
+                programme: EPGProgramme(channelID: "a", title: $0, start: start,
+                    end: start.addingTimeInterval(3_600)))
+        }
+        var rows = [EPGGuideRow(channel: EPGGuideChannel(LiveChannel(groupName: "",
+            name: "Alpha", tvgID: "a", streams: [], explicitID: "row-a")), token: token,
+            match: EPGChannelMatch(kind: .exact, channelID: "a"), availability: .fresh,
+            programmes: programme.map { [$0] } ?? [], state: programme == nil ? .empty : .ready)]
+        if includesFailedRow {
+            rows.append(EPGGuideRow(channel: EPGGuideChannel(LiveChannel(groupName: "",
+                name: "Beta", tvgID: "b", streams: [], explicitID: "row-b")), token: nil,
+                match: EPGChannelMatch(kind: .unmatched, channelID: nil), availability: .failed,
+                programmes: [], state: .failed(.busy)))
+        }
+        return try EPGGuideSnapshot(source: identity.source, revision: identity.revision,
+            demandRevision: identity.demandRevision, slices: [slice],
+            coherence: .xmltv(token), rows: rows)
+    }
+}

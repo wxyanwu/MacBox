@@ -349,7 +349,16 @@ final class EPGImportTestServer {
             return true
         }
         guard shouldClose else { return }
-        if process.isRunning { process.terminate(); process.waitUntilExit() }
+        if process.isRunning {
+            let ended = DispatchSemaphore(value: 0)
+            process.terminationHandler = { _ in ended.signal() }
+            process.terminate()
+            if ended.wait(timeout: .now() + 2) == .timedOut, process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+                _ = ended.wait(timeout: .now() + 2)
+            }
+            process.terminationHandler = nil
+        }
         try? FileManager.default.removeItem(at: directory)
     }
     deinit { close() }

@@ -4821,6 +4821,21 @@ final class PlayerSnapshotState: ObservableObject {
     }
 }
 
+private struct LiveGuideDemandInput: Equatable {
+    let source: LiveSourceID
+    let channels: [LiveChannel]
+    let windowStart: Date
+    let windowEnd: Date
+    let visibleRange: Range<Int>
+    let focusedChannelID: String?
+}
+
+private struct LiveGuideRequestSpec: Equatable {
+    let input: LiveGuideDemandInput
+    let identity: LiveGuideDeliveryIdentity
+    let key: EPGRequestKey
+}
+
 @MainActor
 final class AppState: ObservableObject {
     let navigation = AppNavigationState()
@@ -4906,6 +4921,7 @@ final class AppState: ObservableObject {
     @Published private(set) var nativeLiveFavorites = StoredLiveChannelReferenceEnvelope(setting: nil)
     @Published private(set) var nativeLiveHiddenChannels = StoredLiveChannelReferenceEnvelope(setting: nil)
     let liveEPG = LiveEPGState()
+    let liveGuide = LiveGuideState()
     @Published private(set) var epgPreferences = EPGPreferences()
     @Published private(set) var isSavingEPGPreferences = false
     @Published private(set) var liveEPGCatalogRevision = UUID()
@@ -5152,6 +5168,9 @@ final class AppState: ObservableObject {
     private var epgLifecycleTask: Task<Void, Never>?
     private var epgResourceRefreshTasks: [EPGRequestKey: Task<Void, Never>] = [:]
     private var epgResourceRefreshOperationIDs: [EPGRequestKey: UUID] = [:]
+    private var liveGuideTask: Task<Void, Never>?
+    private var liveGuideInput: LiveGuideDemandInput?
+    private var liveGuideRequest: LiveGuideRequestSpec?
     private var epgRefreshGeneration = UUID()
     private var epgSleeping = false
     private var epgBrowserSource: LiveSourceID?
@@ -14785,6 +14804,11 @@ final class AppState: ObservableObject {
         epgResourceRefreshTasks.removeAll()
         epgResourceRefreshOperationIDs.removeAll()
         liveEPGLoadActivities.removeAll()
+        liveGuideTask?.cancel()
+        liveGuideTask = nil
+        liveGuideRequest = nil
+        liveGuideInput = nil
+        liveGuide.deactivate()
         if let repository = environment?.productionEPGRepository {
             _ = await repository.close(deadlineNanoseconds: 2_000_000_000)
         }
@@ -14904,6 +14928,10 @@ final class AppState: ObservableObject {
         epgResourceRefreshTasks.removeAll()
         epgResourceRefreshOperationIDs.removeAll()
         liveEPGLoadActivities.removeAll()
+        liveGuideTask?.cancel()
+        liveGuideTask = nil
+        liveGuideRequest = nil
+        liveGuide.suspend()
         if let repository = environment?.productionEPGRepository {
             _ = await repository.pause(deadlineNanoseconds: 750_000_000)
         }
@@ -14929,6 +14957,7 @@ final class AppState: ObservableObject {
                       !self.isShutdownRequested else { return }
                 self.epgLifecycleTask = nil
                 self.scheduleEPGRefresh()
+                self.restartLiveGuideDemandIfNeeded()
             }
         } else {
             scheduleEPGRefresh()
@@ -18416,6 +18445,158 @@ final class AppState: ObservableObject {
         scheduleEPGRefresh()
     }
 
+    /// Full Guide demand is independent from the Now/Next browser demand. It
+    /// cancels only the bounded window query; the shared XMLTV resource refresh
+    /// continues for every consumer.
+    func setLiveGuideDemand(source: LiveSourceID?, channels: [LiveChannel],
+                            windowStart: Date, windowEnd: Date,
+                            visibleRange: Range<Int>,
+                            focusedChannelID: String? = nil) {
+        guard let source, environment != nil, !isShutdownRequested, !epgSleeping else {
+            clearLiveGuideDemand()
+            return
+        }
+        let bounded = Array(channels.prefix(EPGGuideLimits.maximumDesiredRows))
+        guard !bounded.isEmpty, windowStart < windowEnd,
+              windowEnd.timeIntervalSince(windowStart) <= 24 * 60 * 60 else {
+            clearLiveGuideDemand()
+            return
+        }
+        let lower = min(max(0, visibleRange.lowerBound), bounded.count - 1)
+        let upper = min(bounded.count, max(lower + 1, visibleRange.upperBound))
+        let input = LiveGuideDemandInput(
+            source: source,
+            channels: bounded,
+            windowStart: windowStart,
+            windowEnd: windowEnd,
+            visibleRange: lower..<upper,
+            focusedChannelID: focusedChannelID
+        )
+        guard input != liveGuideInput else { return }
+        liveGuideInput = input
+        startLiveGuideDemand(input)
+    }
+
+    func clearLiveGuideDemand() {
+        liveGuideTask?.cancel()
+        liveGuideTask = nil
+        liveGuideInput = nil
+        liveGuideRequest = nil
+        liveGuide.deactivate()
+    }
+
+    private func startLiveGuideDemand(_ input: LiveGuideDemandInput) {
+        liveGuideTask?.cancel()
+        guard let environment, !isShutdownRequested, !epgSleeping else {
+            liveGuide.suspend()
+            return
+        }
+        guard case .imported = input.source else {
+            liveGuideRequest = nil
+            liveGuide.setUnsupported()
+            return
+        }
+        guard let revision = epgRevision(for: input.source) else {
+            liveGuideRequest = nil
+            liveGuide.setUnsupported()
+            return
+        }
+        let key = EPGRequestKey(source: input.source, revision: revision, resource: "xmltv")
+        let identity = LiveGuideDeliveryIdentity(
+            source: key.source,
+            revision: revision,
+            demandRevision: UUID(),
+            serviceIncarnation: environment.productionEPGRepository.incarnation
+        )
+        let request = LiveGuideRequestSpec(input: input, identity: identity, key: key)
+        liveGuideRequest = request
+        liveGuide.begin(identity, refreshing: false)
+        let retainedCost = liveGuide.retainedSnapshotCost
+
+        liveGuideTask = Task(priority: .userInitiated) { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(nanoseconds: 100_000_000)
+                guard !Task.isCancelled, self.liveGuideRequest == request,
+                      self.epgRevision(for: input.source) == revision else { return }
+                let status = await environment.productionEPGRepository.status(for: key)
+                guard !Task.isCancelled, self.liveGuideRequest == request,
+                      self.epgRevision(for: input.source) == revision else { return }
+                self.liveEPG.setStatus(status)
+                if case .imported(let sourceID) = input.source {
+                    self.updateImportedEPGStatus(status, sourceID: sourceID)
+                }
+                let shouldRefresh = status.nextRetryAt <= Date()
+                    && self.resolvedEPGSource(for: input.source)?.url != nil
+                self.liveGuide.begin(identity, refreshing: shouldRefresh)
+                if shouldRefresh,
+                   let url = self.resolvedEPGSource(for: input.source)?.url {
+                    self.beginXMLTVResourceRefresh(key: key, url: url)
+                }
+                guard status.summary != nil else {
+                    if status.consecutiveFailures > 0 {
+                        self.liveGuide.fail(.unavailable, identity: identity)
+                    }
+                    return
+                }
+                let slices = try Self.liveGuideSlices(
+                    from: input.windowStart,
+                    to: input.windowEnd
+                )
+                let demand = try EPGGuideDemand(
+                    source: key.source,
+                    revision: revision,
+                    demandRevision: identity.demandRevision,
+                    capability: .xmltv,
+                    channels: input.channels,
+                    visibleRange: input.visibleRange,
+                    focusedChannelID: input.focusedChannelID,
+                    playingChannelID: self.livePlaybackSourceID == input.source
+                        ? self.livePlaybackChannel?.id : nil,
+                    slices: slices
+                )
+                let snapshot = try await EPGGuideXMLTVLoader.load(
+                    repository: environment.productionEPGRepository,
+                    key: key,
+                    demand: demand,
+                    availability: status.availability,
+                    retainedSnapshotCost: retainedCost
+                )
+                guard !Task.isCancelled, self.liveGuideRequest == request,
+                      self.epgRevision(for: input.source) == revision else { return }
+                _ = self.liveGuide.publish(snapshot, identity: identity)
+            } catch let failure as EPGGuideFailure {
+                self.liveGuide.fail(failure, identity: identity)
+            } catch is CancellationError {
+                // A newer demand owns presentation; cancellation is not empty or failed.
+            } catch {
+                self.liveGuide.fail(.invalidRequest, identity: identity)
+            }
+        }
+    }
+
+    private func restartLiveGuideDemandIfNeeded(for key: EPGRequestKey? = nil) {
+        guard let input = liveGuideInput else { return }
+        if let key {
+            guard key.source == EPGSourceKey(input.source),
+                  key.revision == epgRevision(for: input.source) else { return }
+        }
+        startLiveGuideDemand(input)
+    }
+
+    private static func liveGuideSlices(from start: Date, to end: Date) throws
+        -> [EPGGuideTimeSlice] {
+        guard start < end, end.timeIntervalSince(start) <= 24 * 60 * 60 else {
+            throw EPGGuideValidationError.invalidDemand
+        }
+        let boundary = min(end, start.addingTimeInterval(12 * 60 * 60))
+        var slices = [try EPGGuideTimeSlice(start: start, end: boundary)]
+        if boundary < end {
+            slices.append(try EPGGuideTimeSlice(start: boundary, end: end))
+        }
+        return slices
+    }
+
     func setEPGChannelVisibility(source: LiveSourceID, channel: LiveChannel, visible: Bool) {
         guard epgBrowserSource == source else { return }
         var next = epgBrowserChannels.filter { $0.id != channel.id }
@@ -18520,6 +18701,9 @@ final class AppState: ObservableObject {
         // Invalidate presentation and the running waiter BEFORE any actor hop.
         // Source generations are deliberately independent of the persisted URL digest.
         epgRefreshTask?.cancel()
+        liveGuideTask?.cancel()
+        liveGuideTask = nil
+        liveGuideRequest = nil
         if masterChanged {
             for task in epgResourceRefreshTasks.values { task.cancel() }
             epgResourceRefreshTasks.removeAll()
@@ -18549,6 +18733,7 @@ final class AppState: ObservableObject {
         guard epgRefreshGeneration == generation else { return }
         // Unchanged embedded/custom/native sources retain their snapshots and flights.
         scheduleEPGRefresh(cancelSharedRequests: false)
+        restartLiveGuideDemandIfNeeded()
     }
 
     #if DEBUG
@@ -18725,6 +18910,7 @@ final class AppState: ObservableObject {
                 self.liveEPG.setStatus(status)
                 self.updateImportedEPGStatus(status, sourceID: key.source.id)
                 self.scheduleEPGRefresh(cancelSharedRequests: false)
+                self.restartLiveGuideDemandIfNeeded(for: key)
                 _ = try? await environment.productionEPGRepository.performMaintenance()
             } catch { /* cancellation/pause/close never become a user-visible refresh failure */ }
         }

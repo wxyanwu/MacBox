@@ -1,5 +1,170 @@
 import AppKit
 import OKVideoCore
+import SwiftUI
+
+enum LiveGuideFreshness: Equatable {
+    case fresh
+    case stale
+}
+
+enum LiveGuideRefreshPhase: Equatable {
+    case idle
+    case loading
+    case backoff
+}
+
+struct LiveGuideContentState: Equatable {
+    let snapshot: EPGGuideSnapshot
+    var freshness: LiveGuideFreshness
+    var refreshPhase: LiveGuideRefreshPhase
+    let failures: [String: EPGGuideFailure]
+}
+
+struct LiveGuideEmptyState: Equatable {
+    let snapshot: EPGGuideSnapshot
+    var freshness: LiveGuideFreshness
+    var refreshPhase: LiveGuideRefreshPhase
+}
+
+enum LiveGuideLifecycleState: Equatable {
+    case inactive
+    case loadingInitial
+    case content(LiveGuideContentState)
+    case empty(LiveGuideEmptyState)
+    case unsupported
+    case failed(EPGGuideFailure)
+}
+
+struct LiveGuideDeliveryIdentity: Equatable {
+    let source: EPGSourceKey
+    let revision: String
+    let demandRevision: UUID
+    let serviceIncarnation: UUID
+}
+
+/// Main-actor publication boundary. It owns only one bounded snapshot and
+/// rejects every late result using one delivery identity comparison.
+@MainActor
+final class LiveGuideState: ObservableObject {
+    @Published private(set) var lifecycle: LiveGuideLifecycleState = .inactive
+    private var expectedIdentity: LiveGuideDeliveryIdentity?
+
+    var snapshot: EPGGuideSnapshot? {
+        switch lifecycle {
+        case .content(let value): return value.snapshot
+        case .empty(let value): return value.snapshot
+        default: return nil
+        }
+    }
+
+    var retainedSnapshotCost: Int { snapshot?.estimatedByteCost ?? 0 }
+
+    func begin(_ identity: LiveGuideDeliveryIdentity, refreshing: Bool) {
+        let canRetain = snapshot?.source == identity.source
+            && snapshot?.revision == identity.revision
+        expectedIdentity = identity
+        guard canRetain else {
+            lifecycle = .loadingInitial
+            return
+        }
+        setRefreshPhase(refreshing ? .loading : .idle)
+    }
+
+    func setUnsupported() {
+        expectedIdentity = nil
+        lifecycle = .unsupported
+    }
+
+    func deactivate() {
+        expectedIdentity = nil
+        lifecycle = .inactive
+    }
+
+    func suspend() {
+        expectedIdentity = nil
+        switch lifecycle {
+        case .content(var value):
+            value.freshness = .stale
+            value.refreshPhase = .idle
+            lifecycle = .content(value)
+        case .empty(var value):
+            value.freshness = .stale
+            value.refreshPhase = .idle
+            lifecycle = .empty(value)
+        default:
+            lifecycle = .inactive
+        }
+    }
+
+    @discardableResult
+    func publish(_ value: EPGGuideSnapshot,
+                 identity: LiveGuideDeliveryIdentity) -> Bool {
+        guard expectedIdentity == identity,
+              value.source == identity.source,
+              value.revision == identity.revision,
+              value.demandRevision == identity.demandRevision,
+              case .xmltv(let token) = value.coherence,
+              token.serviceIncarnation == identity.serviceIncarnation,
+              token.demandRevision == identity.demandRevision else { return false }
+
+        let failures = Dictionary(uniqueKeysWithValues: value.rows.compactMap { row in
+            if case .failed(let failure) = row.state { return (row.id, failure) }
+            return nil
+        })
+        let successfulRows = value.rows.filter { row in
+            if case .failed = row.state { return false }
+            return true
+        }
+        guard !successfulRows.isEmpty else {
+            lifecycle = .failed(failures.values.first ?? .unavailable)
+            return true
+        }
+        let freshness: LiveGuideFreshness = value.rows.contains(where: {
+            $0.availability == .stale || $0.availability == .failed
+        }) ? .stale : .fresh
+        if successfulRows.allSatisfy({ $0.programmes.isEmpty }) {
+            lifecycle = .empty(LiveGuideEmptyState(
+                snapshot: value, freshness: freshness, refreshPhase: .idle
+            ))
+        } else {
+            lifecycle = .content(LiveGuideContentState(
+                snapshot: value, freshness: freshness,
+                refreshPhase: .idle, failures: failures
+            ))
+        }
+        return true
+    }
+
+    func fail(_ failure: EPGGuideFailure,
+              identity: LiveGuideDeliveryIdentity) {
+        guard expectedIdentity == identity else { return }
+        switch lifecycle {
+        case .content(var value):
+            value.freshness = .stale
+            value.refreshPhase = .backoff
+            lifecycle = .content(value)
+        case .empty(var value):
+            value.freshness = .stale
+            value.refreshPhase = .backoff
+            lifecycle = .empty(value)
+        default:
+            lifecycle = failure == .cancelled ? .inactive : .failed(failure)
+        }
+    }
+
+    private func setRefreshPhase(_ phase: LiveGuideRefreshPhase) {
+        switch lifecycle {
+        case .content(var value):
+            value.refreshPhase = phase
+            lifecycle = .content(value)
+        case .empty(var value):
+            value.refreshPhase = phase
+            lifecycle = .empty(value)
+        default:
+            break
+        }
+    }
+}
 
 struct LiveGuideGridProgramme: Equatable, Identifiable {
     let id: EPGProgrammeRecordIdentity
@@ -128,6 +293,12 @@ final class LiveGuideGridView: NSView, NSCollectionViewDataSource, NSCollectionV
     private var maximumVisibleProgrammeViews = 0
     private var realizedProgrammeViews: Set<ObjectIdentifier> = []
     var onProgrammeActivated: ((LiveGuideGridRow, LiveGuideGridProgramme) -> Void)?
+    var onProgrammeSelected: ((LiveGuideGridRow, LiveGuideGridProgramme) -> Void)?
+    var onChannelActivated: ((LiveGuideGridRow) -> Void)? {
+        didSet { channelHeader.onChannelActivated = onChannelActivated }
+    }
+    var onVisibleRangeChanged: ((Range<Int>) -> Void)?
+    private var lastVisibleRange: Range<Int>?
 
     override var isFlipped: Bool { true }
 
@@ -303,6 +474,10 @@ final class LiveGuideGridView: NSView, NSCollectionViewDataSource, NSCollectionV
                         didSelectItemsAt indexPaths: Set<IndexPath>) {
         maximumVisibleProgrammeViews = max(maximumVisibleProgrammeViews,
                                            collectionView.visibleItems().count)
+        guard let indexPath = indexPaths.first,
+              let rows = model?.rows, rows.indices.contains(indexPath.section),
+              rows[indexPath.section].programmes.indices.contains(indexPath.item) else { return }
+        onProgrammeSelected?(rows[indexPath.section], rows[indexPath.section].programmes[indexPath.item])
     }
 
     private func synchronizeFixedViews() {
@@ -311,6 +486,15 @@ final class LiveGuideGridView: NSView, NSCollectionViewDataSource, NSCollectionV
         channelHeader.verticalOffset = offset.y
         maximumVisibleProgrammeViews = max(maximumVisibleProgrammeViews,
                                            grid.visibleItems().count)
+        guard let rows = model?.rows, !rows.isEmpty else { return }
+        let viewport = scrollView.contentView.bounds
+        let first = min(rows.count - 1, max(0, Int(floor(viewport.minY / Self.rowHeight))))
+        let last = min(rows.count, max(first + 1, Int(ceil(viewport.maxY / Self.rowHeight))))
+        let range = first..<last
+        if range != lastVisibleRange {
+            lastVisibleRange = range
+            onVisibleRangeChanged?(range)
+        }
     }
 
     private func moveSelection(horizontal: Int, vertical: Int) {
@@ -448,6 +632,49 @@ private final class LiveGuideCollectionView: NSCollectionView {
         default: super.keyDown(with: event)
         }
     }
+
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        if event.clickCount >= 2 { onActivateSelection?() }
+    }
+}
+
+struct LiveGuideGridRepresentable: NSViewRepresentable {
+    let model: LiveGuideGridModel
+    let now: Date
+    let onProgrammeSelected: (LiveGuideGridRow, LiveGuideGridProgramme) -> Void
+    let onProgrammeActivated: (LiveGuideGridRow, LiveGuideGridProgramme) -> Void
+    let onChannelActivated: (LiveGuideGridRow) -> Void
+    let onVisibleRangeChanged: (Range<Int>) -> Void
+
+    final class Coordinator {
+        var model: LiveGuideGridModel?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> LiveGuideGridView {
+        let view = LiveGuideGridView()
+        connect(view)
+        return view
+    }
+
+    func updateNSView(_ view: LiveGuideGridView, context: Context) {
+        connect(view)
+        if context.coordinator.model != model {
+            context.coordinator.model = model
+            view.apply(model, now: now)
+        } else {
+            view.updateNow(now)
+        }
+    }
+
+    private func connect(_ view: LiveGuideGridView) {
+        view.onProgrammeSelected = onProgrammeSelected
+        view.onProgrammeActivated = onProgrammeActivated
+        view.onChannelActivated = onChannelActivated
+        view.onVisibleRangeChanged = onVisibleRangeChanged
+    }
 }
 
 private final class LiveGuideProgrammeItem: NSCollectionViewItem {
@@ -561,6 +788,7 @@ private final class LiveGuideTimeHeaderView: NSView {
 private final class LiveGuideChannelHeaderView: NSView {
     var rows: [LiveGuideGridRow] = [] { didSet { needsDisplay = true } }
     var verticalOffset: CGFloat = 0 { didSet { needsDisplay = true } }
+    var onChannelActivated: ((LiveGuideGridRow) -> Void)?
     override var isFlipped: Bool { true }
 
     override init(frame frameRect: NSRect) {
@@ -570,6 +798,15 @@ private final class LiveGuideChannelHeaderView: NSView {
         setAccessibilityLabel("Channels")
     }
     required init?(coder: NSCoder) { nil }
+
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        guard event.clickCount >= 2 else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let index = Int(floor((point.y + verticalOffset) / LiveGuideGridView.rowHeight))
+        guard rows.indices.contains(index) else { return }
+        onChannelActivated?(rows[index])
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         NSColor.windowBackgroundColor.setFill()
