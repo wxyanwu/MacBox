@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		10AC00010000000000000001 /* LiveGuideGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10AC00010000000000000002 /* LiveGuideGrid.swift */; };
 		D4A6C0010000000000000001 /* DanmakuPlayerSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4A6C0010000000000000002 /* DanmakuPlayerSupport.swift */; };
         B13D15A30000000000000001 /* LiveBackgroundActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B13D15A30000000000000002; };
         B13D15A20000000000000001 /* LiveBackgroundPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B13D15A20000000000000002; };
@@ -86,6 +87,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		10AC00010000000000000002 /* LiveGuideGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveGuideGrid.swift; sourceTree = "<group>"; };
 		D4A6C0010000000000000002 /* DanmakuPlayerSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DanmakuPlayerSupport.swift; sourceTree = "<group>"; };
         B13D15A30000000000000002 /* LiveBackgroundActivityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Live/LiveBackgroundActivityView.swift; sourceTree = SOURCE_ROOT; };
         B13D15A20000000000000002 /* LiveBackgroundPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Live/LiveBackgroundPresentation.swift; sourceTree = SOURCE_ROOT; };
@@ -421,6 +423,7 @@
 		FDEEE4038469768F54DDC629 /* Live */ = {
 			isa = PBXGroup;
 			children = (
+				10AC00010000000000000002 /* LiveGuideGrid.swift */,
 				BCC0FBAF18592C722D283D81 /* LiveView.swift */,
 			);
 			path = Live;
@@ -694,6 +697,7 @@
 				A55E769996EE245CA586B3C6 /* JavaScriptSpiderSiteProvider.swift in Sources */,
 				9E1D5CF2A69520DA1284E49B /* L10nKey.swift in Sources */,
 				907BE2DC1B86A821A8D0AC2B /* LiveView.swift in Sources */,
+				10AC00010000000000000001 /* LiveGuideGrid.swift in Sources */,
 				05D5512B69A7C71CC3112A74 /* MPVLibrary.swift in Sources */,
 				A0BF2B3C33EFE592A9DF59F9 /* MPVPlayerClient.swift in Sources */,
 				E56F923C89AE4390A50D1001 /* SystemMediaProxyResolver.swift in Sources */,

@@ -27848,3 +27848,141 @@ extension AndroidRuntimeModeCompatibilityTests {
         XCTAssertEqual(original, try Data(contentsOf: fixture.store.recordURL))
     }
 }
+
+@MainActor
+final class LiveGuideGridTests: XCTestCase {
+    private let start = Date(timeIntervalSince1970: 2_000_000_000)
+
+    func testFixtureGridVirtualizesBothAxesAndKeepsFixedRegionsStable() throws {
+        let model = try fixture(rows: 48, programmesPerRow: 24)
+        let view = LiveGuideGridView(frame: NSRect(x: 0, y: 0, width: 980, height: 620))
+        let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered,
+                              defer: false)
+        window.contentView = view
+        view.apply(model, now: start.addingTimeInterval(6 * 3600))
+        view.layoutSubtreeIfNeeded()
+        view.displayIfNeeded()
+
+        let initialFrames = view.debugFixedFrames
+        let initial = view.debugMetrics
+        XCTAssertEqual(initial.totalProgrammes, 1_152)
+        XCTAssertGreaterThan(initial.visibleProgrammeViews, 0)
+        XCTAssertLessThan(initial.visibleProgrammeViews, initial.totalProgrammes)
+        XCTAssertGreaterThanOrEqual(initial.realizedProgrammeViews, initial.visibleProgrammeViews)
+        XCTAssertLessThanOrEqual(initial.realizedProgrammeViews, 200)
+        XCTAssertLessThan(initial.emittedLayoutAttributes, initial.totalProgrammes)
+        XCTAssertLessThanOrEqual(initial.cachedTimeLabels, 64)
+        XCTAssertEqual(try XCTUnwrap(view.debugNowLineX),
+                       6 * LiveGuideGridView.pointsPerHour, accuracy: 0.001)
+
+        for point in [NSPoint(x: 400, y: 640), NSPoint(x: 800, y: 1_280),
+                      NSPoint(x: 1_200, y: 1_900), NSPoint(x: 1_000, y: 2_400)] {
+            view.scroll(to: point)
+            view.layoutSubtreeIfNeeded()
+            view.displayIfNeeded()
+        }
+        XCTAssertEqual(view.debugFixedFrames, initialFrames)
+        XCTAssertGreaterThan(view.scrollOffset.x, 0)
+        XCTAssertGreaterThan(view.scrollOffset.y, 0)
+        let scrolled = view.debugMetrics
+        XCTAssertGreaterThan(scrolled.visibleProgrammeViews, 0)
+        XCTAssertLessThan(scrolled.visibleProgrammeViews, scrolled.totalProgrammes)
+        XCTAssertLessThanOrEqual(scrolled.maximumVisibleProgrammeViews, 200)
+        XCTAssertLessThanOrEqual(scrolled.realizedProgrammeViews, 400)
+        XCTAssertLessThan(scrolled.realizedProgrammeViews, scrolled.totalProgrammes)
+
+        view.frame.size = NSSize(width: 720, height: 420)
+        window.setContentSize(view.frame.size)
+        view.layoutSubtreeIfNeeded()
+        let resized = view.debugFixedFrames
+        XCTAssertEqual(resized.timeHeader.width,
+                       720 - LiveGuideGridView.channelColumnWidth, accuracy: 0.001)
+        XCTAssertEqual(resized.channelHeader.minY, LiveGuideGridView.timeHeaderHeight,
+                       accuracy: 0.001)
+    }
+
+    func testKeyboardFocusActivationAccessibilityDarkAppearanceAndRetinaScale() throws {
+        let model = try fixture(rows: 12, programmesPerRow: 24)
+        let view = LiveGuideGridView(frame: NSRect(x: 0, y: 0, width: 900, height: 540))
+        let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered,
+                              defer: false)
+        window.contentView = view
+        view.appearance = NSAppearance(named: .darkAqua)
+        view.wantsLayer = true
+        view.layer?.contentsScale = 2
+        view.apply(model, now: start)
+        view.layoutSubtreeIfNeeded()
+        view.displayIfNeeded()
+
+        view.debugSelect(item: 0, section: 0)
+        view.debugMoveSelection(horizontal: 1, vertical: 0)
+        XCTAssertEqual(view.debugSelectedIndexPath, IndexPath(item: 1, section: 0))
+        view.debugMoveSelection(horizontal: 0, vertical: 1)
+        XCTAssertEqual(view.debugSelectedIndexPath?.section, 1)
+        XCTAssertEqual(view.debugSelectedIndexPath?.item, 1)
+
+        var activated: (String, String)?
+        view.onProgrammeActivated = { activated = ($0.id, $1.title) }
+        view.debugActivateSelection()
+        XCTAssertEqual(activated?.0, "channel-1")
+        XCTAssertFalse(view.debugVisibleAccessibilityLabels.isEmpty)
+        XCTAssertTrue(view.debugVisibleAccessibilityLabels.allSatisfy { $0.contains("Channel") })
+        XCTAssertEqual(view.layer?.contentsScale, 2)
+        XCTAssertLessThan(view.debugMetrics.visibleProgrammeViews,
+                          view.debugMetrics.totalProgrammes)
+    }
+
+    func testDSTFallbackUsesElapsedTimeAndDisambiguatesRepeatedWallClockLabels() throws {
+        let timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let localMidnight = try XCTUnwrap(calendar.date(from:
+            DateComponents(year: 2026, month: 11, day: 1, hour: 0)))
+        let end = localMidnight.addingTimeInterval(4 * 3600)
+        let ticks = LiveGuideTimeAxisFormatter.ticks(from: localMidnight, to: end,
+                                                      timeZone: timeZone)
+        let repeated = ticks.filter { $0.label.hasPrefix("01:") }
+        XCTAssertEqual(repeated.count, 4)
+        XCTAssertTrue(repeated.allSatisfy { $0.label.contains("GMT") })
+        XCTAssertEqual(Set(repeated.map(\.label)).count, 4)
+
+        let model = try LiveGuideGridModel(windowStart: localMidnight, windowEnd: end,
+            timeZone: timeZone, rows: [LiveGuideGridRow(id: "dst", title: "DST",
+                programmes: [programme(row: 0, item: 0, start: localMidnight,
+                    duration: 4 * 3600)])])
+        let view = LiveGuideGridView(frame: NSRect(x: 0, y: 0, width: 800, height: 300))
+        view.apply(model, now: localMidnight.addingTimeInterval(3 * 3600))
+        XCTAssertEqual(try XCTUnwrap(view.debugNowLineX),
+                       3 * LiveGuideGridView.pointsPerHour, accuracy: 0.001)
+    }
+
+    func testGridModelRejectsUnboundedOrDuplicateFixtureData() throws {
+        XCTAssertThrowsError(try fixture(rows: 49, programmesPerRow: 1))
+        let value = programme(row: 0, item: 0, start: start, duration: 1_800)
+        XCTAssertThrowsError(try LiveGuideGridModel(windowStart: start,
+            windowEnd: start.addingTimeInterval(12 * 3600), timeZone: .current,
+            rows: [LiveGuideGridRow(id: "x", title: "X", programmes: [value, value])]))
+    }
+
+    private func fixture(rows: Int, programmesPerRow: Int) throws -> LiveGuideGridModel {
+        let values = (0..<rows).map { row in
+            LiveGuideGridRow(id: "channel-\(row)", title: "Channel \(row)",
+                subtitle: "Group \(row % 4)", programmes: (0..<programmesPerRow).map { item in
+                    programme(row: row, item: item,
+                        start: start.addingTimeInterval(Double(item) * 30 * 60), duration: 30 * 60)
+                })
+        }
+        return try LiveGuideGridModel(windowStart: start,
+            windowEnd: start.addingTimeInterval(12 * 3600), timeZone: .current, rows: values)
+    }
+
+    private func programme(row: Int, item: Int, start: Date,
+                           duration: TimeInterval) -> LiveGuideGridProgramme {
+        let record = EPGWindowProgramme(id: EPGProgrammeRecordIdentity(kind: .xmltv,
+            resourceIdentity: "fixture", sourceEpoch: "epoch", dataVersion: "generation",
+            ordinal: row * EPGGuideLimits.maximumProgrammesPerRow + item),
+            programme: EPGProgramme(channelID: "channel-\(row)", title: "Programme \(row)-\(item)",
+                start: start, end: start.addingTimeInterval(duration)))
+        return LiveGuideGridProgramme(record)
+    }
+}

@@ -4,8 +4,8 @@
 
 ## 当前阶段
 
-10A-A、10A-B 已完成并通过；下一步为 10A-C 纯 fixture AppKit 网格。C 开始前没有把 Repository
-接入生产 UI。
+10A-A、10A-B、10A-C 已完成并通过；下一步为 10A-D 生产数据接线。C 全程没有读取 Repository，
+也没有增加生产入口。
 
 ## A：基线、分支、合同与测量协议
 
@@ -65,3 +65,27 @@ Now/Next 与 Guide 并发 flight 合并、稳定 ordinal 和缓存版本复用�
 B 阶段全量验收：OKVideoKit 966 项执行，其中 20 项跳过，0 失败；`git diff --check` 通过。
 
 结论：PASS，可进入 10A-C。
+
+## C：纯 fixture AppKit 网格
+
+- 新增 `LiveGuideGridView`，节目块由 `NSCollectionView` 和自定义 layout 虚拟化；layout 只为当前
+  可见矩形生成 attributes，不为屏幕外节目创建 view。
+- 顶部时间轴和左侧频道列是独立轻量 AppKit view，单向读取同一个内容 clip view 的滚动坐标。
+  横向滚动只改变时间轴绘制偏移，纵向滚动只改变频道列绘制偏移，没有互相回写 scroll position 的
+  反馈循环。
+- 网格使用真实 `Date` 时间差定位节目和当前时间线；民用时钟只用于标签。DST 秋季回拨时，重复的
+  `01:00`/`01:30` 自动附带各自 GMT offset，因此位置与文案都不含歧义。
+- 节目 item 提供频道、节目名和时间范围的 VoiceOver 内容；方向键以相邻节目或相邻频道的最近时间
+  中点移动焦点，Return/Space 使用同一 activation 路径。配色全部使用动态 AppKit system colors。
+- fixture 模型继续执行 48 行、256/行、6144 全局和稳定 programme identity 限制；时间标签缓存硬限
+  64。调试指标分别记录当前可见 view、跨滚动实际出现过的 view、layout attribute 和标签缓存数量。
+- 在 1,152 个节目 fixture 上连续跨四段双轴滚动，固定标题 frame 保持不变，实际 item 实例和每帧
+  layout attributes 均显著小于总节目数；resize 后固定区和内容区重新布局正确。暗色外观和 2× layer
+  scale 使用同一几何与复用路径。
+
+C 阶段定向验收：`LiveGuideGridTests` 4 项执行，0 跳过，0 失败。macOS App Debug 完整构建成功。
+
+C 阶段全量验收：macOS App 899 项执行，其中 8 项跳过，0 失败；仅额外排除既有的真实 Android
+退出集成测试 `testAndroidRealApplicationTerminationIsBoundedAndClean`。`git diff --check` 通过。
+
+结论：PASS，可进入 10A-D。
