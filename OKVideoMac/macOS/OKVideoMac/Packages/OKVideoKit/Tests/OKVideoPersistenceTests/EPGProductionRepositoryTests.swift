@@ -165,27 +165,24 @@ final class EPGProductionRepositoryTests: XCTestCase {
 
     func testLegalEmptyPublishesButMalformedRefreshIsFailureAndKeepsEmptyActive() async throws {
         let directory = cacheDirectory()
-        let fullServer = try EPGImportTestServer(xml: fixture(), gzip: Data())
-        let emptyServer = try EPGImportTestServer(xml: Data("<tv/>".utf8), gzip: Data())
-        let malformedServer = try EPGImportTestServer(
-            xml: Data("<tv><programme channel='a'>".utf8), gzip: Data())
-        defer { fullServer.close(); emptyServer.close(); malformedServer.close() }
+        let server = try EPGImportTestServer(xml: fixture(), gzip: Data())
+        defer { server.close() }
         let repository = EPGProductionRepository(cacheDirectory: directory)
         let key = EPGRequestKey(source: .imported(UUID()),
             revision: String(repeating: "e", count: 64), resource: "xmltv")
 
         let full = try await repository.refreshXMLTV(
-            key: key, url: fullServer.url("fixture.xml"), force: true)
+            key: key, url: server.url("fixture.xml"), force: true)
         XCTAssertEqual(full.summary?.programmeCount, 2)
 
         let empty = try await repository.refreshXMLTV(
-            key: key, url: emptyServer.url("fixture.xml"), force: true)
+            key: key, url: server.url("empty"), force: true)
         XCTAssertEqual(empty.availability, .empty)
         XCTAssertEqual(empty.summary?.programmeCount, 0)
         let emptyVersion = try XCTUnwrap(empty.summary?.dataVersion)
 
         let failed = try await repository.refreshXMLTV(
-            key: key, url: malformedServer.url("fixture.xml"), force: true)
+            key: key, url: server.url("invalid"), force: true)
         XCTAssertEqual(failed.availability, .stale)
         XCTAssertEqual(failed.consecutiveFailures, 1)
         XCTAssertEqual(failed.summary?.programmeCount, 0)

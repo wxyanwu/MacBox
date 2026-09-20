@@ -28259,9 +28259,7 @@ private final class LiveGuideDisplayProbe: @unchecked Sendable {
         if period.timeValue > 0, period.timeScale > 0 {
             nominalRefreshHz = Double(period.timeScale) / Double(period.timeValue)
         }
-        lock.lock()
-        accepting = true
-        lock.unlock()
+        lock.withLock { accepting = true }
         let callback: CVDisplayLinkOutputCallback = { _, _, outputTime, _, _, context in
             guard let context else { return kCVReturnError }
             let probe = Unmanaged<LiveGuideDisplayProbe>.fromOpaque(context)
@@ -28374,9 +28372,7 @@ private final class LiveGuideFrameRunner: @unchecked Sendable {
             throw NSError(domain: "EPG10A.FrameRunner", code: Int(callbackStatus))
         }
         link = created
-        lock.lock()
-        accepting = true
-        lock.unlock()
+        lock.withLock { accepting = true }
         let startStatus = CVDisplayLinkStart(created)
         guard startStatus == kCVReturnSuccess else {
             link = nil
@@ -28389,22 +28385,24 @@ private final class LiveGuideFrameRunner: @unchecked Sendable {
 
     private func enqueue(hostTime: UInt64) {
         let scheduled = DispatchTime.now().uptimeNanoseconds
-        lock.lock()
-        let shouldAccept = accepting && !mainFramePending
-        if shouldAccept { mainFramePending = true }
-        lock.unlock()
+        let shouldAccept = lock.withLock {
+            let value = accepting && !mainFramePending
+            if value { mainFramePending = true }
+            return value
+        }
         guard shouldAccept else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             let executed = DispatchTime.now().uptimeNanoseconds
-            self.lock.lock()
-            self.mainFramePending = false
-            let shouldRun = self.accepting
-            if shouldRun {
-                self.displayHostTimes.append(hostTime)
-                self.dispatchDelays.append(Double(executed - scheduled) / 1_000_000)
+            let shouldRun = self.lock.withLock {
+                self.mainFramePending = false
+                let value = self.accepting
+                if value {
+                    self.displayHostTimes.append(hostTime)
+                    self.dispatchDelays.append(Double(executed - scheduled) / 1_000_000)
+                }
+                return value
             }
-            self.lock.unlock()
             guard shouldRun else { return }
             MainActor.assumeIsolated { self.tick(executedAt: executed) }
         }
@@ -28428,11 +28426,10 @@ private final class LiveGuideFrameRunner: @unchecked Sendable {
         drawDurations.append(duration)
         step += 1
         guard step == 180 else { return }
-        lock.lock()
-        accepting = false
-        let displayHostTimes = self.displayHostTimes
-        let dispatchDelays = self.dispatchDelays
-        lock.unlock()
+        let (displayHostTimes, dispatchDelays) = lock.withLock {
+            accepting = false
+            return (self.displayHostTimes, self.dispatchDelays)
+        }
         if let link { CVDisplayLinkStop(link) }
         link = nil
         let displayIntervals = zip(displayHostTimes.dropFirst(), displayHostTimes).map {
@@ -28790,7 +28787,6 @@ final class LiveGuidePlaybackAcceptanceTests: XCTestCase {
                                                 withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: cacheDirectory) }
         let sourceID = LiveSourceID.imported(UUID())
-        let source = EPGSourceKey(sourceID)
         let revision = String(repeating: "b", count: 64)
         let key = EPGRequestKey(source: sourceID, revision: revision, resource: "xmltv")
         let repository = EPGProductionRepository(cacheDirectory: cacheDirectory)
