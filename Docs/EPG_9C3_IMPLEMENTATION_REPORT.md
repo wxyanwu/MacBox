@@ -108,8 +108,8 @@ Android lint 在构建中输出 Kotlin 2.2 元数据与分析器预期 2.0 的�
 
 版本 **0.7.0（102）**，source SHA256 `1fdd1c4495822d813f1bd30d73fea2930b84504a858b9682aa3fa418cf88100b`。完整 `package-local-acceptance.sh → package-app.sh` 返回成功；Release 构建、bundle、SBOM、敏感信息扫描、29 Mach-O 签名、DMG 与 ZIP 解包验证全部通过。安装副本与打包 App 逐文件字节一致，再次通过 bundle 和签名校验。
 
-- 桌面入口：`/Users/linyao/Desktop/OKVideoMac.app`，非隐藏 symlink。
-- 安装目录：`/Users/linyao/Applications/OKVideoMac-Local/1fdd1c4495822d813f1bd30d73fea2930b84504a858b9682aa3fa418cf88100b/OKVideoMac.app`；旧安装目录保留，未强制退出正在运行的旧 App。
+- 桌面入口：`~/Desktop/OKVideoMac.app`，非隐藏 symlink。
+- 安装目录：`~/Applications/OKVideoMac-Local/1fdd1c4495822d813f1bd30d73fea2930b84504a858b9682aa3fa418cf88100b/OKVideoMac.app`；旧安装目录保留，未强制退出正在运行的旧 App。
 - `/private/tmp/OKVideoMac-Acceptance.KhIY6T/Artifacts/OKVideoMac-0.7.0.dmg`，SHA256 `fc8da59e80b1288ac5447d1601d9141604a37a08eb88f707fe37dafffc67247d`。
 - `/private/tmp/OKVideoMac-Acceptance.KhIY6T/Artifacts/OKVideoMac-0.7.0-macOS-arm64.zip`，SHA256 `21ef10ddd5605363668a21237fa360cbfbb2b9838d0a7637e0ea358c989cdba6`。
 

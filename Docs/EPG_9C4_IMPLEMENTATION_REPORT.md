@@ -189,8 +189,8 @@ E 阶段门禁结果：
 - 验证产物位于 `/private/tmp/OKVideoMac-Acceptance.UJsHxC/Artifacts/`：
   `OKVideoMac.app`、`OKVideoMac-0.7.0.dmg`、`OKVideoMac-0.7.0-macOS-arm64.zip` 和 `SourceRelease/`。
 - 只有上述门禁全部通过后才安装桌面副本。真实安装位于
-  `/Users/linyao/Applications/OKVideoMac-Local/a24146eacae003e5d09161489010084893d84159cef927f237d9a3190beaa3c0/OKVideoMac.app`；
-  `/Users/linyao/Desktop/OKVideoMac.app` 是指向它的非隐藏 symlink。安装前 staging、安装目录和桌面入口
+  `~/Applications/OKVideoMac-Local/a24146eacae003e5d09161489010084893d84159cef927f237d9a3190beaa3c0/OKVideoMac.app`；
+  `~/Desktop/OKVideoMac.app` 是指向它的非隐藏 symlink。安装前 staging、安装目录和桌面入口
   均重新通过 bundle/SBOM/签名及逐文件比较。旧桌面 symlink 保存在 `/private/tmp`，没有删除旧安装。
 - 第一次桌面安装脚本因把本机 `chflags` 写成 `/bin/chflags` 在替换前停止；当时原桌面入口未移动。
   随后确认本机路径为 `/usr/bin/chflags`，沿既有版本化安装布局完成安全替换和最终复验。

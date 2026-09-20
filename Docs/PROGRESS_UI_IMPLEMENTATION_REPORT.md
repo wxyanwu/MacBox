@@ -6,7 +6,7 @@
 
 Branch Guard：PASS。
 
-- Repository / worktree：`/Users/linyao/Documents/ok影视 mac 版本`。
+- Repository / worktree：当前仓库根目录。
 - 原分支 `main`；经用户单独批准，从原 HEAD 原地执行一次 `git switch -c codex/epg-7a1-progress-ui`。
 - 开发分支：`codex/epg-7a1-progress-ui`。
 - 起始/结束 HEAD：`14dd3a584f49bdb67a5b7edd25c9980f77f480e2`；分支纠正后 HEAD 未改变，main ref 仍为同一原提交。

@@ -10,7 +10,7 @@
 
 ## 实际 App 的分段耗时
 
-运行包：`/Users/linyao/Applications/OKVideoMac-Local/25155f52fb8c416f3245c9a829a93175dec9857b/OKVideoMac.app`，CFBundleVersion 为 101，进程 3857。通过 Computer Use 读取当前页面，确认来源为 mock、三个频道与用户截图一致。没有改变来源、线路或播放器设置。
+运行包：`~/Applications/OKVideoMac-Local/25155f52fb8c416f3245c9a829a93175dec9857b/OKVideoMac.app`，CFBundleVersion 为 101，进程 3857。通过 Computer Use 读取当前页面，确认来源为 mock、三个频道与用户截图一致。没有改变来源、线路或播放器设置。
 
 来自已有 MPV-PERF 日志，单位为秒：
 
@@ -38,9 +38,9 @@
 
 “TS”是请求线路的声明格式，不能当作响应内容的实测格式。不能为了快而按 `.ts` 后缀强制 MPEG-TS 解复用器。
 
-当前主要入口是 [AppState.swift:13339](</Users/linyao/Documents/ok影视 mac 版本/OKVideoMac/macOS/OKVideoMac/App/AppState.swift:13339>)：必须满足 `skippedCount > 0`、Native Xtream、声明 `format == "m3u8"` 才准备 HLS 精简列表。
+当前主要入口是 [AppState.swift:13339](../OKVideoMac/macOS/OKVideoMac/App/AppState.swift#L13339)：必须满足 `skippedCount > 0`、Native Xtream、声明 `format == "m3u8"` 才准备 HLS 精简列表。
 
-[HLSStartupSelection.swift:48](</Users/linyao/Documents/ok影视 mac 版本/OKVideoMac/macOS/OKVideoMac/Packages/OKVideoKit/Sources/OKVideoCore/Playback/HLSStartupSelection.swift:48>) 又要求至少 12 个变体，并限制 H.264/AAC、最高 1080p/60、有 CODECS 和 RESOLUTION。它是有意保守的失败恢复方案，不是通用首播优化。
+[HLSStartupSelection.swift:48](../OKVideoMac/macOS/OKVideoMac/Packages/OKVideoKit/Sources/OKVideoCore/Playback/HLSStartupSelection.swift#L48) 又要求至少 12 个变体，并限制 H.264/AAC、最高 1080p/60、有 CODECS 和 RESOLUTION。它是有意保守的失败恢复方案，不是通用首播优化。
 
 本机 mpv 0.41.0 源码中，HLS 的 `no_stream` 路径会交由 FFmpeg 重新打开媒体入口；随后 FFmpeg 的 `hls_read_header` 先遍历各子播放列表，再为各列表打开媒体解复用器。顶层 `avformat_find_stream_info` 和最终轨道选择发生在其后。[mpv 0.41.0 源码](https://github.com/mpv-player/mpv/blob/v0.41.0/demux/demux_lavf.c)，[本机 FFmpeg 源码](/Volumes/XcodeDev/OKVideoMacBuild/Source/MediaDeps/ffmpeg-7.1.4/libavformat/hls.c:1993)。运行期下述请求日志直接证实了遍历行为。
 
