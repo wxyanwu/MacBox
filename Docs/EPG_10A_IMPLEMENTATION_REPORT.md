@@ -4,8 +4,9 @@
 
 ## 当前阶段
 
-10A-A 至 10A-F 已完成并通过；下一步为 10A-G 全量回归、Release 打包和桌面安装验证。
-C 全程没有读取 Repository，也没有增加生产入口；生产数据接线从 D 开始。
+10A-A 至 10A-G 已完成并通过，10A 正式封板。C 全程没有读取 Repository，也没有增加生产入口；
+生产数据接线从 D 开始。后续阶段必须以本报告冻结的有限查询、状态、虚拟化与播放隔离合同为基础，
+不得重新引入全量 Guide 常驻内存路径。
 
 ## A：基线、分支、合同与测量协议
 
@@ -200,3 +201,40 @@ F 阶段定向验收：Release AppKit/App 资源进程 3 次，Store 查询矩�
 
 结论：Release 自动化/资源门禁 PASS，公开冻结来源重放 PASS，私有真实来源未验证；
 可进入 10A-G。
+
+## G：全量回归、Release 打包与桌面交付
+
+- 首次全量回归发现一项测试基础设施竞态：
+  `EPGProductionRepositoryTests.testLegalEmptyPublishesButMalformedRefreshIsFailureAndKeepsEmptyActive`
+  为第三个 Python loopback server 等待端口文件时偶发失败。该用例改为复用同一个确定性 server 的
+  `fixture.xml`、`empty` 与 `invalid` endpoint；定向连续执行 10 次均通过。修复只改变测试 server
+  生命周期，不改变 EPG 生产代码。
+- 最终 OKVideoKit 全量测试为 **974 项执行，其中 21 项跳过，0 失败**。
+- 最终 macOS App 全量测试为 **908 项执行，其中 10 项跳过，0 失败**；只额外排除必须连接真实
+  Android 设备的既有集成测试
+  `OKVideoMacTests/OKVideoMacTests/testAndroidRealApplicationTerminationIsBoundedAndClean`。
+- 第一轮冻结打包在源码发布包敏感信息扫描处被正确拒绝：4 份历史报告包含本机用户目录绝对路径。
+  当时没有替换桌面 App。报告改为 `~` 或仓库相对路径后提交为 `46dad2d`，再次确认 tracked Docs
+  中没有该用户目录字面量，再从新提交重新冻结并执行完整打包。
+- 最终 local-acceptance 源码快照 SHA-256 为
+  `dd202acabf10e14373eee035dcca00e81686e68568219c523e10913359e8f4ad`。Android Release 与 macOS
+  Release 构建成功；源码与最终产物敏感信息扫描均为 CLEAN；Bundle、29 个 Mach-O、170 个锁定
+  Maven 模块 SBOM、ad-hoc Hardened Runtime 签名、DMG 挂载与 ZIP 解包验证全部通过。
+- 交付版本为 **0.7.0（102）**。最终产物位于
+  `/private/tmp/OKVideoMac-Acceptance.BYkaCb/Artifacts/`：
+  `OKVideoMac.app`、`OKVideoMac-0.7.0.dmg`、`OKVideoMac-0.7.0-macOS-arm64.zip` 与
+  `SourceRelease/`。DMG SHA-256 为
+  `1015357452d684636f723c61bd2d07002db1cddf85c387e5a75280f90455fe24`；ZIP SHA-256 为
+  `bcb99afb354df4f92061381b7b38c6aa1ffa24234ffb6206f01209e05187f746`。
+- 只有上述门禁全部通过后才安装桌面副本。安装位置为
+  `~/Applications/OKVideoMac-Local/dd202acabf10e14373eee035dcca00e81686e68568219c523e10913359e8f4ad/OKVideoMac.app`；
+  `~/Desktop/OKVideoMac.app` 是指向它的非隐藏 symlink。staging、版本化安装目录与桌面入口分别
+  重新通过 Bundle/SBOM、29 个 Mach-O 签名及逐文件字节比较；旧桌面入口保存在
+  `/private/tmp/OKVideoMac.app.previous-dd202ac`。
+- 本包是本地 ad-hoc 验收包，未公证，Gatekeeper assessment 按合同记为不适用。没有创建 Tag、
+  push 或公开发布，也没有修改 Keychain、EPG 数据库或用户配置。最终 G 报告在已验证冻结快照打包后
+  写入，产品编译输入没有再变化。
+
+G 阶段结论：PASS。10A 的有限需求协调、XMLTV generation 一致性、Xtream per-row token、
+生产 UI、虚拟化网格、故障隔离、Release 资源门禁和桌面交付均已闭环。私有 TVBox/CatPaw/Xtream
+真实来源样本仍明确记为未验证，不把公开 fixture 或自动化结果解释成私有来源 PASS。
