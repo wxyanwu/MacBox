@@ -9,6 +9,8 @@ public enum EPGProductionServiceError: Error, Equatable, Sendable {
     case cancelled
     case busy
     case invalidRequest
+    case snapshotChanged
+    case queryBudgetExceeded
     case unavailable
     case resultTooLarge
 }
@@ -194,9 +196,15 @@ public actor EPGProductionService {
             }, onCancel: { cancellation.cancel() })
         } catch { throw map(error) }
         let token = resultToken(result.snapshotID, demandRevision: demandRevision)
-        let programmes = result.programmes.compactMap(programme)
+        let records = result.programmes.compactMap { value -> EPGWindowProgramme? in
+            guard let programme = programme(value) else { return nil }
+            return EPGWindowProgramme(id: EPGProgrammeRecordIdentity(
+                kind: .xmltv, resourceIdentity: token.resourceIdentity,
+                sourceEpoch: token.sourceEpoch, dataVersion: token.dataVersion,
+                ordinal: value.ordinal), programme: programme)
+        }
         let page = EPGWindowPage(token: token, match: result.match,
-                                 programmes: programmes, hasMore: result.nextCursor != nil)
+                                 records: records, hasMore: result.nextCursor != nil)
         return EPGProductionWindowResult(page: page,
             nextCursor: result.nextCursor.map { EPGProductionWindowCursor(token: token, storage: $0) })
     }
@@ -349,9 +357,11 @@ public actor EPGProductionService {
             case .noActiveGeneration: return .noActiveData
             case .cancelled: return .cancelled
             case .queueFull: return .busy
-            case .invalidRequest, .invalidCursor, .snapshotChanged: return .invalidRequest
+            case .invalidRequest, .invalidCursor: return .invalidRequest
+            case .snapshotChanged: return .snapshotChanged
             case .resultTooLarge: return .resultTooLarge
-            case .queryBudgetExceeded, .storeUnavailable, .sqlite: return .unavailable
+            case .queryBudgetExceeded: return .queryBudgetExceeded
+            case .storeUnavailable, .sqlite: return .unavailable
             }
         }
         return .unavailable

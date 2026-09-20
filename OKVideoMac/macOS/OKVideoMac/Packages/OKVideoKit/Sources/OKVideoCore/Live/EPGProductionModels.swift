@@ -95,17 +95,68 @@ public struct EPGRepositoryStatus: Equatable, Sendable {
     }
 }
 
-public struct EPGWindowPage: Sendable {
+public struct EPGWindowPage: Equatable, Sendable {
     public let token: EPGResultToken
     public let match: EPGChannelMatch
     public let programmes: [EPGProgramme]
+    /// Stable only inside the token's resource generation. Unlike
+    /// `EPGProgramme.id`, this preserves duplicate XMLTV rows.
+    public let records: [EPGWindowProgramme]
     public let hasMore: Bool
 
     public init(token: EPGResultToken, match: EPGChannelMatch,
-                programmes: [EPGProgramme], hasMore: Bool) {
+                records: [EPGWindowProgramme], hasMore: Bool) {
         self.token = token
         self.match = match
-        self.programmes = programmes
+        self.records = records
+        programmes = records.map(\.programme)
         self.hasMore = hasMore
     }
+}
+
+/// Window projection of the same bounded Xtream short-EPG cache used by
+/// Now/Next. It never causes a second fetch for an already cached or in-flight
+/// channel request.
+public struct EPGXtreamWindowResult: Equatable, Sendable {
+    public let page: EPGWindowPage
+    public let availability: EPGAvailability
+
+    public init(page: EPGWindowPage, availability: EPGAvailability) {
+        self.page = page
+        self.availability = availability
+    }
+}
+
+public struct EPGProgrammeRecordIdentity: Equatable, Hashable, Sendable {
+    public enum Kind: String, Sendable { case xmltv, xtream }
+
+    public let kind: Kind
+    public let resourceIdentity: String
+    public let sourceEpoch: String
+    public let dataVersion: String
+    public let ordinal: Int
+
+    public init(kind: Kind, resourceIdentity: String, sourceEpoch: String,
+                dataVersion: String, ordinal: Int) {
+        self.kind = kind
+        self.resourceIdentity = resourceIdentity
+        self.sourceEpoch = sourceEpoch
+        self.dataVersion = dataVersion
+        self.ordinal = ordinal
+    }
+}
+
+public struct EPGWindowProgramme: Equatable, Identifiable, Sendable {
+    public let id: EPGProgrammeRecordIdentity
+    public let programme: EPGProgramme
+
+    public init(id: EPGProgrammeRecordIdentity, programme: EPGProgramme) {
+        self.id = id
+        self.programme = programme
+    }
+
+    public var channelID: String { programme.channelID }
+    public var title: String { programme.title }
+    public var start: Date { programme.start }
+    public var end: Date { programme.end }
 }

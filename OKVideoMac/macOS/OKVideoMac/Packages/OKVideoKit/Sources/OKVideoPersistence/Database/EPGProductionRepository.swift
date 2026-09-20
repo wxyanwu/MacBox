@@ -128,7 +128,7 @@ public actor EPGProductionRepository {
         let current = await status(for: key)
         guard current.summary?.dataVersion == value.page.token.dataVersion,
               current.summary?.sourceEpoch == value.page.token.sourceEpoch else {
-            throw EPGProductionServiceError.invalidRequest
+            throw EPGProductionServiceError.snapshotChanged
         }
         return value
     }
@@ -142,40 +142,36 @@ public actor EPGProductionRepository {
         let cacheKey = try xtreamKey(key: key, accountIdentity: accountIdentity,
                                      serverIdentity: serverIdentity,
                                      configurationRevision: configurationRevision)
-        if !force, var cached = xtreamEntries[cacheKey], cached.expiresAt > now() {
-            cached.accessedAt = now(); xtreamEntries[cacheKey] = cached
-            return xtreamBatch(cached, at: date, demandRevision: demandRevision)
+        let entry = try await resolveXtreamEntry(cacheKey: cacheKey, requestKey: key,
+                                                 force: force, fetch: fetch)
+        return xtreamBatch(entry, at: date, demandRevision: demandRevision)
+    }
+
+    public func loadXtreamWindow(key: EPGRequestKey, accountIdentity: String,
+                                 serverIdentity: String, configurationRevision: String,
+                                 from start: Date, to end: Date, demandRevision: UUID,
+                                 force: Bool = false,
+                                 fetch: @escaping @Sendable () async throws -> EPGPayload) async throws -> EPGXtreamWindowResult {
+        guard !closed else { throw EPGProductionServiceError.closed }
+        guard !paused else { throw EPGProductionServiceError.paused }
+        guard start < end, end.timeIntervalSince(start) <= 12 * 60 * 60 else {
+            throw EPGProductionServiceError.invalidRequest
         }
-        if let flight = xtreamFlights[cacheKey] {
-            return try xtreamBatch(await flight.task.value, at: date, demandRevision: demandRevision)
+        let cacheKey = try xtreamKey(key: key, accountIdentity: accountIdentity,
+                                     serverIdentity: serverIdentity,
+                                     configurationRevision: configurationRevision)
+        let entry = try await resolveXtreamEntry(cacheKey: cacheKey, requestKey: key,
+                                                 force: force, fetch: fetch)
+        let token = xtreamToken(entry, demandRevision: demandRevision)
+        let records: [EPGWindowProgramme] = entry.programmes.enumerated().compactMap { ordinal, programme in
+            guard programme.start < end, programme.end > start else { return nil }
+            return EPGWindowProgramme(id: EPGProgrammeRecordIdentity(kind: .xtream,
+                resourceIdentity: token.resourceIdentity, sourceEpoch: token.sourceEpoch,
+                dataVersion: token.dataVersion, ordinal: ordinal), programme: programme)
         }
-        let id = UUID(), requestKey = key, clock = now
-        let task = Task<XtreamEntry, Error> {
-            let payload = try await fetch()
-            try Task.checkCancellation()
-            return try Self.xtreamEntry(payload: payload, requestKey: requestKey,
-                                        streamID: cacheKey.streamID, now: clock())
-        }
-        xtreamFlights[cacheKey] = XtreamFlight(id: id, task: task)
-        do {
-            let value = try await task.value
-            guard xtreamFlights[cacheKey]?.id == id, !closed, !paused else {
-                throw EPGProductionServiceError.cancelled
-            }
-            xtreamFlights[cacheKey] = nil
-            rememberXtream(value, for: cacheKey)
-            return xtreamBatch(value, at: date, demandRevision: demandRevision)
-        } catch {
-            if xtreamFlights[cacheKey]?.id == id { xtreamFlights[cacheKey] = nil }
-            if !Task.isCancelled, var old = xtreamEntries[cacheKey] {
-                old.availability = .stale
-                old.accessedAt = now()
-                xtreamEntries[cacheKey] = old
-                return xtreamBatch(old, at: date, demandRevision: demandRevision)
-            }
-            if error is CancellationError { throw EPGProductionServiceError.cancelled }
-            throw EPGProductionServiceError.unavailable
-        }
+        let match = EPGChannelMatch(kind: .exact, channelID: entry.key.resource)
+        return EPGXtreamWindowResult(page: EPGWindowPage(token: token, match: match,
+            records: records, hasMore: false), availability: xtreamAvailability(entry))
     }
 
     public func invalidate(_ source: EPGSourceKey, removePersistentCache: Bool = true) async {
@@ -315,20 +311,76 @@ public actor EPGProductionRepository {
         }
     }
 
+    private func resolveXtreamEntry(cacheKey: XtreamKey, requestKey: EPGRequestKey,
+                                    force: Bool,
+                                    fetch: @escaping @Sendable () async throws -> EPGPayload) async throws -> XtreamEntry {
+        if !force, var cached = xtreamEntries[cacheKey], cached.expiresAt > now() {
+            cached.accessedAt = now()
+            xtreamEntries[cacheKey] = cached
+            return cached
+        }
+        if let flight = xtreamFlights[cacheKey] {
+            do {
+                return try await flight.task.value
+            } catch {
+                return try staleXtreamFallback(cacheKey: cacheKey, error: error)
+            }
+        }
+        let id = UUID(), clock = now
+        let task = Task<XtreamEntry, Error> {
+            let payload = try await fetch()
+            try Task.checkCancellation()
+            return try Self.xtreamEntry(payload: payload, requestKey: requestKey,
+                                        streamID: cacheKey.streamID, now: clock())
+        }
+        xtreamFlights[cacheKey] = XtreamFlight(id: id, task: task)
+        do {
+            let value = try await task.value
+            guard xtreamFlights[cacheKey]?.id == id, !closed, !paused else {
+                throw EPGProductionServiceError.cancelled
+            }
+            xtreamFlights[cacheKey] = nil
+            rememberXtream(value, for: cacheKey)
+            return value
+        } catch {
+            if xtreamFlights[cacheKey]?.id == id { xtreamFlights[cacheKey] = nil }
+            return try staleXtreamFallback(cacheKey: cacheKey, error: error)
+        }
+    }
+
+    private func staleXtreamFallback(cacheKey: XtreamKey, error: Error) throws -> XtreamEntry {
+        if !Task.isCancelled, var old = xtreamEntries[cacheKey] {
+            old.availability = .stale
+            old.accessedAt = now()
+            xtreamEntries[cacheKey] = old
+            return old
+        }
+        if error is CancellationError || error as? EPGProductionServiceError == .cancelled {
+            throw EPGProductionServiceError.cancelled
+        }
+        throw EPGProductionServiceError.unavailable
+    }
+
     private func xtreamBatch(_ entry: XtreamEntry, at date: Date,
                              demandRevision: UUID) -> EPGNowNextBatch {
         let current = entry.programmes.first { $0.start <= date && date < $0.end }
         let next = entry.programmes.first { $0.start > date }
-        let resource = "xtream:" + Self.digest(entry.key.revision + "\u{0}" + entry.key.resource)
-        let token = EPGResultToken(serviceIncarnation: incarnation,
-            resourceIdentity: resource, sourceEpoch: entry.key.revision,
-            dataVersion: entry.version, demandRevision: demandRevision)
+        let token = xtreamToken(entry, demandRevision: demandRevision)
         let match = EPGChannelMatch(kind: .exact, channelID: entry.key.resource)
-        let availability: EPGAvailability = entry.expiresAt <= now() && entry.availability == .fresh
-            ? .stale : entry.availability
         return EPGNowNextBatch(token: token,
             items: [EPGNowNextItem(match: match, current: current, next: next)],
-            availability: availability)
+            availability: xtreamAvailability(entry))
+    }
+
+    private func xtreamToken(_ entry: XtreamEntry, demandRevision: UUID) -> EPGResultToken {
+        let resource = "xtream:" + Self.digest(entry.key.revision + "\u{0}" + entry.key.resource)
+        return EPGResultToken(serviceIncarnation: incarnation,
+            resourceIdentity: resource, sourceEpoch: entry.key.revision,
+            dataVersion: entry.version, demandRevision: demandRevision)
+    }
+
+    private func xtreamAvailability(_ entry: XtreamEntry) -> EPGAvailability {
+        entry.expiresAt <= now() && entry.availability == .fresh ? .stale : entry.availability
     }
 
     private static func digest(_ value: String) -> String {

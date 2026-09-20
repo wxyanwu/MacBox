@@ -49,6 +49,8 @@ final class EPGProductionServiceTests: XCTestCase {
             to: Date(timeIntervalSince1970: 1_789_948_799), limit: 1,
             demandRevision: demand)
         XCTAssertEqual(window.page.programmes.map(\.title), ["T0"])
+        XCTAssertEqual(window.page.records.map(\.id.ordinal), [0])
+        XCTAssertEqual(window.page.records.first?.id.dataVersion, summary.dataVersion)
         XCTAssertTrue(window.page.hasMore)
         XCTAssertNotNil(window.nextCursor)
 

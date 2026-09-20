@@ -223,7 +223,7 @@ final class EPGImportResourceTests: XCTestCase {
                     windowDurations.append(Double(DispatchTime.now().uptimeNanoseconds - began) / 1e6)
                 } catch {
                     if Task.isCancelled { break }
-                    if error as? EPGProductionServiceError == .invalidRequest {
+                    if [.invalidRequest, .snapshotChanged].contains(error as? EPGProductionServiceError) {
                         invalidated += 1
                         await Task.yield()
                         continue

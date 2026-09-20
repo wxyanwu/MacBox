@@ -4,7 +4,8 @@
 
 ## 当前阶段
 
-10A-A 已完成并通过；下一步为 10A-B 纯数据模型、协调器和有限接口补全。B 通过前不开发 AppKit 网格。
+10A-A、10A-B 已完成并通过；下一步为 10A-C 纯 fixture AppKit 网格。C 开始前没有把 Repository
+接入生产 UI。
 
 ## A：基线、分支、合同与测量协议
 
@@ -35,3 +36,32 @@ A 阶段验证：两个冻结快照均通过逐文件哈希恢复验证；分支
 大型本地证据、Demo 媒体或 10A 文件；`git diff --check` 通过。
 
 结论：PASS，可进入 10A-B。
+
+## B：有限需求模型、协调器和查询投影
+
+- 新增 `EPGGuideDemand`，一次需求只允许 1～48 个唯一频道、1～2 个相邻且单段不超过 12 小时的
+  时间切片，并携带 source、revision、capability 和唯一 `demandRevision`。
+- 新增纯 `EPGGuideWorkCoordinator`。它保留全部 desired rows，同时把 runnable 限为 8、running
+  限为 4；优先级依次为焦点、可见且正在播放、可见、预取，并保证所有行的第一页先于某一行继续翻页。
+- XMLTV 查询按 2,162,688 bytes、Xtream 查询按 81,920 bytes 预留在途预算。正在运行的预留暂时
+  占满 8 MiB 时，等待行留在有界队列中；只有单个任务在没有其他 reservation 时仍不能进入，才记为
+  `.byteBudget`，避免把暂时背压误判为永久截断。
+- 冻结每页 64、每行 256、全局 6144 和 8 MiB 确定性 DTO 计费；达到任一上限后进入带原因的终态，
+  不重试、不延迟积压。旧 snapshot 只有在阻塞可见数据进入预算时才释放。
+- `EPGWindowPage` 增加 generation 内稳定的 `EPGWindowProgramme` 记录身份，保留原 programmes
+  投影兼容既有调用者。XMLTV 使用数据库 programme ordinal；Xtream 使用短缓存数组 ordinal。
+- Repository/Service 将 active generation 变化明确分类为 `snapshotChanged`，将查询时间预算耗尽明确
+  分类为 `queryBudgetExceeded`，不再折叠成普通无效请求。
+- 新增 `EPGGuideCoherenceGate`：XMLTV 同一需求的全部结果必须拥有完全相同 token；第一次换代冲突
+  允许整批重建一次，第二次冲突终止。Xtream 明确采用 per-row token，不伪造全局 generation。
+- 新增 `loadXtreamWindow`，与 Now/Next 共用同一个 channel-scoped flight 和 5 分钟短缓存。并发请求
+  只进行一次 fetch，Guide 投影不会另建第二份 payload 或第二个缓存版本。
+
+B 阶段定向验收：`EPGGuideCoreTests`、`EPGProductionRepositoryTests`、
+`EPGProductionServiceTests` 共 17 项执行，0 跳过，0 失败。覆盖 48 行最终可达、队列与并发峰值、分页
+公平性、旧 snapshot 释放、三类截断、重复记录拒绝、XMLTV 单次重试、Xtream per-row token、
+Now/Next 与 Guide 并发 flight 合并、稳定 ordinal 和缓存版本复用。
+
+B 阶段全量验收：OKVideoKit 966 项执行，其中 20 项跳过，0 失败；`git diff --check` 通过。
+
+结论：PASS，可进入 10A-C。

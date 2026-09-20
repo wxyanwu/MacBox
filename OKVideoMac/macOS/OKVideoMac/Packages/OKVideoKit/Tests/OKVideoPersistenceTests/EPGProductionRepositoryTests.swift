@@ -109,6 +109,60 @@ final class EPGProductionRepositoryTests: XCTestCase {
         try FileManager.default.removeItem(at: directory)
     }
 
+    func testXtreamGuideWindowSharesNowNextFlightAndStableCacheVersion() async throws {
+        let directory = cacheDirectory()
+        let clock = RepositoryClock(Date(timeIntervalSince1970: 100))
+        let repository = EPGProductionRepository(cacheDirectory: directory, now: { clock.value })
+        let source = LiveSourceID.xtream(UUID())
+        let key = EPGRequestKey(source: source, revision: "configuration-r1", resource: "7")
+        let counter = RepositoryCounter()
+        let payload = EPGPayload(guide: XMLTVGuide(channels: [], programmes: [
+            EPGProgramme(channelID: "7", title: "Before",
+                start: Date(timeIntervalSince1970: 0), end: Date(timeIntervalSince1970: 40)),
+            EPGProgramme(channelID: "7", title: "Current",
+                start: Date(timeIntervalSince1970: 50), end: Date(timeIntervalSince1970: 150)),
+            EPGProgramme(channelID: "7", title: "Next",
+                start: Date(timeIntervalSince1970: 160), end: Date(timeIntervalSince1970: 220))
+        ]))
+        let fetch: @Sendable () async throws -> EPGPayload = {
+            await counter.increment()
+            try await Task.sleep(nanoseconds: 30_000_000)
+            return payload
+        }
+        let demandRevision = UUID()
+        async let nowNext = repository.loadXtream(key: key, accountIdentity: "account",
+            serverIdentity: "server", configurationRevision: "r1", at: clock.value,
+            demandRevision: demandRevision, fetch: fetch)
+        async let guide = repository.loadXtreamWindow(key: key, accountIdentity: "account",
+            serverIdentity: "server", configurationRevision: "r1",
+            from: Date(timeIntervalSince1970: 45), to: Date(timeIntervalSince1970: 200),
+            demandRevision: demandRevision, fetch: fetch)
+        let (batch, window) = try await (nowNext, guide)
+
+        let coalescedFetchCount = await counter.value
+        XCTAssertEqual(coalescedFetchCount, 1)
+        XCTAssertEqual(batch.token, window.page.token)
+        XCTAssertEqual(window.page.programmes.map(\.title), ["Current", "Next"])
+        XCTAssertEqual(window.page.records.map(\.id.kind), [.xtream, .xtream])
+        XCTAssertEqual(window.page.records.map(\.id.ordinal), [1, 2])
+        XCTAssertFalse(window.page.hasMore)
+        XCTAssertEqual(window.availability, .fresh)
+
+        let cached = try await repository.loadXtreamWindow(key: key,
+            accountIdentity: "account", serverIdentity: "server",
+            configurationRevision: "r1", from: Date(timeIntervalSince1970: 500),
+            to: Date(timeIntervalSince1970: 600), demandRevision: demandRevision,
+            fetch: fetch)
+        let cachedFetchCount = await counter.value
+        XCTAssertEqual(cachedFetchCount, 1)
+        XCTAssertTrue(cached.page.records.isEmpty)
+        XCTAssertEqual(cached.page.token.dataVersion, batch.token.dataVersion)
+
+        let closed = await repository.close()
+        XCTAssertTrue(closed)
+        try FileManager.default.removeItem(at: directory)
+    }
+
     func testLegalEmptyPublishesButMalformedRefreshIsFailureAndKeepsEmptyActive() async throws {
         let directory = cacheDirectory()
         let fullServer = try EPGImportTestServer(xml: fixture(), gzip: Data())
