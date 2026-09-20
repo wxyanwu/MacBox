@@ -27,6 +27,7 @@ struct NativeMPVEvent {
 final class MPVLibrary {
     typealias Create = @convention(c) () -> OpaquePointer?
     typealias Initialize = @convention(c) (OpaquePointer?) -> Int32
+    typealias RequestLogMessages = @convention(c) (OpaquePointer?, UnsafePointer<CChar>?) -> Int32
     typealias Wakeup = @convention(c) (OpaquePointer?) -> Void
     typealias Destroy = @convention(c) (OpaquePointer?) -> Void
     typealias SetOptionString = @convention(c) (
@@ -117,6 +118,8 @@ final class MPVLibrary {
 
     let create: Create
     let initialize: Initialize
+    // Diagnostics are optional: an older bridge must not prevent playback.
+    let requestLogMessages: RequestLogMessages?
     let wakeup: Wakeup
     let destroy: Destroy
     let setOptionString: SetOptionString
@@ -194,6 +197,7 @@ final class MPVLibrary {
                 handle: handle
             )
             waitEvent = try Self.symbol("okmpv_wait_event", handle: handle)
+            requestLogMessages = try? Self.symbol("okmpv_request_log_messages", handle: handle)
             trackCount = try Self.symbol("okmpv_track_count", handle: handle)
             trackAt = try Self.symbol("okmpv_track_at", handle: handle)
             nativeErrorString = try Self.symbol(

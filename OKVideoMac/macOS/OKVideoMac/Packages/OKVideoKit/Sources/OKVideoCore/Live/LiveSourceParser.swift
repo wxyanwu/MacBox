@@ -2,7 +2,17 @@ import Foundation
 import CoreFoundation
 
 public struct LiveSourceParser {
+    private var observationSink: ((LiveParserObservation) -> Void)?
     public init() {}
+
+    /// Opt-in diagnostics share the exact production decode/state/merge path.
+    @_spi(MigrationDiagnostics)
+    public func parseObserving(_ data: Data, baseURL: URL? = nil,
+                               observe: @escaping (LiveParserObservation) -> Void) throws -> LivePlaylist {
+        var parser = self
+        parser.observationSink = observe
+        return try parser.parse(data, baseURL: baseURL)
+    }
 
     public func parse(_ data: Data, baseURL: URL? = nil) throws -> LivePlaylist {
         guard data.count <= 32 * 1_024 * 1_024 else {
@@ -42,6 +52,7 @@ public struct LiveSourceParser {
         } catch {
             throw AppError.live("JSON 直播源无效：\(error.localizedDescription)")
         }
+        var ordinal = 0
         let mapped = groups.compactMap { group -> LiveGroup? in
             let channels = group.channels.compactMap { channel -> LiveChannel? in
                 var channelHeaders = channel.header
@@ -65,6 +76,12 @@ public struct LiveSourceParser {
                     )
                 }
                 guard !channel.name.isEmpty, !streams.isEmpty else { return nil }
+                if let observationSink, !group.name.isEmpty {
+                    ordinal += 1
+                    observationSink(LiveParserObservation(format: .json, ordinal: ordinal, group: group.name,
+                        name: channel.name, tvgID: channel.tvgID, tvgName: channel.tvgName,
+                        number: channel.number, logoReference: channel.logo, streams: streams))
+                }
                 return LiveChannel(
                     groupName: group.name,
                     name: channel.name,
@@ -72,7 +89,9 @@ public struct LiveSourceParser {
                     logoURL: channel.logo.flatMap { try? ResourceResolver.resolve($0, relativeTo: baseURL) },
                     tvgID: channel.tvgID,
                     tvgName: channel.tvgName,
-                    streams: streams
+                    // Observations above retain every parsed occurrence. Only
+                    // routes inside this existing channel are deduplicated.
+                    streams: ImportedRouteTransport.deduplicated(streams)
                 )
             }
             guard !group.name.isEmpty, !channels.isEmpty else { return nil }
@@ -82,6 +101,7 @@ public struct LiveSourceParser {
     }
 
     private func parseM3U(_ text: String, baseURL: URL?) throws -> LivePlaylist {
+        var ordinal = 0
         var builders: [GroupBuilder] = []
         var metadata = M3UMetadata()
         var epgURL: URL?
@@ -93,7 +113,9 @@ public struct LiveSourceParser {
 
             if line.hasPrefix("#EXTM3U") {
                 let attributes = parseAttributes(line)
-                if let rawEPG = attributes["tvg-url"] ?? attributes["url-tvg"] {
+                // Preserve existing precedence; add x-tvg-url as a third alias.
+                if let rawEPG = ["tvg-url", "url-tvg", "x-tvg-url"].compactMap({ attributes[$0] })
+                    .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
                     epgURL = try? ResourceResolver.resolve(rawEPG, relativeTo: baseURL)
                 }
             } else if line.hasPrefix("#EXTINF:") {
@@ -150,6 +172,13 @@ public struct LiveSourceParser {
                 ) else {
                     continue
                 }
+                if let observationSink {
+                    ordinal += 1
+                    observationSink(LiveParserObservation(format: .m3u, ordinal: ordinal,
+                        group: splitProtectedGroupName(groupName).name, name: channelName,
+                        tvgID: metadata.tvgID, tvgName: metadata.tvgName, number: metadata.number,
+                        logoReference: metadata.logo, streams: [stream]))
+                }
                 append(
                     stream: stream,
                     metadata: metadata,
@@ -170,6 +199,7 @@ public struct LiveSourceParser {
     }
 
     private func parseTXT(_ text: String, baseURL: URL?) throws -> LivePlaylist {
+        var ordinal = 0
         var builders: [GroupBuilder] = []
         var currentGroup = "未分组"
         var inheritedHeaders: [String: String] = [:]
@@ -219,6 +249,7 @@ public struct LiveSourceParser {
             let channelName = String(parts[0]).trimmingCharacters(in: .whitespaces)
             let rawURLs = String(parts[1])
             guard rawURLs.contains("://") || baseURL != nil else { continue }
+            var diagnosticStreams: [LiveStream]? = observationSink == nil ? nil : []
             for (index, rawURL) in rawURLs.components(separatedBy: "#").enumerated() {
                 guard let stream = makeStream(
                     raw: rawURL,
@@ -230,6 +261,7 @@ public struct LiveSourceParser {
                 ) else {
                     continue
                 }
+                diagnosticStreams?.append(stream)
                 append(
                     stream: stream,
                     metadata: M3UMetadata(group: currentGroup, name: channelName),
@@ -238,6 +270,12 @@ public struct LiveSourceParser {
                     builders: &builders,
                     baseURL: baseURL
                 )
+            }
+            if let observationSink, let streams = diagnosticStreams, !streams.isEmpty {
+                ordinal += 1
+                observationSink(LiveParserObservation(format: .text, ordinal: ordinal,
+                    group: splitProtectedGroupName(currentGroup).name, name: channelName,
+                    tvgID: nil, tvgName: nil, number: nil, logoReference: nil, streams: streams))
             }
         }
 
@@ -380,7 +418,7 @@ public struct LiveSourceParser {
             )
             channelIndex = builders[groupIndex].channels.count - 1
         }
-        if !builders[groupIndex].channels[channelIndex].streams.contains(where: { $0.url == stream.url }) {
+        if !builders[groupIndex].channels[channelIndex].streams.contains(where: { ImportedRouteTransport.same($0, stream) }) {
             builders[groupIndex].channels[channelIndex].streams.append(stream)
         }
     }

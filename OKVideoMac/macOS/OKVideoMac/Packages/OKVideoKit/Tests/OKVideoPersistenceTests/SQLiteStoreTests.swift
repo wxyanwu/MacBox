@@ -1274,7 +1274,7 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(record.episodeName, "第8集")
         XCTAssertEqual(record.position, 88)
         XCTAssertEqual(record.playbackReference?.sourceIdentity, "line-2")
-        XCTAssertEqual(SQLiteStore.currentSchemaVersion, 9)
+        XCTAssertEqual(SQLiteStore.currentSchemaVersion, 10)
 
         let verification = try SQLiteConnection(url: databaseURL)
         var storedPlaybackReference: String?

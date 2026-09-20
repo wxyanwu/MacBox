@@ -1,5 +1,9 @@
 # OKVideoMac documentation demo source
 
+For the latest bilingual 0.6.1 screenshot pack (18 posters, a 24-episode series,
+9 channel logos and separate VOD/live videos), see [Scenic Atlas](v0.6.1/README.en.md).
+最新中英文截图测试源见 [山水映像](v0.6.1/README.md)。以下保留原 0.4.0 素材使用说明。
+
 This loopback-only source exists solely to make the OKVideoMac documentation
 safe, reproducible and independent of third-party catalogs. It is not bundled
 into the app, does not become a default source, and does not contact any public

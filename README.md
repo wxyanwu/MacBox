@@ -13,6 +13,9 @@ selected TVBox/CatVod/CatPaw-style providers, and libmpv playback.**
 Built with Swift and SwiftUI/AppKit. Android is an optional compatibility layer
 for selected Java/Dex providers.
 
+The current source version is **0.7.0 (Build 102)**. The latest notarized
+stable release remains listed below.
+
 **Native macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · Multi-provider Search ·
 QuickJS/Node Spiders**
 

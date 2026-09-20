@@ -329,7 +329,14 @@ enum UpstreamResponseDecoder {
             click: string(object["click"]),
             code: string(object["code"]),
             jxFrom: string(object["jxFrom"] ?? object["jxfrom"]),
-            danmaku: object["danmaku"] ?? object["danmu"],
+            // CatPaw providers commonly put the per-episode source under
+            // `extra.danmaku`, while TVBox/FongMi responses use a top-level
+            // `danmaku` or `danmu`. Preserve the provider value verbatim and
+            // give the explicit top-level contract precedence.
+            danmaku: object["danmaku"]
+                ?? object["danmu"]
+                ?? object["extra"]?.objectValue?["danmaku"]
+                ?? object["extra"]?.objectValue?["danmu"],
             drm: object["drm"],
             artwork: string(object["artwork"] ?? object["pic"]),
             description: string(object["desc"] ?? object["description"]),

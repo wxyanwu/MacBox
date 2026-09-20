@@ -35,6 +35,7 @@ struct OKVideoMacApp: App {
                 }
                 .task {
                     await state.start()
+                    await SeekAcceptanceHarness.runIfRequested(state)
                 }
                 .onOpenURL { url in
                     Task {
@@ -46,6 +47,7 @@ struct OKVideoMacApp: App {
                 }
                 .onChange(of: scenePhase) { phase in
                     if phase == .active {
+                        state.refreshEPGAfterActivation()
                         Task { await state.refreshHomeConfigurationIfNeeded() }
                     } else {
                         Task { await state.persistPlaybackProgress() }

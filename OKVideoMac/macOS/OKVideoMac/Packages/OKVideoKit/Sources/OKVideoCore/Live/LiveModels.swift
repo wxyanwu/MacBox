@@ -205,10 +205,12 @@ public struct LiveStream: Codable, Equatable, Identifiable, Sendable {
 public struct EPGChannel: Codable, Equatable, Identifiable, Sendable {
     public var id: String
     public var displayName: String
+    public var aliases: [String]?
 
-    public init(id: String, displayName: String) {
+    public init(id: String, displayName: String, aliases: [String]? = nil) {
         self.id = id
         self.displayName = displayName
+        self.aliases = aliases
     }
 }
 
@@ -249,20 +251,7 @@ public struct XMLTVGuide: Codable, Equatable, Sendable {
         for channel: LiveChannel,
         at date: Date
     ) -> (current: EPGProgramme?, next: EPGProgramme?) {
-        let candidates = [channel.tvgID, channel.tvgName, channel.name]
-            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        for candidate in candidates {
-            if programmes.contains(where: { $0.channelID == candidate }) {
-                return currentAndNext(channelID: candidate, at: date)
-            }
-            if let matched = channels.first(where: {
-                $0.displayName.localizedCaseInsensitiveCompare(candidate) == .orderedSame
-            }) {
-                return currentAndNext(channelID: matched.id, at: date)
-            }
-        }
-        return (nil, nil)
+        XMLTVScheduleIndex(guide: self).currentAndNext(for: channel, at: date)
     }
 }
 
@@ -272,43 +261,23 @@ public struct XMLTVGuide: Codable, Equatable, Sendable {
 /// lookups avoid repeatedly scanning and sorting the complete programme list.
 public struct XMLTVScheduleIndex: Sendable {
     private let programmesByChannelID: [String: [EPGProgramme]]
-    private let channelIDByDisplayName: [String: String]
+    private let matcher: XMLTVChannelMatcher
 
     public init(guide: XMLTVGuide) {
         programmesByChannelID = Dictionary(grouping: guide.programmes, by: \.channelID)
-            .mapValues { programmes in
-                programmes.sorted { $0.start < $1.start }
-            }
-
-        var channelIDs: [String: String] = [:]
-        channelIDs.reserveCapacity(guide.channels.count)
-        for channel in guide.channels {
-            let displayName = Self.normalized(channel.displayName)
-            if channelIDs[displayName] == nil {
-                channelIDs[displayName] = channel.id
-            }
-        }
-        channelIDByDisplayName = channelIDs
+            .mapValues { $0.sorted { $0.start < $1.start } }
+        matcher = XMLTVChannelMatcher(guide: guide)
     }
+
+    public func channelMatch(for channel: LiveChannel) -> EPGChannelMatch { matcher.match(channel) }
 
     public func currentAndNext(
         for channel: LiveChannel,
         at date: Date
     ) -> (current: EPGProgramme?, next: EPGProgramme?) {
-        let candidates = [channel.tvgID, channel.tvgName, channel.name]
-            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        for candidate in candidates {
-            if let programmes = programmesByChannelID[candidate] {
-                return Self.currentAndNext(in: programmes, at: date)
-            }
-            if let channelID = channelIDByDisplayName[Self.normalized(candidate)],
-               let programmes = programmesByChannelID[channelID] {
-                return Self.currentAndNext(in: programmes, at: date)
-            }
-        }
-        return (nil, nil)
+        guard let id = matcher.match(channel).channelID,
+              let programmes = programmesByChannelID[id] else { return (nil, nil) }
+        return Self.currentAndNext(in: programmes, at: date)
     }
 
     private static func currentAndNext(
@@ -331,12 +300,6 @@ public struct XMLTVScheduleIndex: Sendable {
         return (current, next)
     }
 
-    private static func normalized(_ value: String) -> String {
-        value.folding(
-            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
-            locale: .current
-        )
-    }
 }
 
 /// Builds the read-optimized XMLTV index on a detached utility task so large

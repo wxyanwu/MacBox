@@ -9,10 +9,11 @@ public actor SQLiteStore:
     HistoryRepository,
     SettingsRepository
 {
-    public static let currentSchemaVersion = 9
+    public static let currentSchemaVersion = 10
 
     private let connection: SQLiteConnection
     public let databaseURL: URL
+    public nonisolated let importedIdentityAcceptanceEnabled: Bool
 
     public struct OpenResult {
         public let store: SQLiteStore
@@ -25,6 +26,7 @@ public actor SQLiteStore:
     }
 
     public init(databaseURL: URL) throws {
+        self.importedIdentityAcceptanceEnabled = false
         self.databaseURL = databaseURL
         let directory = databaseURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(
@@ -37,6 +39,151 @@ public actor SQLiteStore:
         try Self.migrate(connection)
         try Self.verify(connection)
         try Self.restrictDatabasePermissions(databaseURL)
+    }
+
+    /// Same actor/connection as all App persistence; schema 12 remains opt-in
+    /// only through a validated isolated workspace, never the default opener.
+    public init(importedAcceptance workspace: ImportedAcceptanceWorkspace) throws {
+        try workspace.validate()
+        self.databaseURL = workspace.databaseURL
+        self.importedIdentityAcceptanceEnabled = true
+        try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let acceptanceConnection = try SQLiteConnection(url: databaseURL)
+        connection = acceptanceConnection
+        try Self.configure(acceptanceConnection)
+        try Self.migrateAcceptance(acceptanceConnection)
+        try Self.verify(acceptanceConnection)
+        try Self.restrictDatabasePermissions(databaseURL)
+    }
+
+    private static func migrateAcceptance(_ connection: SQLiteConnection) throws {
+        let version = try connection.scalarInt("PRAGMA user_version")
+        if version < 11 { try Self.migrate(connection) }
+        guard version <= 12 else { throw ImportedExecutionError.blocked }
+        if version < 11 {
+            try connection.transaction {
+                try ImportedMigrationStore.createAuthoritySchema(connection)
+                try connection.execute("PRAGMA user_version=11")
+                let t = ImportedMigrationTransaction(connection)
+                defer { t.active = false }
+                _ = try t.snapshot()
+            }
+        }
+        if try connection.scalarInt("PRAGMA user_version") == 11 {
+            try ImportedSourceLifecycleSQL.migrate(connection)
+        }
+    }
+
+    public func importedCatalogMapping(sourceID: UUID, generation: ImportedCatalogGeneration) throws -> ImportedCatalogMapping {
+        try importedCatalogMapping(sourceID: sourceID, generation: generation, beforeCommit: {})
+    }
+    // Deterministic cancellation injection for transaction regression tests.
+    func importedCatalogMapping(sourceID: UUID, generation: ImportedCatalogGeneration, beforeCommit: () -> Void) throws -> ImportedCatalogMapping {
+        guard importedIdentityAcceptanceEnabled, generation.sourceID == sourceID else { throw ImportedExecutionError.blocked }
+        return try importedTransaction(generation: generation) {
+                let t = ImportedMigrationTransaction(connection); defer { t.active = false }
+                let session = ImportedMigrationExecutionSession()
+                let snapshot = try t.snapshot()
+                let plan = try session.prepare(snapshot)
+                guard snapshot.sources.contains(where: { $0.id == sourceID }) else { throw ImportedExecutionError.blocked }
+                _ = try session.execute(plan, transaction: t, sourceID: sourceID)
+                beforeCommit()
+                return ImportedCatalogMapping(sourceID: sourceID, generation: generation,
+                    plan: try session.prepare(t.snapshot()), session: session)
+        }
+    }
+
+    /// Catalog replacement and identity allocation share the SAME admission.
+    /// A late network result cannot even replace source rawData after revocation.
+    public func acceptImportedRefresh(_ source: StoredLiveSource, generation: ImportedCatalogGeneration) throws {
+        guard importedIdentityAcceptanceEnabled, source.id == generation.sourceID else { throw ImportedExecutionError.blocked }
+        try importedTransaction(generation: generation) { try updateLiveSourceRow(source) }
+    }
+
+    private func importedTransaction<T>(generation: ImportedCatalogGeneration, validationPermit: LiveValidationPermit? = nil, body: () throws -> T) throws -> T {
+        guard generation.isCurrent else { throw ImportedExecutionError.stalePlan }
+        if let validationPermit {
+            guard validationPermit.sourceID == generation.sourceID, !validationPermit.isCancelled else { throw CancellationError() }
+        }
+        try connection.execute("BEGIN IMMEDIATE")
+        do {
+            try ImportedSourceLifecycleSQL.requireActive(generation.sourceID, connection)
+            let value = try body()
+            // The lock covers ONLY COMMIT, not catalog parsing/reconciliation.
+            // Invalidation during preparation causes rollback, including UUIDs.
+            try generation.admit {
+                if let validationPermit { try validationPermit.commit { try connection.execute("COMMIT") } }
+                else { try connection.execute("COMMIT") }
+            }
+            return value
+        } catch {
+            try? connection.execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    public func setImportedReferences(mapping: ImportedCatalogMapping,
+        edits: [(channel: LiveChannel, kind: MigrationReferenceKind, present: Bool)],
+        validationPermit: LiveValidationPermit? = nil) throws -> ImportedCatalogMapping {
+        try setImportedReferences(mapping: mapping, edits: edits, validationPermit: validationPermit, beforeCommit: {})
+    }
+    func setImportedReferences(mapping: ImportedCatalogMapping,
+        edits: [(channel: LiveChannel, kind: MigrationReferenceKind, present: Bool)],
+        validationPermit: LiveValidationPermit?, beforeCommit: () throws -> Void) throws -> ImportedCatalogMapping {
+        guard importedIdentityAcceptanceEnabled else { throw ImportedExecutionError.blocked }
+        return try importedTransaction(generation: mapping.generation, validationPermit: validationPermit) {
+                let t = ImportedMigrationTransaction(connection); defer { t.active = false }
+                let session = mapping.session
+                let plan = try session.prepare(t.snapshot())
+                guard plan.planFingerprint == mapping.plan.planFingerprint else { throw ImportedExecutionError.stalePlan }
+                for edit in edits {
+                    try session.writeValidated(plan, transaction: t, sourceID: mapping.sourceID,
+                        channel: edit.channel, kind: edit.kind, present: edit.present)
+                }
+                try beforeCommit()
+                return ImportedCatalogMapping(sourceID: mapping.sourceID, generation: mapping.generation,
+                    plan: try session.prepare(t.snapshot()), session: session)
+        }
+    }
+
+    /// Legacy-only background validation batch. Never usable to bypass claimed
+    /// authority in the isolated identity App. Read current settings inside the
+    /// transaction, preserve unrelated tokens, and commit BOTH values atomically.
+    public func applyLegacyLiveValidation(source: StoredLiveSource, channels: [LiveChannel],
+        permit: LiveValidationPermit) throws -> (hidden: Set<String>, favorites: Set<String>) {
+        try applyLegacyLiveValidation(source: source, channels: channels, permit: permit, beforeCommit: {})
+    }
+    func applyLegacyLiveValidation(source: StoredLiveSource, channels: [LiveChannel],
+        permit: LiveValidationPermit, beforeCommit: () throws -> Void) throws -> (hidden: Set<String>, favorites: Set<String>) {
+        guard !importedIdentityAcceptanceEnabled, source.id == permit.sourceID, !permit.isCancelled else { throw CancellationError() }
+        try connection.execute("BEGIN IMMEDIATE")
+        do {
+            var currentData: Data?
+            var currentName: String?
+            try connection.query("SELECT raw_data,name FROM live_sources WHERE id=?", bindings: [.text(source.id.uuidString)]) {
+                currentData = connection.data($0, 0); currentName = connection.text($0, 1)
+            }
+            guard currentData == source.rawData, currentName == source.name else { throw ImportedExecutionError.stalePlan }
+            func tokens(_ key: String) throws -> Set<String> {
+                guard let value = try setting(forKey: key) else { return [] }
+                guard case .array(let items) = value, items.allSatisfy({ $0.stringValue != nil }) else { throw ImportedExecutionError.blocked }
+                return Set(items.compactMap(\.stringValue))
+            }
+            var hidden = try tokens("live.deletedChannels"), favorites = try tokens("live.favoriteChannels")
+            for channel in channels {
+                hidden.insert(ImportedChannelMigrationPlanner.hiddenKey(sourceID: source.id, channelID: channel.id))
+                favorites.remove(ImportedChannelMigrationPlanner.favoriteKey(sourceName: source.name, channelID: channel.id))
+            }
+            try setSetting(.array(hidden.sorted().map(JSONValue.string)), forKey: "live.deletedChannels")
+            try setSetting(.array(favorites.sorted().map(JSONValue.string)), forKey: "live.favoriteChannels")
+            try beforeCommit()
+            try permit.commit { try connection.execute("COMMIT") }
+            return (hidden, favorites)
+        } catch {
+            try? connection.execute("ROLLBACK")
+            throw error
+        }
     }
 
     public static func openRecovering(databaseURL: URL) throws -> OpenResult {
@@ -429,13 +576,24 @@ public actor SQLiteStore:
     }
 
     public func deleteConfiguration(id: UUID) throws {
-        try connection.execute(
-            "DELETE FROM configurations WHERE id = ?",
-            bindings: [.text(id.uuidString)]
-        )
+        try connection.transaction {
+            try connection.execute(
+                "DELETE FROM configurations WHERE id = ?",
+                bindings: [.text(id.uuidString)]
+            )
+            try deletePlaybackSkipRules(configurationID: id)
+            try deletePlaybackCompletionMarkers(configurationID: id)
+            try deleteDanmakuBindings(configurationID: id)
+        }
     }
 
     public func saveLiveSource(_ source: StoredLiveSource) throws {
+        if importedIdentityAcceptanceEnabled {
+            // Compatibility entry is create-only in acceptance mode. Refresh
+            // must use update-existing with an admitted generation.
+            try createLiveSource(source)
+            return
+        }
         try connection.execute(
             """
             INSERT INTO live_sources (
@@ -462,6 +620,34 @@ public actor SQLiteStore:
         )
     }
 
+    public func createLiveSource(_ source: StoredLiveSource) throws {
+        try connection.transaction {
+            try connection.execute("""
+                INSERT INTO live_sources(id,name,source_kind,source_value,base_url,raw_data,updated_at)
+                VALUES (?,?,?,?,?,?,?)
+                """, bindings: sourceBindings(source))
+        }
+    }
+
+    public func updateImportedLiveSource(_ source: StoredLiveSource, generation: ImportedCatalogGeneration) throws {
+        try acceptImportedRefresh(source, generation: generation)
+    }
+
+    private func sourceBindings(_ source: StoredLiveSource) -> [SQLiteBinding] {
+        [.text(source.id.uuidString), .text(source.name), .text(source.sourceKind.rawValue),
+         .optional(source.sourceValue), .optional(source.baseURL?.absoluteString), .blob(source.rawData),
+         .double(source.updatedAt.timeIntervalSince1970)]
+    }
+
+    private func updateLiveSourceRow(_ source: StoredLiveSource) throws {
+        try ImportedSourceLifecycleSQL.requireActive(source.id, connection)
+        let values = sourceBindings(source)
+        try connection.execute("""
+            UPDATE live_sources SET name=?,source_kind=?,source_value=?,base_url=?,raw_data=?,updated_at=? WHERE id=?
+            """, bindings: Array(values.dropFirst()) + [values[0]])
+        guard connection.lastChangedRowCount() == 1 else { throw ImportedExecutionError.blocked }
+    }
+
     public func liveSources() throws -> [StoredLiveSource] {
         var values: [StoredLiveSource] = []
         try connection.query(
@@ -469,6 +655,7 @@ public actor SQLiteStore:
             SELECT id, name, source_kind, source_value, base_url,
                    raw_data, updated_at
             FROM live_sources
+            \(importedIdentityAcceptanceEnabled ? "WHERE retired_at IS NULL" : "")
             ORDER BY updated_at DESC
             """
         ) { statement in
@@ -480,10 +667,30 @@ public actor SQLiteStore:
     }
 
     public func deleteLiveSource(id: UUID) throws {
+        if importedIdentityAcceptanceEnabled {
+            // Caller must revoke its capability and use the retirement transaction.
+            throw ImportedExecutionError.blocked
+        }
         try connection.execute(
             "DELETE FROM live_sources WHERE id = ?",
             bindings: [.text(id.uuidString)]
         )
+    }
+
+    public func retireImportedSource(id: UUID, revokedGeneration: ImportedCatalogGeneration) throws {
+        try retireImportedSource(id: id, revokedGeneration: revokedGeneration, checkpoint: { _ in })
+    }
+
+    func retireImportedSource(id: UUID, revokedGeneration: ImportedCatalogGeneration, checkpoint: (Int) throws -> Void) throws {
+        guard importedIdentityAcceptanceEnabled, revokedGeneration.sourceID == id,
+              !revokedGeneration.isCurrent else { throw ImportedExecutionError.blocked }
+        try connection.transaction {
+            try ImportedSourceLifecycleSQL.requireActive(id, connection)
+            let t = ImportedMigrationTransaction(connection); defer { t.active = false }
+            let snapshot = try t.snapshot()
+            try ImportedSourceLifecycleSQL.retire(id, snapshot: snapshot, connection: connection, checkpoint: checkpoint)
+            _ = try t.snapshot() // Validate historical relations, NOT active reconciliation.
+        }
     }
 
     public func saveFavorite(_ favorite: FavoriteRecord) throws {
@@ -700,6 +907,9 @@ public actor SQLiteStore:
     }
 
     public func setSetting(_ value: JSONValue?, forKey key: String) throws {
+        if importedIdentityAcceptanceEnabled && ["live.favoriteChannels", "live.deletedChannels"].contains(key) {
+            throw ImportedExecutionError.blocked // owned keys use the admitted reference transaction only
+        }
         guard !key.isEmpty else {
             throw AppError.database("设置 key 不能为空")
         }
@@ -731,6 +941,29 @@ public actor SQLiteStore:
             value = try JSONDecoder().decode(JSONValue.self, from: data)
         }
         return value
+    }
+
+    // Registry APIs are deliberately not used by AppState/importers in 8B.1.
+    // Keep the connection private and reuse this actor's synchronous transaction
+    // boundary; no await/reentrancy is allowed between BEGIN and COMMIT.
+    public func importedChannelIdentity(_ identity: ImportedLiveChannelIdentity) throws -> ImportedChannelRegistryRecord? {
+        try ImportedIdentityRegistrySQL.fetch(identity, connection: connection)
+    }
+
+    public func importedChannelIdentities(for source: LiveSourceID,
+                                          lifecycle: ImportedChannelRegistryLifecycle? = nil) throws -> [ImportedChannelRegistryRecord] {
+        try ImportedIdentityRegistrySQL.list(source, lifecycle: lifecycle, connection: connection)
+    }
+
+    public func applyImportedChannelIdentityMutations(_ mutations: [ImportedChannelRegistryMutation]) throws {
+        // Low-level Registry maintenance is not an acceptance authority writer.
+        // Allocation/retirement must use their complete transactions instead.
+        guard !importedIdentityAcceptanceEnabled else { throw ImportedExecutionError.blocked }
+        try connection.transaction {
+            for mutation in mutations {
+                try ImportedIdentityRegistrySQL.apply(mutation, connection: connection)
+            }
+        }
     }
 
     private static func configure(_ connection: SQLiteConnection) throws {
@@ -1159,6 +1392,12 @@ public actor SQLiteStore:
             try connection.query("PRAGMA wal_checkpoint(TRUNCATE)") { _ in }
             try connection.execute("VACUUM")
             try connection.query("PRAGMA wal_checkpoint(TRUNCATE)") { _ in }
+        }
+        if version < 10 {
+            try connection.transaction {
+                try ImportedIdentityRegistrySQL.createSchema(connection)
+                try connection.execute("PRAGMA user_version = 10")
+            }
         }
     }
 

@@ -12,10 +12,13 @@ def bridgeReleaseKeyPassword = System.getenv(
 )
 
 android {
+    buildFeatures { buildConfig = true }
     namespace = "com.okvideomac.dexbridge"
     compileSdk = 35
 
     defaultConfig {
+        // Explicit developer-only bounded reads; absent from ordinary builds.
+        buildConfigField "boolean", "MEDIA_RANGE_AUDIT", System.getenv("OKVIDEOMAC_MEDIA_RANGE_AUDIT") == "1" ? "true" : "false"
         applicationId = "com.okvideomac.dexbridge"
         minSdk = 24
         // Guard packages used by TVBox/FongMi discover the current Activity
@@ -74,6 +77,7 @@ android {
 
 dependencies {
     implementation project(":catvod")
+    testImplementation "junit:junit:4.13.2"
     androidTestImplementation "junit:junit:4.13.2"
     androidTestImplementation "androidx.test:runner:1.6.2"
 }

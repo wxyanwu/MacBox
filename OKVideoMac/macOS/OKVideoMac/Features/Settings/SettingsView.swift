@@ -5,6 +5,18 @@ import OKVideoPersistence
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// Keep the existing settings status row live without observing progress on
+/// the entire SettingsView/AppState. Rendering and text remain unchanged.
+private struct LiveSourceValidationStatusObserver<Content: View>: View {
+    @ObservedObject var activity: LiveValidationActivityModel
+    let sourceID: UUID
+    @ViewBuilder let content: (LiveSourceValidationStatus) -> Content
+
+    var body: some View {
+        if let status = activity.statuses[sourceID] { content(status) }
+    }
+}
+
 private enum SettingsL10n {
     static func string(
         _ key: String,
@@ -1346,17 +1358,123 @@ private struct SearchSettingsPane: View {
     }
 }
 
+private struct EPGSettingsSection: View {
+    @EnvironmentObject private var state: AppState
+    @State private var urlDraft = ""
+    @State private var errorMessage: String?
+
+    var body: some View {
+        SettingsSectionTitle(SettingsL10n.string("settings.epg.title", "EPG / Programme Guide"))
+        SettingsCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle(SettingsL10n.string("settings.epg.enabled", "Automatically Load EPG"), isOn: Binding(
+                    get: { state.epgPreferences.automaticEPGEnabled },
+                    set: { enabled in
+                        var next = state.epgPreferences
+                        next.automaticEPGEnabled = enabled
+                        errorMessage = nil
+                        Task {
+                            if !((await state.saveEPGPreferences(next))) { errorMessage = state.presentedError?.message }
+                        }
+                    }
+                ))
+                Text(SettingsL10n.string("settings.epg.enabled-help", "Automatically load current and next programmes for supported live TV sources."))
+                    .font(.caption).foregroundStyle(.secondary)
+                TextField(SettingsL10n.string("settings.epg.default-url", "Default EPG Address"), text: $urlDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { saveURL(urlDraft) }
+                Text(SettingsL10n.string("settings.epg.default-help", "HTTP/HTTPS XMLTV or XMLTV.gz. Used only when an automatic source has no embedded EPG. Changes take effect after saving."))
+                    .font(.caption).foregroundStyle(.secondary)
+                if let errorMessage { Text(errorMessage).font(.caption).foregroundStyle(.red) }
+                HStack {
+                    Button(SettingsL10n.string("settings.epg.reset", "Restore Default")) { saveURL("") }
+                    Spacer()
+                    Button(SettingsL10n.string("settings.epg.save", "Save")) { saveURL(urlDraft) }
+                }
+            }
+            .padding(18)
+            .disabled(state.isSavingEPGPreferences)
+        }
+        .onAppear { urlDraft = state.epgPreferences.defaultEPGURL ?? "" }
+    }
+
+    private func saveURL(_ value: String) {
+        var next = state.epgPreferences
+        next.defaultEPGURL = value
+        errorMessage = nil
+        Task {
+            if await state.saveEPGPreferences(next) { urlDraft = state.epgPreferences.defaultEPGURL ?? "" }
+            else { errorMessage = state.presentedError?.message }
+        }
+    }
+}
+
+private struct SourceEPGSettingsSheet: View {
+    @EnvironmentObject private var state: AppState
+    @Environment(\.dismiss) private var dismiss
+    let source: StoredLiveSource
+    @State private var mode: EPGSourceMode
+    @State private var urlDraft: String
+    @State private var errorMessage: String?
+
+    init(source: StoredLiveSource, preference: EPGSourcePreference) {
+        self.source = source
+        _mode = State(initialValue: preference.mode)
+        _urlDraft = State(initialValue: preference.customEPGURL ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(source.name).font(.headline)
+            Picker(SettingsL10n.string("settings.epg.title", "EPG / Programme Guide"), selection: $mode) {
+                Text(SettingsL10n.string("settings.epg.automatic", "Automatic")).tag(EPGSourceMode.automatic)
+                Text(SettingsL10n.string("settings.epg.custom", "Custom")).tag(EPGSourceMode.custom)
+                Text(SettingsL10n.string("settings.epg.disabled", "Do Not Use EPG")).tag(EPGSourceMode.disabled)
+            }
+            if mode == .custom {
+                TextField(SettingsL10n.string("settings.epg.custom-url", "EPG URL"), text: $urlDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { save() }
+            }
+            Text(SettingsL10n.string("settings.epg.automatic-help", "Automatic: embedded M3U EPG → global default → none. The app-wide EPG switch applies to all sources."))
+                .font(.caption).foregroundStyle(.secondary)
+            if let errorMessage { Text(errorMessage).font(.caption).foregroundStyle(.red) }
+            HStack {
+                Button(SettingsL10n.string("settings.common.cancel", "Cancel")) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button(SettingsL10n.string("settings.epg.save", "Save")) { save() }
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24).frame(width: 480)
+        .disabled(state.isSavingEPGPreferences)
+    }
+
+    private func save() {
+        var next = state.epgPreferences
+        next.sources[source.id.uuidString] = EPGSourcePreference(mode: mode, customEPGURL: urlDraft)
+        errorMessage = nil
+        Task {
+            if await state.saveEPGPreferences(next) { dismiss() }
+            else { errorMessage = state.presentedError?.message }
+        }
+    }
+}
+
 private struct LiveSourceSettingsPane: View {
     @EnvironmentObject private var state: AppState
     @State private var showingImport = false
     @State private var showingFileImporter = false
     @State private var pendingDelete: StoredLiveSource?
+    @State private var epgEditingSource: StoredLiveSource?
 
     var body: some View {
         SettingsPage(
             title: SettingsL10n.string("settings.pane.live.title", "Live TV Sources"),
             subtitle: SettingsL10n.string("settings.live.subtitle", "Import, refresh, and maintain live TV channel lists")
         ) {
+            EPGSettingsSection()
             SettingsSectionTitle(SettingsL10n.string("settings.live.manage.section", "Source Management"))
 
             if state.liveSources.isEmpty {
@@ -1426,6 +1544,10 @@ private struct LiveSourceSettingsPane: View {
                 .environmentObject(state)
                 .frame(width: 620, height: 500)
         }
+        .sheet(item: $epgEditingSource) { source in
+            SourceEPGSettingsSheet(source: source, preference: state.epgPreferences.source(source.id))
+                .environmentObject(state)
+        }
         .fileImporter(
             isPresented: $showingFileImporter,
             allowedContentTypes: liveFileTypes,
@@ -1490,11 +1612,15 @@ private struct LiveSourceSettingsPane: View {
                 ))
                     .font(.caption2)
                     .foregroundColor(.secondary)
-                if let status = state.liveSourceValidationStatuses[source.id] {
+                LiveSourceValidationStatusObserver(activity: state.liveValidationActivity, sourceID: source.id) { status in
                     liveSourceValidationStatus(status)
                 }
             }
             Spacer()
+            Button(SettingsL10n.string("settings.epg.edit", "Programme Guide…")) {
+                epgEditingSource = source
+            }
+            .disabled(state.isSavingEPGPreferences)
             if source.sourceKind == .remote {
                 Button {
                     Task { await state.refreshLiveSource(source.id) }
@@ -1528,6 +1654,18 @@ private struct LiveSourceSettingsPane: View {
             }
             .font(.caption2)
             .foregroundColor(.secondary)
+        case .processing:
+            Label(SettingsL10n.string("live.health-check.processing", "Processing channel check results…"), systemImage: "hourglass")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        case .cancelled(let completed, let total):
+            Label(SettingsL10n.string("live.health-check.cancelled", "Channel check stopped: %d/%d; unchecked channels were kept", completed, total), systemImage: "pause.circle")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        case .partial(let completed, let total):
+            Label(SettingsL10n.string("live.health-check.partial", "Channel check reached its time limit: %d/%d; no partial results applied", completed, total), systemImage: "clock")
+                .font(.caption2)
+                .foregroundColor(.secondary)
         case .completed(let removed, let total):
             Label(
                 removed == 0

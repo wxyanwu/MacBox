@@ -18,19 +18,22 @@ public struct PlaybackCandidate: Equatable, Sendable {
     public var sourceName: String
     public var episodeName: String
     public var result: SitePlaybackResult
+    public var danmakuContext: DanmakuPlaybackContext?
 
     public init(
         siteKey: String,
         siteName: String,
         sourceName: String,
         episodeName: String,
-        result: SitePlaybackResult
+        result: SitePlaybackResult,
+        danmakuContext: DanmakuPlaybackContext? = nil
     ) {
         self.siteKey = siteKey
         self.siteName = siteName
         self.sourceName = sourceName
         self.episodeName = episodeName
         self.result = result
+        self.danmakuContext = danmakuContext
     }
 }
 
@@ -80,6 +83,7 @@ public struct ResolvedMedia: Equatable, Sendable {
     public var hlsStartupSelection: HLSStartupSelection?
     public var compatibilityPolicy: PlaybackCompatibilityPolicy
     public var transferReceipt: TransferReceipt?
+    public var danmakuContext: DanmakuPlaybackContext?
 
     public init(
         url: URL,
@@ -94,7 +98,8 @@ public struct ResolvedMedia: Equatable, Sendable {
         nativeStartupBudgetSeconds: Int? = nil,
         hlsStartupSelection: HLSStartupSelection? = nil,
         compatibilityPolicy: PlaybackCompatibilityPolicy = .existing,
-        transferReceipt: TransferReceipt? = nil
+        transferReceipt: TransferReceipt? = nil,
+        danmakuContext: DanmakuPlaybackContext? = nil
     ) {
         self.url = url
         self.headers = headers
@@ -109,6 +114,7 @@ public struct ResolvedMedia: Equatable, Sendable {
         self.hlsStartupSelection = hlsStartupSelection
         self.compatibilityPolicy = compatibilityPolicy
         self.transferReceipt = transferReceipt
+        self.danmakuContext = danmakuContext
     }
 }
 
@@ -572,7 +578,8 @@ public struct PlaybackResolver {
                         sourceName: candidate.sourceName,
                         episodeName: candidate.episodeName,
                         parserName: parser?.name,
-                        transferReceipt: candidate.result.transferReceipt
+                        transferReceipt: candidate.result.transferReceipt,
+                        danmakuContext: candidate.danmakuContext
                     )
                     continuation.yield(.state(.loading))
                     if let mediaLoader {

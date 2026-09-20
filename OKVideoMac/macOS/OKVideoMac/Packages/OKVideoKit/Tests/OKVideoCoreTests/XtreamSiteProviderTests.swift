@@ -2,11 +2,11 @@ import XCTest
 @testable import OKVideoCore
 
 final class XtreamSiteProviderTests: XCTestCase {
-    func testHomeRejectsExpiredAccountBeforeLoadingCatalogs() async throws {
+    func testHomeRejectsExplicitExpiredStatusBeforeLoadingCatalogs() async throws {
         let httpClient = try XtreamProviderFixtureHTTPClient(
             responses: [
                 "auth": Data(
-                    #"{"user_info":{"auth":1,"status":"Active","exp_date":"1"}}"#.utf8
+                    #"{"user_info":{"auth":1,"status":"Expired","exp_date":"4102444800"}}"#.utf8
                 ),
                 "get_vod_categories": Data("[]".utf8),
                 "get_series_categories": Data("[]".utf8)
@@ -30,6 +30,54 @@ final class XtreamSiteProviderTests: XCTestCase {
         )
         XCTAssertEqual(movieCategoryRequests, 0)
         XCTAssertEqual(seriesCategoryRequests, 0)
+    }
+
+    func testHomeLoadsCatalogsForActiveAccountWithPastExpiration() async throws {
+        let httpClient = try XtreamProviderFixtureHTTPClient(
+            responses: [
+                "auth": Data(
+                    #"{"user_info":{"auth":1,"status":"Active","exp_date":"1"}}"#.utf8
+                ),
+                "get_vod_categories": Data(
+                    #"[{"category_id":"10","category_name":"Movies"}]"#.utf8
+                ),
+                "get_series_categories": Data(
+                    #"[{"category_id":"20","category_name":"Series"}]"#.utf8
+                )
+            ]
+        )
+        let provider = try makeProvider(httpClient: httpClient)
+
+        let home = try await provider.home()
+        let movieCategoryRequests = await httpClient.requestCount(action: "get_vod_categories")
+        let seriesCategoryRequests = await httpClient.requestCount(action: "get_series_categories")
+        XCTAssertEqual(home.categories.map(\.name), ["Movies", "Series"])
+        XCTAssertEqual(movieCategoryRequests, 1)
+        XCTAssertEqual(seriesCategoryRequests, 1)
+    }
+
+    func testHomePropagatesCategoryAuthorizationFailureAfterActivePastExpiration() async throws {
+        for statusCode in [401, 403] {
+            let httpClient = try XtreamProviderFixtureHTTPClient(
+                responses: [
+                    "auth": Data(
+                        #"{"user_info":{"auth":1,"status":"Active","exp_date":"1"}}"#.utf8
+                    ),
+                    "get_vod_categories": Data("[]".utf8),
+                    "get_series_categories": Data("[]".utf8)
+                ],
+                statusCodes: ["get_vod_categories": statusCode]
+            )
+            let provider = try makeProvider(httpClient: httpClient)
+
+            await XCTAssertThrowsErrorAsync(try await provider.home()) { error in
+                XCTAssertEqual(error as? HTTPClientError, .statusCode(statusCode))
+            }
+            let movieCategoryRequests = await httpClient.requestCount(
+                action: "get_vod_categories"
+            )
+            XCTAssertEqual(movieCategoryRequests, 1)
+        }
     }
 
     func testMovieCatalogUsesNamespacedIdentityAndLocalPagination() async throws {
@@ -447,10 +495,12 @@ final class XtreamSiteProviderTests: XCTestCase {
 
 private actor XtreamProviderFixtureHTTPClient: HTTPClient {
     private let responses: [String: Data]
+    private let statusCodes: [String: Int]
     private var actionCounts: [String: Int] = [:]
 
-    init(responses: [String: Data]) throws {
+    init(responses: [String: Data], statusCodes: [String: Int] = [:]) throws {
         self.responses = responses
+        self.statusCodes = statusCodes
     }
 
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
@@ -459,6 +509,9 @@ private actor XtreamProviderFixtureHTTPClient: HTTPClient {
             resolvingAgainstBaseURL: false
         )?.queryItems?.first(where: { $0.name == "action" })?.value ?? "auth"
         actionCounts[action, default: 0] += 1
+        if let statusCode = statusCodes[action], !(200...299).contains(statusCode) {
+            throw HTTPClientError.statusCode(statusCode)
+        }
         guard let body = responses[action] else {
             throw AppError.network("Missing Xtream fixture for \(action)")
         }

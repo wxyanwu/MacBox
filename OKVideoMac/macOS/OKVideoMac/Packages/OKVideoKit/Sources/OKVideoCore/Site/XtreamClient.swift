@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 public struct XtreamCatalogResponsePolicy: Equatable, Sendable {
     /// An adjustable initial safety value, not an Xtream protocol limit.
@@ -63,6 +64,10 @@ public enum XtreamClientError: Error, Equatable, LocalizedError, Sendable {
 
 public final class XtreamClient: @unchecked Sendable {
     private static let metadataMaximumResponseBytes = 8 * 1_024 * 1_024
+    private static let accountLogger = Logger(
+        subsystem: "com.okvideomac.OKVideoMac",
+        category: "XtreamAccount"
+    )
 
     private let httpClient: HTTPClient
     private let credentials: XtreamCredentials
@@ -123,10 +128,11 @@ public final class XtreamClient: @unchecked Sendable {
             timestamp > 0 ? Date(timeIntervalSince1970: TimeInterval(timestamp)) : nil
         }
         if let expirationDate, expirationDate <= now {
-            // Several Xtream-compatible panels keep `status=Active` after the
-            // subscription timestamp has elapsed. Treat that combination as
-            // expired instead of enabling a known unusable account.
-            throw XtreamClientError.accountUnavailable(status: "Expired")
+            // The server's explicit Active status remains the admission signal.
+            // A past exp_date is a conflict to diagnose, not a local rejection.
+            Self.accountLogger.warning(
+                "Xtream account reports Active with exp_date \(expirationDate.timeIntervalSince1970, privacy: .public) at local time \(now.timeIntervalSince1970, privacy: .public); retaining expiration metadata and allowing subsequent API requests."
+            )
         }
         return XtreamAccount(
             status: info.status,
@@ -140,6 +146,32 @@ public final class XtreamClient: @unchecked Sendable {
 
     public func liveCategories() async throws -> [XtreamCategoryDTO] {
         try await catalog(XtreamCategoryDTO.self, action: .liveCategories)
+    }
+
+    public func shortEPG(streamID: String) async throws -> EPGPayload {
+        do {
+            let data = try await responseData(action: .shortEPG, parameters: [
+                URLQueryItem(name: "stream_id", value: try validIdentifier(streamID)),
+                URLQueryItem(name: "limit", value: "4")
+            ], isCatalog: false)
+            let response = try XtreamEPGResponse(data: data)
+            var timezone: TimeZone?
+            if response.requiresServerTimezone {
+                let authentication = try await request(XtreamAuthenticationResponseDTO.self,
+                    action: nil, parameters: [], isCatalog: false)
+                timezone = authentication.serverInfo?.timezone.flatMap(TimeZone.init(identifier:))
+            }
+            return try response.payload(streamID: streamID, timezone: timezone,
+                                        secrets: [credentials.username, credentials.password])
+        } catch HTTPClientError.statusCode(let status) where [404, 405, 501].contains(status) {
+            return EPGPayload(guide: XMLTVGuide(channels: [], programmes: []), unsupported: true)
+        } catch {
+            if Task.isCancelled || error is CancellationError || (error as? HTTPClientError) == .cancelled {
+                throw CancellationError()
+            }
+            // Raw transport/decoder errors may contain credential-bearing URLs.
+            throw EPGFetchError.unavailable
+        }
     }
 
     public func liveStreams(categoryID: String? = nil) async throws
@@ -262,7 +294,7 @@ public final class XtreamClient: @unchecked Sendable {
             action: action,
             parameters: parameters
         )
-        let maximumBytes = isCatalog
+        let maximumBytes = action == .shortEPG ? 1024 * 1024 : isCatalog
             ? catalogResponsePolicy.maximumResponseBytes
             : Self.metadataMaximumResponseBytes
         let request = HTTPRequest(
@@ -273,7 +305,7 @@ public final class XtreamClient: @unchecked Sendable {
             ],
             timeout: 30,
             maximumResponseBytes: maximumBytes,
-            earlyResponseLimitBytes: isCatalog ? maximumBytes : nil,
+            earlyResponseLimitBytes: isCatalog || action == .shortEPG ? maximumBytes : nil,
             maximumRedirects: 3,
             redirectPolicy: .sameOriginNoDowngrade,
             retryPolicy: HTTPRetryPolicy(

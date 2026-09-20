@@ -267,7 +267,7 @@ final class RedirectDelegate: NSObject, URLSessionTaskDelegate {
         let isAllowed = redirectCount <= maximumRedirects
             && HTTPRedirectSecurity.isAllowed(
                 request.url,
-                from: originalURL ?? task.originalRequest?.url,
+                from: redirectPolicy == .noDowngrade ? response.url : (originalURL ?? task.originalRequest?.url),
                 policy: redirectPolicy
             )
         if redirectCount <= maximumRedirects, !isAllowed {
@@ -302,13 +302,18 @@ enum HTTPRedirectSecurity {
         from origin: URL?,
         policy: HTTPRedirectPolicy
     ) -> Bool {
-        guard policy == .sameOriginNoDowngrade else { return true }
+        guard policy != .follow else { return true }
         guard let destination, let origin,
               let destinationScheme = destination.scheme?.lowercased(),
               let originScheme = origin.scheme?.lowercased(),
               let destinationHost = destination.host?.lowercased(),
               let originHost = origin.host?.lowercased() else {
             return false
+        }
+        if policy == .noDowngrade {
+            return ["http", "https"].contains(destinationScheme)
+                && ["http", "https"].contains(originScheme)
+                && !(originScheme == "https" && destinationScheme == "http")
         }
         return destinationScheme == originScheme
             && destinationHost == originHost
@@ -501,7 +506,7 @@ private final class BoundedResponseLoader: NSObject, URLSessionDataDelegate,
         }
         guard HTTPRedirectSecurity.isAllowed(
             destination,
-            from: originalURL,
+            from: redirectPolicy == .noDowngrade ? response.url : originalURL,
             policy: redirectPolicy
         ) else {
             completionHandler(nil)

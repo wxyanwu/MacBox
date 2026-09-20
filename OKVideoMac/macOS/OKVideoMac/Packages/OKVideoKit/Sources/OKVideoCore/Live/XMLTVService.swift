@@ -4,6 +4,23 @@ import Foundation
 public actor XMLTVService {
     public static let refreshInterval: TimeInterval = 6 * 60 * 60
 
+    /// Uncached transport/parse adapter used by the source-scoped EPGRepository.
+    public static func fetch(url: URL, httpClient: HTTPClient,
+                             headers: HTTPHeaders = [:]) async throws -> EPGPayload {
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+            throw EPGFetchError.unavailable
+        }
+        let response = try await httpClient.send(HTTPRequest(
+            url: url, headers: headers, timeout: 30,
+            maximumResponseBytes: 32 * 1024 * 1024,
+            earlyResponseLimitBytes: 32 * 1024 * 1024,
+            redirectPolicy: .noDowngrade,
+            retryPolicy: HTTPRetryPolicy(maximumRetries: 2)
+        ))
+        try Task.checkCancellation()
+        return EPGPayload(guide: try XMLTVParser().parse(response.body))
+    }
+
     private struct CacheFile: Codable {
         var fetchedAt: Date
         var guide: XMLTVGuide
@@ -42,28 +59,23 @@ public actor XMLTVService {
             throw AppError.live("EPG 仅允许 HTTP/HTTPS")
         }
 
-        if !forceRefresh, let cached = try cachedGuide(for: url), isFresh(cached) {
+        if !forceRefresh, let cached = try? cachedGuide(for: url), isFresh(cached) {
             return cached.guide
         }
 
         do {
-            let response = try await httpClient.send(
-                HTTPRequest(
-                    url: url,
-                    headers: headers,
-                    timeout: 30,
-                    maximumResponseBytes: 32 * 1_024 * 1_024,
-                    retryPolicy: HTTPRetryPolicy(maximumRetries: 2)
-                )
-            )
+            let payload = try await Self.fetch(url: url, httpClient: httpClient, headers: headers)
             let value = CacheFile(
                 fetchedAt: now(),
-                guide: try XMLTVParser().parse(response.body)
+                guide: payload.guide
             )
             memory[url] = value
             try persist(value, for: url)
             return value.guide
         } catch {
+            if Task.isCancelled || error is CancellationError || (error as? HTTPClientError) == .cancelled {
+                throw CancellationError()
+            }
             if let stale = try? cachedGuide(for: url) {
                 return stale.guide
             }

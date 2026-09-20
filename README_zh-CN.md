@@ -13,6 +13,9 @@
 使用 Swift 和 SwiftUI/AppKit 构建。Android 是部分 Java/Dex Provider 按需使用的
 可选兼容层。
 
+当前源码版本为 **0.7.0（Build 102）**。下方仍列出最近一个已完成 Apple 公证的
+稳定版本。
+
 **原生 macOS · Xtream · IPTV/点播 · M3U/XMLTV · libmpv · 多 Provider 搜索 ·
 QuickJS/Node Spider**
 

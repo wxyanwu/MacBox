@@ -23,6 +23,8 @@ USAGE
 
 PACKAGE_MODE="${OKVIDEOMAC_PACKAGE_MODE:-local}"
 NOTARIZE=0
+LOCAL_ACCEPTANCE=0
+ISOLATED_IDENTITY_ACCEPTANCE=0
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --mode)
@@ -37,6 +39,14 @@ while [[ "$#" -gt 0 ]]; do
       NOTARIZE=1
       shift
       ;;
+    --local-acceptance)
+      LOCAL_ACCEPTANCE=1
+      shift
+      ;;
+    --isolated-identity-acceptance)
+      ISOLATED_IDENTITY_ACCEPTANCE=1
+      shift
+      ;;
     --help|-h)
       usage
       exit 0
@@ -48,6 +58,26 @@ while [[ "$#" -gt 0 ]]; do
       ;;
   esac
 done
+
+identity_build_arguments=(ONLY_ACTIVE_ARCH=YES)
+if [[ "$ISOLATED_IDENTITY_ACCEPTANCE" -eq 1 ]]; then
+  if [[ "$LOCAL_ACCEPTANCE" -ne 1 || "$PACKAGE_MODE" != "local" || "$NOTARIZE" -ne 0 ]]; then
+    echo "Isolated identity acceptance requires captured local acceptance; distribution is forbidden." >&2
+    exit 64
+  fi
+  identity_build_arguments+=(PRODUCT_BUNDLE_IDENTIFIER=com.okvideomac.OKVideoMac.acceptance8b3b)
+fi
+
+# This opt-in is accepted only on a captured source tree. The ordinary local
+# and distribution workflows retain their clean-worktree/commit requirement.
+if [[ "$LOCAL_ACCEPTANCE" -eq 1 ]]; then
+  if [[ "$PACKAGE_MODE" != "local" || "$NOTARIZE" -ne 0 ]]; then
+    echo "Local acceptance cannot use distribution signing or notarization." >&2
+    exit 64
+  fi
+  PYTHONDONTWRITEBYTECODE=1 python3 "$REPOSITORY_ROOT/Tools/SourceAudit/local_acceptance.py" \
+    --repo "$REPOSITORY_ROOT" --verify
+fi
 
 case "$PACKAGE_MODE" in
   local)
@@ -214,6 +244,7 @@ xcodebuild \
   EXCLUDED_ARCHS=x86_64 \
   CODE_SIGNING_ALLOWED=NO \
   ENABLE_CODE_COVERAGE=NO \
+  "${identity_build_arguments[@]}" \
   clean build
 
 if [[ ! -d "$APP_SOURCE" ]]; then
@@ -262,6 +293,9 @@ source_release_arguments=(
   --commit HEAD
   --apk "$ANDROID_BRIDGE_APK"
 )
+if [[ "$LOCAL_ACCEPTANCE" -eq 1 ]]; then
+  source_release_arguments+=(--local-acceptance)
+fi
 if [[ "${OKVIDEOMAC_SOURCE_RELEASE_OFFLINE:-0}" == "1" ]]; then
   source_release_arguments+=(--offline)
 fi
@@ -617,6 +651,14 @@ create_dmg() {
 
 create_archive
 create_dmg
+if [[ "$LOCAL_ACCEPTANCE" -eq 1 ]]; then
+  # Verify the distributable ZIP after extraction, not just its staging input.
+  ACCEPTANCE_EXTRACT="$PACKAGE_STAGING/ArchiveVerification"
+  mkdir "$ACCEPTANCE_EXTRACT"
+  ditto -x -k "$ARCHIVE" "$ACCEPTANCE_EXTRACT"
+  "$SCRIPT_DIR/verify-bundle.sh" "$ACCEPTANCE_EXTRACT/OKVideoMac.app"
+  "$SCRIPT_DIR/verify-release-signing.sh" --mode local "$ACCEPTANCE_EXTRACT/OKVideoMac.app"
+fi
 if [[ "$NOTARIZE" -eq 1 ]]; then
   NOTARY_RESULT="$ARTIFACTS/OKVideoMac-${APP_VERSION}-notarization.json"
   xcrun notarytool submit "$DMG" \
@@ -654,17 +696,22 @@ fi
 # Preserve the established ZIP source/binary identity check: it verifies the
 # embedded source index and APK byte-for-byte. The final public DMG is added as
 # an outer release artifact and is independently checked by verify-dmg.sh.
-"$SCRIPT_DIR/create-source-release.sh" \
-  --output-dir "$SOURCE_RELEASE_DIR" \
-  --cache-dir "$SOURCE_RELEASE_CACHE" \
-  --commit HEAD \
-  --apk "$ANDROID_BRIDGE_APK" \
-  --binary "$ARCHIVE" \
-  --release-artifact "$DMG" \
-  --sbom "$SBOM_DIR/OKVideoMac-macOS.spdx.json" \
-  --sbom "$SBOM_DIR/OKVideoMac-macOS.cdx.json" \
-  --sbom "$SBOM_DIR/OKVideoMac-Android.spdx.json" \
-  --sbom "$SBOM_DIR/OKVideoMac-Android.cdx.json" \
+final_source_arguments=(
+  --output-dir "$SOURCE_RELEASE_DIR"
+  --cache-dir "$SOURCE_RELEASE_CACHE"
+  --commit HEAD
+  --apk "$ANDROID_BRIDGE_APK"
+  --binary "$ARCHIVE"
+  --sbom "$SBOM_DIR/OKVideoMac-macOS.spdx.json"
+  --sbom "$SBOM_DIR/OKVideoMac-macOS.cdx.json"
+  --sbom "$SBOM_DIR/OKVideoMac-Android.spdx.json"
+  --sbom "$SBOM_DIR/OKVideoMac-Android.cdx.json"
+)
+if [[ "$LOCAL_ACCEPTANCE" -eq 1 ]]; then
+  final_source_arguments+=(--local-acceptance)
+fi
+final_source_arguments+=(--release-artifact "$DMG")
+"$SCRIPT_DIR/create-source-release.sh" "${final_source_arguments[@]}" \
   --offline
 
 # This second pass covers the final, possibly stapled DMG and every adjacent
@@ -690,8 +737,16 @@ rm -rf "$FINAL_APP_STAGING"
 cp -R "$APP_DESTINATION" "$FINAL_APP_STAGING"
 rm -rf "$FINAL_APP_DESTINATION"
 mv "$FINAL_APP_STAGING" "$FINAL_APP_DESTINATION"
+if [[ "$LOCAL_ACCEPTANCE" -eq 1 ]]; then
+  "$SCRIPT_DIR/verify-bundle.sh" "$FINAL_APP_DESTINATION"
+  "$SCRIPT_DIR/verify-release-signing.sh" --mode local "$FINAL_APP_DESTINATION"
+fi
 
 echo "Packaged app: $FINAL_APP_DESTINATION"
 echo "Internal archive: $ARCHIVE"
-echo "Public DMG: $DMG"
+if [[ "$LOCAL_ACCEPTANCE" -eq 0 ]]; then
+  echo "Public DMG: $DMG"
+else
+  echo "LOCAL ACCEPTANCE ONLY DMG: $DMG (not notarized; no publication or installation performed)"
+fi
 echo "Source release: $SOURCE_RELEASE_DIR"

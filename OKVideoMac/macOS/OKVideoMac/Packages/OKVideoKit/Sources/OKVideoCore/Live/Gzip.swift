@@ -7,6 +7,7 @@ public enum Gzip {
     }
 
     public static func decompress(_ data: Data, maximumOutputBytes: Int = 64 * 1_024 * 1_024) throws -> Data {
+        try Task.checkCancellation()
         guard isCompressed(data) else { return data }
         guard !data.isEmpty else { return Data() }
 
@@ -34,6 +35,7 @@ public enum Gzip {
             stream.avail_in = uInt(data.count)
 
             repeat {
+                try Task.checkCancellation()
                 var buffer = [UInt8](repeating: 0, count: chunkSize)
                 let produced = buffer.withUnsafeMutableBytes { rawOutput -> Int in
                     stream.next_out = rawOutput.bindMemory(to: Bytef.self).baseAddress
@@ -57,4 +59,3 @@ public enum Gzip {
         return output
     }
 }
-

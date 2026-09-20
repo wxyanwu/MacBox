@@ -1202,8 +1202,13 @@ final class BridgeServer {
                 forwarded.put(name, value);
             }
         }
-        for (Map.Entry<String, String> entry
-                : session.headerSnapshot().entrySet()) {
+        final Map<String, String> sessionHeaders;
+        final String sessionFingerprint;
+        synchronized (session) {
+            sessionHeaders = session.headerSnapshot();
+            sessionFingerprint = session.upstreamFingerprint;
+        }
+        for (Map.Entry<String, String> entry : sessionHeaders.entrySet()) {
             putHeaderIgnoreCase(
                     forwarded,
                     entry.getKey(),
@@ -1215,6 +1220,10 @@ final class BridgeServer {
             putHeaderIgnoreCase(forwarded, "Range", range);
         }
         URI providerProxy = providerProxyURI(session.upstreamURL);
+        if (BuildConfig.MEDIA_RANGE_AUDIT && "1".equals(clientHeaders.get("x-okvideomac-range-audit"))) {
+            writeJSON(output, 200, MediaRangeAudit.run(session, forwarded, providerProxy == null));
+            return;
+        }
         if (providerProxy != null) {
             if (session.owner == null) {
                 writeJSON(
@@ -1264,6 +1273,12 @@ final class BridgeServer {
             writeProxy(output, response, headersOnly);
             return;
         }
+        synchronized (session) {
+            if (!sessionFingerprint.equals(session.upstreamFingerprint)) throw new IOException("Media context changed");
+            if (session.virtualRange != null && range != null) {
+                putHeaderIgnoreCase(forwarded, "Range", session.virtualRange.upstreamRange(range));
+            }
+        }
         final SessionMediaResponse mediaResponse;
         try {
             URI upstream = requireSessionMediaURI(session.upstreamURL);
@@ -1287,6 +1302,27 @@ final class BridgeServer {
             return;
         }
         try (Response response = mediaResponse.response) {
+            String normalizedRange = null;
+            synchronized (session) {
+                if (!sessionFingerprint.equals(session.upstreamFingerprint)
+                        || BridgeMediaSessionRegistry.get(session.id) != session) throw new IOException("Media context changed");
+                if (!headersOnly && !session.virtualRangeProbeAttempted
+                        && VirtualMediaRange.candidate(response, range)) {
+                    session.virtualRangeProbeAttempted = true;
+                    session.virtualRange = VirtualMediaRange.probe(response, mediaResponse.headers);
+                    if (BridgeMediaSessionRegistry.get(session.id) != session) throw new IOException("Media session expired during proof");
+                    Log.i(TAG, "MediaRangeProof session=" + shortHash(session.id)
+                            + " outcome=" + (session.virtualRange == null ? "unproven" : "verified"));
+                }
+                if (session.virtualRange != null && range != null && response.code() == 206) {
+                    normalizedRange = session.virtualRange.downstreamRange(range, response.header("Content-Range"));
+                } else if (response.code() == 206) {
+                    long[] requested = VirtualMediaRange.requestedRange(range);
+                    long[] returned = VirtualMediaRange.contentRange(response.header("Content-Range"));
+                    if (requested != null && returned != null && requested[0] != returned[0])
+                        throw new IOException("Upstream byte offset mismatch");
+                }
+            }
             Log.i(
                     TAG,
                     "Media session request=" + requestID
@@ -1311,7 +1347,22 @@ final class BridgeServer {
             // next Range request. Reassembling ranges inside the bridge can
             // deadlock playback when a signed CDN rejects a continuation.
             try {
-                writeMediaResponse(output, response, headersOnly);
+                Log.i(TAG, "MediaRead request=" + requestID
+                        + " session=" + shortHash(session.id)
+                        + " clientRange=" + safeByteMetadata(range)
+                        + " forwardedRange=" + safeByteMetadata(response.request().header("Range"))
+                        + " status=" + response.code()
+                        + " contentRange=" + safeByteMetadata(response.header("Content-Range"))
+                        + " contentLength=" + safeByteMetadata(response.header("Content-Length"))
+                        + " bodyLength=" + (response.body() == null ? -1 : response.body().contentLength())
+                        + " outputRange=" + safeByteMetadata(normalizedRange == null ? response.header("Content-Range") : normalizedRange)
+                        + " outputFraming=chunked");
+                MEDIA_READ_REQUEST.set(requestID);
+                try {
+                    writeMediaResponse(output, response, headersOnly, normalizedRange);
+                } finally {
+                    MEDIA_READ_REQUEST.remove();
+                }
             } catch (IOException error) {
                 // Closing the response eventually releases the body, but an
                 // explicit cancel stops the upstream transfer immediately
@@ -1546,11 +1597,19 @@ final class BridgeServer {
             Response response,
             boolean headersOnly
     ) throws IOException {
+        writeMediaResponse(output, response, headersOnly, null);
+    }
+
+    private static void writeMediaResponse(
+            BufferedOutputStream output, Response response, boolean headersOnly, String normalizedRange
+    ) throws IOException {
         ResponseBody responseBody = response.body();
         String contentType = response.header(
                 "Content-Type",
                 "application/octet-stream"
         );
+        Map<String, String> headers = mediaResponseHeaders(response);
+        if (normalizedRange != null) putHeaderIgnoreCase(headers, "Content-Range", normalizedRange);
         writeProxy(
                 output,
                 new Object[] {
@@ -1559,7 +1618,7 @@ final class BridgeServer {
                         responseBody == null
                                 ? new ByteArrayInputStream(new byte[0])
                                 : responseBody.byteStream(),
-                        mediaResponseHeaders(response)
+                        headers
                 },
                 headersOnly
         );
@@ -1709,14 +1768,22 @@ final class BridgeServer {
                 .append("\r\n")
                 .append("Transfer-Encoding: chunked\r\n")
                 .append("Connection: close\r\n");
+        long expectedBytes = -1;
         if (response.length > 3 && response[3] instanceof Map) {
             appendForwardedProxyHeaders(
                     rawHeaders,
                     (Map<?, ?>) response[3]
             );
+            for (Map.Entry<?, ?> entry : ((Map<?, ?>) response[3]).entrySet()) {
+                if ("Content-Range".equalsIgnoreCase(String.valueOf(entry.getKey()))) {
+                    long[] range = VirtualMediaRange.contentRange(String.valueOf(entry.getValue()));
+                    if (range != null && (status == 200 || status == 206)) expectedBytes = range[1] - range[0] + 1;
+                }
+            }
         }
         rawHeaders.append("\r\n");
         long bytesWritten = 0L;
+        String termination = "complete";
         try {
             output.write(
                     rawHeaders.toString().getBytes(StandardCharsets.US_ASCII)
@@ -1724,48 +1791,39 @@ final class BridgeServer {
             try (InputStream stream = body) {
                 if (!headersOnly) {
                     byte[] buffer = new byte[MEDIA_COPY_BUFFER_BYTES];
-                    int count;
-                    try {
-                        while ((count = stream.read(buffer)) != -1) {
-                            if (count == 0) continue;
-                            output.write(
-                                    Integer.toHexString(count).getBytes(
-                                            StandardCharsets.US_ASCII
-                                    )
-                            );
-                            output.write("\r\n".getBytes(StandardCharsets.US_ASCII));
-                            output.write(buffer, 0, count);
-                            output.write("\r\n".getBytes(StandardCharsets.US_ASCII));
-                            bytesWritten += count;
+                    while (expectedBytes < 0 || bytesWritten < expectedBytes) {
+                        int count;
+                        try {
+                            int limit = expectedBytes < 0 ? buffer.length : (int) Math.min(buffer.length, expectedBytes - bytesWritten);
+                            count = stream.read(buffer, 0, limit);
+                            if (count == -1 && expectedBytes >= 0) throw new EOFException("Incomplete media range");
+                        } catch (IOException upstreamFailure) {
+                            // A normal final chunk certifies success. Never emit
+                            // it for premature EOF or a failed upstream read.
+                            output.flush();
+                            throw new MediaResponseCommittedException(upstreamFailure, bytesWritten, "truncated_upstream");
                         }
-                    } catch (IOException upstreamFailure) {
-                        if (bytesWritten <= 0L) throw upstreamFailure;
-                        // OkHttp reports a ProtocolException when a provider
-                        // closes a nominal range before its declared length.
-                        // The response headers are already committed, so an
-                        // HTTP error is impossible. Close our chunked body
-                        // cleanly: libmpv can then observe a short range and
-                        // issue its own continuation request instead of seeing
-                        // a malformed chunk stream and `loading failed`.
+                        if (count == -1) break;
+                        if (count == 0) continue;
                         output.write(
-                                "0\r\n\r\n".getBytes(
+                                Integer.toHexString(count).getBytes(
                                         StandardCharsets.US_ASCII
                                 )
                         );
-                        output.flush();
-                        throw new MediaResponseCommittedException(
-                                upstreamFailure,
-                                bytesWritten,
-                                "truncated_upstream"
-                        );
+                        output.write("\r\n".getBytes(StandardCharsets.US_ASCII));
+                        output.write(buffer, 0, count);
+                        output.write("\r\n".getBytes(StandardCharsets.US_ASCII));
+                        bytesWritten += count;
                     }
                 }
-                output.write("0\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+                if (!headersOnly) output.write("0\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
                 output.flush();
             }
         } catch (MediaResponseCommittedException error) {
+            termination = error.category;
             throw error;
         } catch (IOException error) {
+            termination = bytesWritten > 0 ? "client_transport_interrupted" : "relay_setup_failed";
             throw new MediaResponseCommittedException(
                     error,
                     bytesWritten,
@@ -1773,7 +1831,22 @@ final class BridgeServer {
                             ? "client_transport_interrupted"
                             : "relay_setup_failed"
             );
+        } finally {
+            String requestID = MEDIA_READ_REQUEST.get();
+            if (requestID != null) {
+                Log.i(TAG, "MediaReadEnd request=" + requestID
+                        + " bytes=" + bytesWritten + " termination=" + termination);
+            }
         }
+    }
+
+    private static final ThreadLocal<String> MEDIA_READ_REQUEST = new ThreadLocal<>();
+
+    // Only byte-range syntax can reach diagnostics; never arbitrary headers.
+    static String safeByteMetadata(String value) {
+        if (value == null) return "unknown";
+        if (value.length() > 96 || !value.matches("(?:bytes[= ])?[0-9*/-]+")) return "invalid";
+        return value.replace(' ', ':');
     }
 
     private static boolean validProxyResponse(Object[] response) {

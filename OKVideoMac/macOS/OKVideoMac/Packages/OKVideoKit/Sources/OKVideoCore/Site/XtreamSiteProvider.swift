@@ -173,6 +173,10 @@ public final class XtreamSiteProvider: SiteProvider, @unchecked Sendable {
                 name: normalized(stream.name) ?? remoteID,
                 number: normalized(stream.number),
                 logoURL: safeLiveArtworkURL(stream.streamIcon),
+                tvgID: normalized(stream.epgChannelID).flatMap { value in
+                    value.count <= 512 && !value.contains("://")
+                        && !liveArtworkCredentialValues.contains(where: { value.contains($0) }) ? value : nil
+                },
                 streams: targets,
                 explicitID: "xtr1.live.channel.\(providerIdentity).\(XtreamHex.encode(remoteID))",
                 explicitGroupID: groupID
@@ -226,10 +230,9 @@ public final class XtreamSiteProvider: SiteProvider, @unchecked Sendable {
     }
 
     public func home() async throws -> SiteHome {
-        // A provider can remain saved after its subscription expires.  Treat
-        // the account endpoint as the session admission gate so a stale
-        // `status=Active` catalogue cannot keep looking usable when exp_date
-        // has already elapsed.
+        // Revalidate the server's explicit account state before loading the
+        // catalogue. An Active response remains admissible when exp_date is
+        // stale; explicit authentication and status failures still stop here.
         _ = try await client.authenticate()
         async let movieCategories = vodCategories()
         async let seriesCategories = seriesCategories()

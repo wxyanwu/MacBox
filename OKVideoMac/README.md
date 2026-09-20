@@ -11,7 +11,9 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
 ## 当前版本
 
-- 当前版本：0.6.1（Build 101）
+- 当前版本：0.7.0（Build 102）
+- 当前本地验收包目标 tag 为 `v0.7.0`；本轮不创建 tag 或公开 Release。
+- 当前 source release index：`OKVideoMac-0.7.0-build102-SOURCE_RELEASE_INDEX.json`。
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
 - 播放历史按点播配置源分组；切换同一配置内的站点不会隐藏历史，历史项仍保留

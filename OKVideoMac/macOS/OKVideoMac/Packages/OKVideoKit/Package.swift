@@ -31,6 +31,10 @@ let package = Package(
             name: "OKVideoPersistence",
             dependencies: ["OKVideoCore", "CSQLite"]
         ),
+        // Explicit developer invocation only; neither App library depends on this target.
+        .target(name: "OKVideoMigrationDiagnostics", dependencies: ["OKVideoCore", "OKVideoPersistence", "CSQLite"]),
+        .executableTarget(name: "ImportedIdentityDryRun", dependencies: ["OKVideoMigrationDiagnostics"]),
+        .testTarget(name: "OKVideoMigrationDiagnosticsTests", dependencies: ["OKVideoMigrationDiagnostics", "OKVideoPersistence", "OKVideoCore", "CSQLite"]),
         .testTarget(
             name: "OKVideoCoreTests",
             dependencies: ["OKVideoCore"],
@@ -44,4 +48,3 @@ let package = Package(
         )
     ]
 )
-

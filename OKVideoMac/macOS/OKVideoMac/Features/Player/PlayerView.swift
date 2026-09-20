@@ -64,6 +64,14 @@ struct PlayerView: View {
                 onDoubleClick: handleSurfaceDoubleClick
             )
 
+            if !state.isLivePlayback {
+                PlayerDanmakuLayer(
+                    coordinator: state.danmaku,
+                    snapshotState: playerSnapshotState
+                )
+                .allowsHitTesting(false)
+            }
+
             if controlsVisible {
                 Group {
                     if state.isLivePlayback {
@@ -96,6 +104,12 @@ struct PlayerView: View {
                 .transition(.opacity)
                 .allowsHitTesting(false)
                 .zIndex(45)
+            }
+
+            if !state.isLivePlayback,
+               let prompt = state.playbackEndingSkipPrompt {
+                endingSkipPromptOverlay(prompt)
+                    .zIndex(46)
             }
 
             if state.isLivePlayback {
@@ -309,23 +323,8 @@ struct PlayerView: View {
                     .foregroundColor(.white.opacity(0.68))
                     .lineLimit(1)
 
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text(L10n.string("player.now-playing", fallback: "Now Playing"))
-                        .foregroundColor(.white.opacity(0.72))
-                    Text(
-                        state.livePlaybackProgrammes.current?.title
-                            ?? L10n.string("player.live-program", fallback: "Live Program")
-                    )
-                    .fontWeight(.semibold)
-                    .lineLimit(1)
-                }
-
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text(L10n.string("player.up-next", fallback: "Up Next"))
-                        .foregroundColor(.white.opacity(0.72))
-                    Text(state.livePlaybackProgrammes.next?.title ?? "--")
-                        .fontWeight(.semibold)
-                        .lineLimit(1)
+                if let channel = state.livePlaybackChannel, let source = state.livePlaybackSourceID {
+                    LiveNowNextView(epg: state.liveEPG, channel: channel, source: source)
                 }
             }
             .font(.system(size: 14))
@@ -848,6 +847,7 @@ struct PlayerView: View {
             compactPanelAction(.episodes, title: L10n.string("player.choose-episode", fallback: "Choose Episode"))
             compactPanelAction(.audio, title: L10n.string("player.audio-tracks", fallback: "Audio Tracks"))
             compactPanelAction(.subtitles, title: L10n.string("player.subtitles", fallback: "Subtitles"))
+            compactPanelAction(.danmaku, title: "弹幕")
             compactPanelAction(.settings, title: L10n.string("player.settings", fallback: "Playback Settings"))
         } label: {
             utilityMenuIcon("ellipsis.circle")
@@ -1112,6 +1112,11 @@ struct PlayerView: View {
                     : L10n.string("player.subtitles.off", fallback: "Subtitles Off")
             )
             utilityPanelButton(
+                systemImage: "text.bubble",
+                panel: .danmaku,
+                help: state.danmaku.isEnabled ? "弹幕已开启" : "弹幕已关闭"
+            )
+            utilityPanelButton(
                 systemImage: "gearshape",
                 panel: .settings,
                 help: L10n.string("player.settings", fallback: "Playback Settings")
@@ -1173,8 +1178,19 @@ struct PlayerView: View {
             audioTrackPanel(maximumSize: maximumSize)
         case .subtitles:
             subtitlePanel(maximumSize: maximumSize)
+        case .danmaku:
+            danmakuPanel(maximumSize: maximumSize)
         case .settings:
             playbackSettingsPanel(maximumSize: maximumSize)
+        }
+    }
+
+    private func danmakuPanel(maximumSize: CGSize) -> some View {
+        playerPanel(width: 390, maximumSize: maximumSize) {
+            PlayerDanmakuPanel(
+                coordinator: state.danmaku,
+                importXML: chooseDanmakuXML
+            )
         }
     }
 
@@ -1482,6 +1498,109 @@ struct PlayerView: View {
                         .controlSize(.small)
                     }
 
+                    panelDivider
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(
+                            L10n.string(
+                                "player.skip.title",
+                                fallback: "Skip Opening and Ending"
+                            )
+                        )
+                        .font(.system(size: 13, weight: .semibold))
+
+                        Toggle(
+                            L10n.string(
+                                "player.skip.all-episodes",
+                                fallback: "Apply to All Episodes on This Line"
+                            ),
+                            isOn: Binding(
+                                get: {
+                                    state.playbackSkipAppliesToAllEpisodes
+                                },
+                                set: {
+                                    state.setPlaybackSkipAppliesToAllEpisodes($0)
+                                }
+                            )
+                        )
+                        .toggleStyle(.checkbox)
+
+                        playbackSkipEditorRow(
+                            title: L10n.string(
+                                "player.skip.opening",
+                                fallback: "Opening"
+                            ),
+                            value: state.playbackSkipOpeningEnd,
+                            enabled: state.playbackSkipOpeningEnabled,
+                            setTitle: L10n.string(
+                                "player.skip.set-opening",
+                                fallback: "Set Current Position as Opening End"
+                            ),
+                            canMark: state.canMarkPlaybackOpening,
+                            setEnabled: { enabled in
+                                Task {
+                                    await state.setPlaybackOpeningSkipEnabled(
+                                        enabled
+                                    )
+                                }
+                            },
+                            adjust: { delta in
+                                Task {
+                                    await state.adjustPlaybackOpening(by: delta)
+                                }
+                            },
+                            mark: {
+                                Task {
+                                    await state.markPlaybackOpeningAtCurrentPosition()
+                                }
+                            }
+                        )
+
+                        playbackSkipEditorRow(
+                            title: L10n.string(
+                                "player.skip.ending",
+                                fallback: "Ending"
+                            ),
+                            value: state.playbackSkipEndingDuration,
+                            enabled: state.playbackSkipEndingEnabled,
+                            setTitle: L10n.string(
+                                "player.skip.set-ending",
+                                fallback: "Set Current Position as Ending Start"
+                            ),
+                            canMark: state.canMarkPlaybackEnding,
+                            setEnabled: { enabled in
+                                Task {
+                                    await state.setPlaybackEndingSkipEnabled(
+                                        enabled
+                                    )
+                                }
+                            },
+                            adjust: { delta in
+                                Task {
+                                    await state.adjustPlaybackEnding(by: delta)
+                                }
+                            },
+                            mark: {
+                                Task {
+                                    await state.markPlaybackEndingAtCurrentPosition()
+                                }
+                            }
+                        )
+
+                        Button(
+                            L10n.string(
+                                "player.skip.clear",
+                                fallback: "Clear These Skip Points"
+                            )
+                        ) {
+                            Task {
+                                await state.clearSelectedPlaybackSkipRule()
+                            }
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                    }
+
                     if state.playbackQualities.count > 1 {
                         panelDivider
                         panelOptionGrid(
@@ -1559,6 +1678,110 @@ struct PlayerView: View {
                 }
             }
         }
+    }
+
+    private func playbackSkipEditorRow(
+        title: String,
+        value: TimeInterval?,
+        enabled: Bool,
+        setTitle: String,
+        canMark: Bool,
+        setEnabled: @escaping (Bool) -> Void,
+        adjust: @escaping (TimeInterval) -> Void,
+        mark: @escaping () -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Toggle(
+                    title,
+                    isOn: Binding(
+                        get: { enabled },
+                        set: setEnabled
+                    )
+                )
+                .toggleStyle(.checkbox)
+                .disabled(value == nil)
+
+                Spacer()
+
+                Button { adjust(-1) } label: {
+                    Image(systemName: "minus")
+                }
+                .buttonStyle(.borderless)
+                .disabled(value == nil)
+
+                Text(
+                    value.map(formatTime)
+                        ?? L10n.string(
+                            "player.skip.not-set",
+                            fallback: "Not Set"
+                        )
+                )
+                .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                .frame(minWidth: 52)
+
+                Button { adjust(1) } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.borderless)
+                .disabled(value == nil)
+            }
+
+            Button(setTitle, action: mark)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!canMark)
+        }
+    }
+
+    private func endingSkipPromptOverlay(
+        _ prompt: PlaybackEndingSkipPrompt
+    ) -> some View {
+        VStack {
+            Spacer()
+            HStack(spacing: 12) {
+                Text(
+                    prompt.willAdvanceAutomatically
+                        ? L10n.string(
+                            "player.skip.ending-countdown",
+                            fallback: "Skipping ending in %d seconds",
+                            prompt.secondsUntilBoundary
+                        )
+                        : L10n.string(
+                            "player.skip.ending-ready",
+                            fallback: "Ending reached"
+                        )
+                )
+                .font(.callout.weight(.semibold))
+
+                Button(
+                    L10n.string(
+                        "player.skip.now",
+                        fallback: "Skip Now"
+                    )
+                ) {
+                    state.skipEndingNow()
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button(
+                    L10n.string(
+                        "player.skip.cancel-current",
+                        fallback: "Don't Skip This Episode"
+                    )
+                ) {
+                    state.suppressEndingSkipForCurrentPlayback()
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .foregroundStyle(.white)
+            .background(.black.opacity(0.76), in: Capsule())
+            .environment(\.colorScheme, .dark)
+            .padding(.bottom, controlsVisible ? 100 : 28)
+        }
+        .transition(.opacity.combined(with: .move(edge: .bottom)))
     }
 
     private func playerPanel<Content: View>(
@@ -2286,6 +2509,19 @@ struct PlayerView: View {
         }
     }
 
+    private func chooseDanmakuXML() {
+        let panel = NSOpenPanel()
+        panel.title = "选择 Bilibili XML 弹幕"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = ["xml"]
+            .compactMap { UTType(filenameExtension: $0) }
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            state.danmaku.importXML(from: url)
+        }
+    }
+
     private func chooseScreenshotLocation() {
         let panel = NSSavePanel()
         panel.title = L10n.string("player.save-screenshot.title", fallback: "Save Playback Screenshot")
@@ -2597,6 +2833,7 @@ private enum PlayerUtilityPanel: Equatable {
     case episodes
     case audio
     case subtitles
+    case danmaku
     case settings
 }
 

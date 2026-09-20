@@ -646,6 +646,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
     private let configurationSemanticRevision: String?
     private let capturedPlaybackReferenceLock = NSLock()
     private var capturedPlaybackReferences: [String: PlaybackResourceReference] = [:]
+    private let pushedDanmakuLock = NSLock()
+    private var pushedDanmakuByPlaybackRequest: [UUID: JSONValue] = [:]
     private let routeClient: CatPawRouteClient
     private let hostMessageBridge: CatPawHostMessageBridge
     private let authorizationCoordinator: CatPawAuthorizationCoordinator
@@ -1354,6 +1356,9 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         flag: String,
         episodeURL: String
     ) async throws -> SitePlaybackResult {
+        if let context = NodeTransferPlaybackTaskContext.current {
+            discardPushedDanmaku(for: context.requestID)
+        }
         let body: [String: JSONValue] = [
             "flag": .string(flag),
             "id": .string(episodeURL),
@@ -1397,6 +1402,9 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             maximumAttempts: 1
         )
         if let hostMessage = invocation.hostMessage {
+            if hostMessage.action == "danmuPush" {
+                capturePushedDanmaku(hostMessage)
+            }
             if hostMessage.action == "openInternalWebview" {
                 throw try await webAuthorizationRequired(
                     hostMessage: hostMessage,
@@ -1452,6 +1460,14 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                 throw authorization
             }
             throw providerError
+        }
+        if let transferContext = NodeTransferPlaybackTaskContext.current {
+            let pushed = takePushedDanmaku(for: transferContext.requestID)
+            // A source-authored player result has higher authority than an
+            // auxiliary push from the same invocation.
+            if result.danmaku == nil {
+                result.danmaku = pushed
+            }
         }
         // Site-level headers (for example Referer/User-Agent) are part of the
         // provider contract. Player-response headers override them, but must
@@ -2363,6 +2379,10 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                 baseURL: baseURL,
                 waitMilliseconds: 1_000
             ) {
+                if message.action == "danmuPush" {
+                    capturePushedDanmaku(message)
+                    continue
+                }
                 if message.action == "sniff" {
                     await performHostSniff(
                         message,
@@ -2390,6 +2410,64 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             try await Task.sleep(nanoseconds: 100_000_000)
         }
         throw CancellationError()
+    }
+
+    private func capturePushedDanmaku(_ message: HostMessage) {
+        guard message.action == "danmuPush",
+              let context = NodeTransferPlaybackTaskContext.current,
+              var options = message.opt.objectValue,
+              options["playbackRequestID"]?.stringValue?
+                .caseInsensitiveCompare(context.requestID.uuidString)
+                    == .orderedSame,
+              Self.hostMessageGeneration(options["requestGeneration"])
+                == context.requestGeneration else {
+            return
+        }
+        if let declaredModulePath = options["runtimeModulePath"]?.stringValue,
+           declaredModulePath != Self.runtimeModulePath(from: site.api) {
+            return
+        }
+        for key in [
+            "challengeID", "playbackRequestID", "requestGeneration",
+            "runtimeGeneration", "runtimeModulePath", "phase",
+            "configurationID", "semanticRevision", "siteIdentity",
+            "profileRevisionBefore"
+        ] {
+            options.removeValue(forKey: key)
+        }
+        pushedDanmakuLock.lock()
+        pushedDanmakuByPlaybackRequest[context.requestID] = .object(options)
+        if pushedDanmakuByPlaybackRequest.count > 16 {
+            pushedDanmakuByPlaybackRequest = [
+                context.requestID: .object(options)
+            ]
+        }
+        pushedDanmakuLock.unlock()
+    }
+
+    private func takePushedDanmaku(for requestID: UUID) -> JSONValue? {
+        pushedDanmakuLock.lock()
+        defer { pushedDanmakuLock.unlock() }
+        return pushedDanmakuByPlaybackRequest.removeValue(forKey: requestID)
+    }
+
+    private func discardPushedDanmaku(for requestID: UUID) {
+        pushedDanmakuLock.lock()
+        pushedDanmakuByPlaybackRequest.removeValue(forKey: requestID)
+        pushedDanmakuLock.unlock()
+    }
+
+    private static func hostMessageGeneration(_ value: JSONValue?) -> UInt64? {
+        switch value {
+        case .integer(let value) where value > 0:
+            return UInt64(value)
+        case .number(let value) where value.isFinite && value > 0:
+            return UInt64(value)
+        case .string(let value):
+            return UInt64(value)
+        default:
+            return nil
+        }
     }
 
     private func performHostSniff(

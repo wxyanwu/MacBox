@@ -1,5 +1,10 @@
 # Immutable Corresponding-Source Release Process
 
+The current 0.7.0 (Build 102) local acceptance workflow uses
+`OKVideoMac-0.7.0-macOS-arm64.zip` and `OKVideoMac-0.7.0.dmg`. These locally
+verified ad-hoc artifacts do not replace the notarized public 0.6.1 release or
+create a public tag.
+
 > The 0.6.1 DMG passed Developer ID signing, Apple notarization, stapling, Gatekeeper
 > and installation smoke tests. Tag `v0.6.1` pins release commit
 > `25155f52fb8c416f3245c9a829a93175dec9857b`; see the

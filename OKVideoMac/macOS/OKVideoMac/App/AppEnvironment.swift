@@ -16,7 +16,7 @@ struct AppEnvironment {
     let liveSourceLoader: LiveSourceLoader
     let database: SQLiteStore
     let recoveredDatabaseDirectory: URL?
-    let epgService: XMLTVService
+    let productionEPGRepository: EPGProductionRepository
     let spiderRuntimeFactory: SpiderRuntimeFactory?
     let nodeBundleRuntime: NodeBundleRuntimeService
     let androidRuntimeManager: AndroidManagedRuntimeManager
@@ -28,6 +28,7 @@ struct AppEnvironment {
 
     @MainActor
     static func live() throws -> AppEnvironment {
+        let acceptance = try acceptanceWorkspace()
         let directories = try runtimeDirectories()
         let processEnvironment = ProcessInfo.processInfo.environment
         if !isXCTestHost(environment: processEnvironment) {
@@ -57,7 +58,12 @@ struct AppEnvironment {
             configuration: imageConfiguration
         )
         let databaseURL = directories.database.appendingPathComponent("OKVideoMac.sqlite3")
-        let databaseResult = try SQLiteStore.openRecovering(databaseURL: databaseURL)
+        let databaseResult: SQLiteStore.OpenResult
+        if let acceptance {
+            databaseResult = try .init(store: SQLiteStore(importedAcceptance: acceptance), quarantinedDatabaseDirectory: nil)
+        } else {
+            databaseResult = try SQLiteStore.openRecovering(databaseURL: databaseURL)
+        }
         let player = PlayerLifecycleController(
             mode: PlayerTeardownMode.configured()
         )
@@ -125,10 +131,9 @@ struct AppEnvironment {
             liveSourceLoader: LiveSourceLoader(httpClient: interactiveHTTPClient),
             database: databaseResult.store,
             recoveredDatabaseDirectory: databaseResult.quarantinedDatabaseDirectory,
-            epgService: try XMLTVService(
-                httpClient: interactiveHTTPClient,
+            productionEPGRepository: EPGProductionRepository(
                 cacheDirectory: directories.caches.appendingPathComponent(
-                    "EPG",
+                    "EPGCache-v3",
                     isDirectory: true
                 )
             ),
@@ -151,7 +156,9 @@ struct AppEnvironment {
                     httpClient: imageHTTPClient
                 )
             ),
-            xtreamCredentialStore: KeychainXtreamCredentialStore()
+            xtreamCredentialStore: KeychainXtreamCredentialStore(service: acceptance == nil
+                ? KeychainXtreamCredentialStore.defaultService
+                : "com.okvideomac.acceptance.8b3b.\(acceptance!.root.lastPathComponent)")
         )
     }
 
@@ -165,6 +172,9 @@ struct AppEnvironment {
         processIdentifier: Int32 = ProcessInfo.processInfo.processIdentifier,
         fileManager: FileManager = .default
     ) throws -> AppDirectories {
+        if let acceptance = try acceptanceWorkspace(environment: environment) {
+            return try AppDirectories(applicationSupport: acceptance.support, caches: acceptance.caches, fileManager: fileManager)
+        }
         guard isXCTestHost(environment: environment) else {
             return try AppDirectories(fileManager: fileManager)
         }
@@ -187,6 +197,20 @@ struct AppEnvironment {
     static func isXCTestHost(environment: [String: String]) -> Bool {
         environment["XCTestConfigurationFilePath"] != nil
             || environment["XCTestBundlePath"] != nil
+    }
+
+    /// A distinct bundle ID isolates UserDefaults, AppStorage, URLSession's
+    /// system cache and saved window state without changing Player code.
+    static func acceptanceWorkspace(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier
+    ) throws -> ImportedAcceptanceWorkspace? {
+        let candidate = bundleIdentifier == "com.okvideomac.OKVideoMac.acceptance8b3b"
+        guard candidate || environment["OKVIDEOMAC_8B3B_ROOT"] != nil else { return nil }
+        guard candidate, let path = environment["OKVIDEOMAC_8B3B_ROOT"], !path.isEmpty else {
+            throw ImportedAcceptanceWorkspace.AcceptanceError.unsafeWorkspace
+        }
+        return try ImportedAcceptanceWorkspace(root: URL(fileURLWithPath: path))
     }
 }
 

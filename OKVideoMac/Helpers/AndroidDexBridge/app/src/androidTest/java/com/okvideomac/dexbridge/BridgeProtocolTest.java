@@ -64,6 +64,86 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class BridgeProtocolTest extends TestCase {
+    public void testVirtualRepresentationProofAndBoundedSeekEndToEnd() throws Exception {
+        ensureBridgeServer();
+        byte[] logical = new byte[10000];
+        for (int i=0; i<logical.length; i++) logical[i]=(byte)(33+(i*31+i/256)%90);
+        String full = new String(logical, StandardCharsets.US_ASCII);
+        String initial = auditChunkResponse("bytes 0",10000,full);
+        try (ServerSocket provider = new ServerSocket(0,4,InetAddress.getByName("127.0.0.1"))) {
+            provider.setSoTimeout(5000);
+            FutureTask<List<Map<String,String>>> requests = new FutureTask<>(() -> {
+                List<Map<String,String>> rows = new ArrayList<>();
+                rows.add(serveOnce(provider,initial));
+                rows.add(serveOnce(provider,auditChunkResponse("bytes 4112-10015/10016",5904,full.substring(4096))));
+                rows.add(serveOnce(provider,auditChunkResponse("bytes 9016-9031/10016",1000,full.substring(9000,9032))));
+                rows.add(serveOnce(provider,initial));
+                return rows;
+            });
+            new Thread(requests,"virtual-range-fixture").start();
+            JSONObject secured=(JSONObject)BridgeMediaSessionRegistry.securePlaybackResult(new JSONObject().put("parse",0)
+                    .put("url","http://127.0.0.1:"+provider.getLocalPort()+"/fixture"));
+            for (String range : new String[]{"bytes=0-","bytes=9000-9031","bytes=0-"}) {
+                HttpURLConnection connection=(HttpURLConnection)new URL(secured.getString("url")).openConnection();
+                connection.setConnectTimeout(2000); connection.setReadTimeout(10000); connection.setRequestProperty("Range",range);
+                try {
+                    assertEquals(206,connection.getResponseCode());
+                    boolean bounded=range.contains("9000");
+                    assertEquals(bounded?"bytes 9000-9031/10000":"bytes 0-9999/10000",connection.getHeaderField("Content-Range"));
+                    assertEquals(bounded?full.substring(9000,9032):full,readText(connection.getInputStream()));
+                } finally {connection.disconnect();}
+            }
+            List<Map<String,String>> rows=requests.get(5,TimeUnit.SECONDS);
+            assertEquals("bytes=4096-",header(rows.get(1),"range"));
+            assertEquals("bytes=9000-9047",header(rows.get(2),"range"));
+            assertEquals(4,rows.size());
+            provider.setSoTimeout(500);
+            try(Socket extra=provider.accept()) {fail("Proof must be single-flight per session");}
+            catch(SocketTimeoutException expected) { }
+        }
+    }
+    private static String auditChunkResponse(String range,long declaredLength,String content) {
+        return "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Range: "+range
+                +"\r\nContent-Length: "+declaredLength+"\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                +Integer.toHexString(content.length())+"\r\n"+content+"\r\n0\r\n\r\n";
+    }
+    public void testProxyKnownRangeStopsWithoutWaitingForInfiniteEOF() throws Exception {
+        final java.util.concurrent.atomic.AtomicInteger read = new java.util.concurrent.atomic.AtomicInteger();
+        InputStream infinite = new InputStream() {
+            public int read() { read.incrementAndGet(); return 65; }
+            public int read(byte[] b, int off, int len) { java.util.Arrays.fill(b, off, off+len, (byte)65); read.addAndGet(len); return len; }
+        };
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        BridgeServer.writeProxy(new java.io.BufferedOutputStream(bytes), new Object[]{206,"video/mp4",infinite,
+                java.util.Collections.singletonMap("Content-Range","bytes 0-31/32")},false);
+        assertEquals(32,read.get());
+        assertTrue(bytes.toString("US-ASCII").endsWith("0\r\n\r\n"));
+    }
+    public void testProxyShortRangeCannotEmitSuccessTerminator() throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try {
+            BridgeServer.writeProxy(new java.io.BufferedOutputStream(bytes),new Object[]{206,"video/mp4",new java.io.ByteArrayInputStream(new byte[]{1,2,3}),
+                    java.util.Collections.singletonMap("Content-Range","bytes 0-9/10")},false);
+            fail("Must report truncated range");
+        } catch (IOException expected) { }
+        assertFalse(bytes.toString("US-ASCII").endsWith("0\r\n\r\n"));
+    }
+    public void testProxyUnknownLengthRetainsNormalEOF() throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        BridgeServer.writeProxy(new java.io.BufferedOutputStream(bytes),new Object[]{200,"video/mp4",new java.io.ByteArrayInputStream(new byte[]{1,2,3})},false);
+        String output = bytes.toString("US-ASCII");
+        assertTrue(output.endsWith("0\r\n\r\n")); assertFalse(output.contains("Content-Length"));
+    }
+    public void testProxyHeadDoesNotWriteBodyOrFinalChunk() throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        BridgeServer.writeProxy(new java.io.BufferedOutputStream(bytes),new Object[]{200,"video/mp4",new java.io.ByteArrayInputStream(new byte[]{1,2,3})},true);
+        String output = bytes.toString("US-ASCII");
+        assertEquals(output.indexOf("\r\n\r\n")+4,output.length());
+    }
+    public void testProxyFailedRequestDoesNotPoisonNextRequest() throws Exception {
+        testProxyShortRangeCannotEmitSuccessTerminator();
+        testProxyUnknownLengthRetainsNormalEOF();
+    }
     public void testConfigurationHostsReplaceInsteadOfMerging() throws Exception {
         AtomicReference<List<String>> applied = new AtomicReference<>();
         AtomicInteger applyCount = new AtomicInteger();
@@ -1674,15 +1754,19 @@ public final class BridgeProtocolTest extends TestCase {
             first.setReadTimeout(5_000);
             first.setRequestProperty("Range", "bytes=0-9");
             assertEquals(206, first.getResponseCode());
+            boolean truncated = false;
             try (InputStream input = first.getInputStream()) {
                 byte[] buffer = new byte[16];
                 int count;
                 while ((count = input.read(buffer)) != -1) {
                     firstBytes.write(buffer, 0, count);
                 }
+            } catch (IOException expected) {
+                truncated = true;
             } finally {
                 first.disconnect();
             }
+            assertTrue("Truncated media must not carry a successful final chunk", truncated);
             assertEquals(
                     "01234",
                     firstBytes.toString(StandardCharsets.US_ASCII.name())

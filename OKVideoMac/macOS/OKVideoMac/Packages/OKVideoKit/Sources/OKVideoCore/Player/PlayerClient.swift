@@ -40,6 +40,10 @@ public struct MediaTrack: Codable, Equatable, Identifiable, Sendable {
 }
 
 public struct PlayerSnapshot: Equatable, Sendable {
+    /// False while seek recovery is unconfirmed or playback has failed. UI
+    /// position remains the native observation; persistence must not treat it
+    /// as confirmed viewing progress.
+    public var historyProgressIsReliable: Bool = true
     public var status: PlayerStatus
     public var position: TimeInterval
     public var duration: TimeInterval

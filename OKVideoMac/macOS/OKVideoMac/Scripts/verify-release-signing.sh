@@ -75,10 +75,12 @@ else
   echo "PASS: codesign --verify --deep --strict"
 fi
 
+# Feed captured diagnostics directly: early awk/grep exits must not SIGPIPE
+# a printf producer under pipefail. All signature/entitlement gates stay active.
 app_info="$(signature_info "$APP")"
-app_team="$(printf '%s\n' "$app_info" | awk -F= '/^TeamIdentifier=/{print $2; exit}')"
-app_authority="$(printf '%s\n' "$app_info" | awk -F= '/^Authority=/{print $2; exit}')"
-app_flags="$(printf '%s\n' "$app_info" | awk -F= '/^CodeDirectory /{for (i=1;i<=NF;i++) if ($i ~ /^0x/) print $i; exit}')"
+app_team="$(awk -F= '/^TeamIdentifier=/{print $2; exit}' <<< "$app_info")"
+app_authority="$(awk -F= '/^Authority=/{print $2; exit}' <<< "$app_info")"
+app_flags="$(awk -F= '/^CodeDirectory /{for (i=1;i<=NF;i++) if ($i ~ /^0x/) print $i; exit}' <<< "$app_info")"
 
 if [[ "$app_flags" != *runtime* ]]; then
   echo "FAIL: main app has no Hardened Runtime flag." >&2
@@ -93,12 +95,12 @@ if [[ "$MODE" == "distribution" ]]; then
     echo "FAIL: distribution app is not signed by Developer ID Application." >&2
     failure=1
   fi
-  if printf '%s\n' "$app_info" | grep -q 'Signature=adhoc'; then
+  if grep -q 'Signature=adhoc' <<< "$app_info"; then
     echo "FAIL: distribution app is ad-hoc signed." >&2
     failure=1
   fi
 else
-  if ! printf '%s\n' "$app_info" | grep -q 'Signature=adhoc'; then
+  if ! grep -q 'Signature=adhoc' <<< "$app_info"; then
     echo "FAIL: local package is expected to be ad-hoc signed." >&2
     failure=1
   fi
@@ -141,7 +143,7 @@ done
 
 machos=()
 while IFS= read -r -d '' candidate; do
-  if file "$candidate" | grep -q 'Mach-O'; then
+  if [[ "$(file "$candidate")" == *Mach-O* ]]; then
     machos+=("$candidate")
   fi
 done < <(find "$APP/Contents" -type f -print0)
@@ -156,10 +158,10 @@ for binary in "${machos[@]}"; do
   relative_path="${binary#"$APP/"}"
   architectures="$(lipo -archs "$binary")"
   info="$(signature_info "$binary")"
-  team="$(printf '%s\n' "$info" | awk -F= '/^TeamIdentifier=/{print $2; exit}')"
-  flags="$(printf '%s\n' "$info" | awk -F= '/^CodeDirectory /{for (i=1;i<=NF;i++) if ($i ~ /^0x/) print $i; exit}')"
+  team="$(awk -F= '/^TeamIdentifier=/{print $2; exit}' <<< "$info")"
+  flags="$(awk -F= '/^CodeDirectory /{for (i=1;i<=NF;i++) if ($i ~ /^0x/) print $i; exit}' <<< "$info")"
   signature="Developer ID"
-  if printf '%s\n' "$info" | grep -q 'Signature=adhoc'; then
+  if grep -q 'Signature=adhoc' <<< "$info"; then
     signature="ad-hoc"
   fi
 

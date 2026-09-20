@@ -77,55 +77,60 @@ final class XtreamClientTests: XCTestCase {
         XCTAssertEqual(normalized.status, " active ")
     }
 
-    func testAuthenticationRejectsActiveStatusWithPastExpiration() async {
-        let client: XtreamClient
-        do {
-            client = try makeClient(
-                httpClient: XtreamRecordingHTTPClient(
-                    responseData: Data(
-                        #"{"user_info":{"auth":1,"status":"Active","exp_date":"1700000000"}}"#.utf8
-                    )
-                )
+    func testAuthenticationAcceptsActiveStatusWithPastExpiration() async throws {
+        for authField in [#""auth":1,"#, ""] {
+            let json = #"{"user_info":{\#(authField)"status":"Active","exp_date":"1700000000"}}"#
+            let client = try makeClient(
+                httpClient: XtreamRecordingHTTPClient(responseData: Data(json.utf8))
             )
-        } catch {
-            XCTFail("Unable to construct client: \(error)")
-            return
-        }
-
-        do {
-            _ = try await client.authenticate(
+            let account = try await client.authenticate(
                 now: Date(timeIntervalSince1970: 1_800_000_000)
             )
-            XCTFail("Expected an Active account with a past exp_date to be rejected")
-        } catch {
+            XCTAssertEqual(account.status, "Active")
             XCTAssertEqual(
-                error as? XtreamClientError,
-                .accountUnavailable(status: "Expired")
+                account.expirationDate,
+                Date(timeIntervalSince1970: 1_700_000_000),
+                "Past exp_date must remain available as account metadata"
             )
+        }
+    }
+
+    func testAuthenticationPreservesExpirationScalarSemantics() async throws {
+        let cases: [(String, Date?)] = [
+            (#""exp_date":"1893456000","#, Date(timeIntervalSince1970: 1_893_456_000)),
+            (#""exp_date":1893456000,"#, Date(timeIntervalSince1970: 1_893_456_000)),
+            (#""exp_date":null,"#, nil),
+            (#""exp_date":"0","#, nil),
+            ("", nil)
+        ]
+        for (expirationField, expectedDate) in cases {
+            let account = try await authenticate(
+                #"{"user_info":{"auth":1,"status":"Active",\#(expirationField)"is_trial":"0"}}"#
+            )
+            XCTAssertEqual(account.expirationDate, expectedDate)
         }
     }
 
     func testAuthenticationRejectsExplicitDenialEvenWhenStatusIsActive() async {
-        let error = await authenticationError(
-            #"{"user_info":{"auth":0,"status":"Active"}}"#
-        )
-
-        XCTAssertEqual(
-            error,
-            .authenticationRejected(status: "Active")
-        )
-        XCTAssertEqual(
-            error?.localizedDescription,
-            "The Xtream server rejected this account."
-        )
+        for expiration in ["1700000000", "4102444800"] {
+            let error = await authenticationError(
+                #"{"user_info":{"auth":0,"status":"Active","exp_date":"\#(expiration)"}}"#
+            )
+            XCTAssertEqual(error, .authenticationRejected(status: "Active"))
+            XCTAssertEqual(
+                error?.localizedDescription,
+                "The Xtream server rejected this account."
+            )
+        }
     }
 
     func testAuthenticationRejectsUnavailableStatusesWithOrWithoutAuth() async {
         let cases: [(String, String)] = [
-            (#"{"user_info":{"auth":1,"status":"Expired"}}"#, "Expired"),
+            (#"{"user_info":{"auth":1,"status":"Expired","exp_date":"4102444800"}}"#, "Expired"),
             (#"{"user_info":{"status":"Expired"}}"#, "Expired"),
-            (#"{"user_info":{"status":"Banned"}}"#, "Banned"),
-            (#"{"user_info":{"status":"Disabled"}}"#, "Disabled"),
+            (#"{"user_info":{"status":"Banned","exp_date":"4102444800"}}"#, "Banned"),
+            (#"{"user_info":{"status":"Disabled","exp_date":"4102444800"}}"#, "Disabled"),
+            (#"{"user_info":{"status":"Inactive","exp_date":"4102444800"}}"#, "Inactive"),
             (#"{"user_info":{"status":"Disabled/Expired"}}"#, "Disabled/Expired")
         ]
 

@@ -1,9 +1,10 @@
 # Compatibility
 
-- 对照版本：0.6.1（Build 101）
-- 最近更新：2026-09-09
-- 当前源码版本：0.6.1（Build 101），Apple Silicon / arm64 / macOS 12.0+
+- 对照版本：0.7.0（Build 102）
+- 最近更新：2026-09-19
+- 当前源码版本：0.7.0（Build 102），Apple Silicon / arm64 / macOS 12.0+
 - 最新公开公证 DMG：0.6.1（Build 101）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
+- 0.7.0 的目标 tag `v0.7.0` 仅用于后续正式发布；当前交付是本地 ad-hoc 验收包。
 
 ## 概述
 
@@ -51,6 +52,8 @@ OKVideoMac 的兼容性主要取决于源格式、站点类型、运行时、API
 | Native CMS XML API 响应，type 0 | Partial | 核心 class/list 响应映射有测试；详情、搜索等覆盖窄于 JSON 路径 |
 | Native type 4 | Partial | 分类筛选使用 URL-safe Base64 JSON 参数；不代表通用 Base64 API |
 | Headers 网络规则 | Supported | host 匹配、Header/Cookie 合并和日志脱敏已接入 |
+| 源提供弹幕 | Supported | 读取播放结果的 `danmaku` / `danmu` 和 CatPaw `extra` 形态；单来源或唯一 preferred 自动加载，多来源不明确时由用户选择 |
+| 弹幕搜索与导入 | Selected | 支持 Bilibili XML、本地导入、配置级或用户填写的 CatPaw 兼容服务；Xtream 需外部服务，不自动把片名发送给第三方 |
 
 ## Spider 运行时
 

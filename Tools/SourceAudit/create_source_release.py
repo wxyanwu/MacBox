@@ -256,7 +256,13 @@ def make_source_release(args: argparse.Namespace) -> None:
     script = Path(__file__).resolve()
     repo = script.parents[2]
     version, build = parse_release(repo)
-    commit, timestamp = validate_repo(repo, args.commit)
+    acceptance = None
+    if getattr(args, "local_acceptance", False):
+        from local_acceptance import validate
+        acceptance = validate(repo)
+        commit, timestamp = None, None
+    else:
+        commit, timestamp = validate_repo(repo, args.commit)
     output = Path(args.output_dir).expanduser().resolve()
     cache = Path(args.cache_dir).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -296,7 +302,11 @@ def make_source_release(args: argparse.Namespace) -> None:
     project_archive = output / f"{base}-source.tar.gz"
     third_party_archive = output / f"{base}-third-party-source.tar.gz"
     licenses_archive = output / f"{base}-licenses.tar.gz"
-    deterministic_git_archive(repo, commit, project_archive, f"{base}-source")
+    if acceptance:
+        from local_acceptance import archive_snapshot
+        archive_snapshot(repo, project_archive, f"{base}-source")
+    else:
+        deterministic_git_archive(repo, commit, project_archive, f"{base}-source")
 
     filtered_fongmi = None
     with tempfile.TemporaryDirectory(prefix="okvideomac-source-release-") as temporary:
@@ -352,7 +362,7 @@ def make_source_release(args: argparse.Namespace) -> None:
             "OKVideoMac/macOS/OKVideoMac/Scripts/build-android-dex-bridge.sh",
         ):
             copy_relative(repo, recipes, relative)
-        write_readme(third / "README.txt", commit)
+        write_readme(third / "README.txt", commit or ("UNCOMMITTED local snapshot SHA-256 " + acceptance["source_sha256"]))
         deterministic_tar_from_tree(third, third_party_archive, f"{base}-third-party-source")
 
         licenses = root / "licenses"
@@ -508,6 +518,11 @@ def make_source_release(args: argparse.Namespace) -> None:
             or "UNRESOLVED" in str(component["status"])
         ],
     }
+    if acceptance:
+        identity = {key: acceptance[key] for key in ("kind", "base_git_commit", "source_sha256", "created_at")}
+        index["local_acceptance"] = identity
+        index["publication_status"] = "LOCAL ACCEPTANCE ONLY; not a committed release; do not publish"
+        index["mappings"]["project"]["source_sha256"] = acceptance["source_sha256"]
     index_path = output / f"{base}-SOURCE_RELEASE_INDEX.json"
     atomic_json(index_path, index)
 
@@ -608,6 +623,7 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--commit", default="HEAD")
+    parser.add_argument("--local-acceptance", action="store_true", help="Frozen, uncommitted local snapshot only")
     parser.add_argument("--binary")
     parser.add_argument("--release-artifact", action="append")
     parser.add_argument("--apk")

@@ -533,3 +533,45 @@ public protocol SettingsRepository {
     func setSetting(_ value: JSONValue?, forKey key: String) async throws
     func setting(forKey key: String) async throws -> JSONValue?
 }
+
+public protocol PlaybackSkipRuleRepository {
+    func savePlaybackSkipRule(_ rule: PlaybackSkipRule) async throws
+    func playbackSkipRules(
+        configurationID: UUID
+    ) async throws -> [PlaybackSkipRule]
+    func deletePlaybackSkipRule(
+        identity: PlaybackSkipRuleIdentity
+    ) async throws
+    func deletePlaybackSkipRules(
+        configurationID: UUID
+    ) async throws
+    func savePlaybackCompletionMarker(
+        _ marker: PlaybackCompletionMarker
+    ) async throws
+    func playbackCompletionMarkers(
+        configurationID: UUID
+    ) async throws -> [PlaybackCompletionMarker]
+    func deletePlaybackCompletionMarker(
+        identity: PlaybackSkipRuleIdentity
+    ) async throws
+    func deletePlaybackCompletionMarkers(
+        configurationID: UUID
+    ) async throws
+    func deletePlaybackCompletionMarkers(
+        historyRecordIDs: Set<String>
+    ) async throws
+}
+
+public protocol DanmakuBindingRepository {
+    func saveDanmakuBinding(_ binding: DanmakuBinding) async throws
+    func danmakuBindings(
+        configurationID: UUID
+    ) async throws -> [DanmakuBinding]
+    func danmakuBinding(
+        for editionIdentity: DanmakuEditionIdentity
+    ) async throws -> DanmakuBinding?
+    func deleteDanmakuBinding(
+        for editionIdentity: DanmakuEditionIdentity
+    ) async throws
+    func deleteDanmakuBindings(configurationID: UUID) async throws
+}

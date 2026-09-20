@@ -94,6 +94,7 @@ public struct XtreamCategoryDTO: Decodable, Equatable, Sendable {
 /// Metadata only. `direct_source` is intentionally not part of this DTO: Live
 /// media URLs may only be materialized later by the native provider resolver.
 public struct XtreamLiveStreamDTO: Decodable, Equatable, Sendable {
+    public let epgChannelID: String?
     public let streamID: String?
     public let name: String?
     public let number: String?
@@ -102,6 +103,7 @@ public struct XtreamLiveStreamDTO: Decodable, Equatable, Sendable {
     public let containerExtension: String?
 
     private enum CodingKeys: String, CodingKey {
+        case epgChannelID = "epg_channel_id"
         case streamID = "stream_id"
         case name
         case number = "num"
@@ -113,6 +115,7 @@ public struct XtreamLiveStreamDTO: Decodable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         // IDs accept string/integer scalars, not Boolean/object coercions.
+        epgChannelID = values.xtreamStringIfPresent(.epgChannelID)
         streamID = (try? values.decode(String.self, forKey: .streamID))
             ?? (try? values.decode(Int64.self, forKey: .streamID)).map(String.init)
         categoryID = (try? values.decode(String.self, forKey: .categoryID))

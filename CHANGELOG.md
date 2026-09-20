@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.7.0] - 2026-09-19
+
+### Added
+
+- Native danmaku playback for TVBox, CatPawOpen and Xtream sessions through one
+  shared AppKit overlay, player-authoritative clock and lane scheduler.
+- Bilibili XML import, source-provided danmaku loading, manual service search,
+  explicit candidate selection, per-episode/edition binding and time calibration.
+- Stable danmaku bindings in portable backups without runtime URLs, request headers,
+  cookies or local proxy leases.
+
+### Safety / Changed
+
+- Bind CatPaw `danmuPush` messages to the exact playback request and generation so
+  late results cannot cross episode boundaries.
+- Keep danmaku download, parsing and failures independent of media startup. Manual
+  selection outranks saved/provider/automatic results, and ambiguous provider lists
+  require user selection.
+- Portable backup schema is now version 3 and remains compatible with older backups.
+
+This source build is a locally verified ad-hoc Release package. It is not the latest
+Developer ID signed and Apple-notarized public release.
+
 ## [0.6.1] - 2026-09-09
 
 ### Added

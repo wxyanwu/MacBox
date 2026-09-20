@@ -3716,6 +3716,33 @@ struct ActivePlaybackContext {
     var replacedHistoryRecord: HistoryRecord? = nil
 }
 
+struct PlaybackEndingSkipPrompt: Equatable {
+    var secondsUntilBoundary: Int
+    var willAdvanceAutomatically: Bool
+}
+
+private struct PlaybackSkipSessionState {
+    var episodeSessionID: UUID
+    var identity: PlaybackSkipRuleIdentity
+    var historyRecordID: String
+    var lineRule: PlaybackSkipRule?
+    var episodeRule: PlaybackSkipRule?
+    var effectiveRule: EffectivePlaybackSkipRule
+    var openingSkipSuppressed = false
+    var endingSkipSuppressed = false
+    var observedPlaybackBeforeEndingPrompt = false
+}
+
+private enum EpisodeAdvanceReason: Equatable {
+    case naturalEnd
+    case endingSkip
+    case manualEndingSkip
+
+    var requiresAutoPlay: Bool {
+        self != .manualEndingSkip
+    }
+}
+
 struct HistoryPlaybackChoice: Identifiable, Equatable {
     let id: UUID
     let detail: VideoDetail
@@ -3973,6 +4000,21 @@ struct PlaybackResolutionAttemptContext: Equatable, Sendable {
     let source: PlaySource
     let episode: PlayEpisode
     let result: SitePlaybackResult
+    let danmakuContext: DanmakuPlaybackContext?
+
+    init(
+        detail: VideoDetail,
+        source: PlaySource,
+        episode: PlayEpisode,
+        result: SitePlaybackResult,
+        danmakuContext: DanmakuPlaybackContext? = nil
+    ) {
+        self.detail = detail
+        self.source = source
+        self.episode = episode
+        self.result = result
+        self.danmakuContext = danmakuContext
+    }
 
     func resolutionRequest(
         configuredParsers: [ParseConfiguration],
@@ -3993,7 +4035,8 @@ struct PlaybackResolutionAttemptContext: Equatable, Sendable {
                     siteName: detail.summary.siteName,
                     sourceName: source.name,
                     episodeName: episode.name,
-                    result: result
+                    result: result,
+                    danmakuContext: danmakuContext
                 )
             ],
             parsers: eligibleParsers,
@@ -4153,11 +4196,62 @@ enum LiveChannelDeletionPolicy {
     }
 }
 
-struct LivePlaybackCandidate: Equatable {
+/// One accepted publication. Never reconstruct this context from a SwiftUI body
+/// or use a new catalog to resolve an old playback/menu key.
+final class AcceptedImportedCatalog: CustomStringConvertible, CustomReflectable {
+    let sourceID: UUID
+    let playlist: LivePlaylist
+    let routeContext: ImportedRouteContext?
+    private let channelsByID: [String: [LiveChannel]]
+
+    init(sourceID: UUID, playlist: LivePlaylist) {
+        self.sourceID = sourceID
+        self.playlist = playlist
+        let channels = playlist.groups.flatMap(\.channels)
+        channelsByID = Dictionary(grouping: channels, by: \.id)
+        routeContext = ImportedRouteContext(
+            source: .imported(sourceID), streams: channels.flatMap(\.streams)
+        )
+    }
+
+    func contains(_ channel: LiveChannel) -> Bool {
+        // A channel-key collision is an 8C.3 blocker, never first-wins.
+        channelsByID[channel.id] == [channel]
+    }
+
+    func selections(for channel: LiveChannel) -> [ImportedRouteSelection] {
+        guard contains(channel), let bindings = routeContext?.bindings(in: channel.streams) else { return [] }
+        return bindings.map { ImportedRouteSelection(catalog: self, channel: channel, binding: $0) }
+    }
+
+    func selection(for channel: LiveChannel, key: ImportedRouteRuntimeKey) -> ImportedRouteSelection? {
+        selections(for: channel).first { $0.id == key }
+    }
+
+    var description: String { "AcceptedImportedCatalog(source: \(sourceID))" }
+    var customMirror: Mirror { Mirror(self, children: ["sourceID": sourceID]) }
+}
+
+/// The factory binds a key to its channel, not merely to a source-wide tuple.
+struct ImportedRouteSelection: Identifiable, CustomStringConvertible, CustomReflectable {
+    let catalog: AcceptedImportedCatalog
+    let channel: LiveChannel
+    private let binding: ImportedRouteBinding
+    var id: ImportedRouteRuntimeKey { binding.id }
+    var stream: LiveStream { binding.stream }
+    fileprivate init(catalog: AcceptedImportedCatalog, channel: LiveChannel, binding: ImportedRouteBinding) {
+        self.catalog = catalog; self.channel = channel; self.binding = binding
+    }
+    var description: String { "ImportedRouteSelection(\(id))" }
+    var customMirror: Mirror { Mirror(self, children: ["key": id]) }
+}
+
+struct LivePlaybackCandidate {
     let channel: LiveChannel
     let stream: LiveStream
+    var routeKey: ImportedRouteRuntimeKey? = nil
 
-    var identifier: String {
+    var nativeIdentifier: String {
         "\(channel.id)::\(stream.id)"
     }
 }
@@ -4168,6 +4262,35 @@ enum LivePlaybackRecoveryScope: Equatable {
 }
 
 enum LivePlaybackRecoveryPolicy {
+    static func importedCandidates(
+        catalog: AcceptedImportedCatalog,
+        channels: [LiveChannel],
+        starting: ImportedRouteSelection,
+        excluding attempted: Set<ImportedRouteTransport>
+    ) -> [LivePlaybackCandidate] {
+        guard starting.catalog === catalog,
+              catalog.selection(for: starting.channel, key: starting.id) != nil,
+              channels.allSatisfy(catalog.contains),
+              Set(channels.map(\.id)).count == channels.count,
+              let index = channels.firstIndex(of: starting.channel) else { return [] }
+        let ordered = Array(channels[index...]) + Array(channels[..<index])
+        var seen = attempted
+        var result: [LivePlaybackCandidate] = []
+        for channel in ordered {
+            let selections = catalog.selections(for: channel)
+            let routes = channel == starting.channel
+                ? [starting] + selections.filter { !ImportedRouteTransport.same($0.stream, starting.stream) }
+                : selections
+            for route in routes {
+                guard let transport = ImportedRouteTransport(route.stream), seen.insert(transport).inserted else { continue }
+                result.append(LivePlaybackCandidate(channel: channel, stream: route.stream, routeKey: route.id))
+            }
+        }
+        return result
+    }
+
+    // Native/provider recovery retains its existing locator semantics. Imported
+    // production calls must use importedCandidates and full transport equality.
     static func candidates(
         channels: [LiveChannel],
         startingChannel: LiveChannel,
@@ -4212,7 +4335,7 @@ enum LivePlaybackRecoveryPolicy {
                     stream: stream
                 )
                 guard seenStreamURLs.insert(stream.id).inserted,
-                      !attemptedIdentifiers.contains(candidate.identifier) else {
+                      !attemptedIdentifiers.contains(candidate.nativeIdentifier) else {
                     continue
                 }
                 values.append(candidate)
@@ -4250,38 +4373,14 @@ private enum XtreamLivePlaybackError: LocalizedError {
     }
 }
 
-enum LiveStreamProbeResult: Equatable, Sendable {
-    case reachable
-    case definitivelyUnavailable
-    case inconclusive
-}
-
-enum LiveSourceValidationPolicy {
-    static func result(forHTTPStatus statusCode: Int) -> LiveStreamProbeResult {
-        switch statusCode {
-        case 200...399:
-            return .reachable
-        case 400, 401, 403, 404, 410, 451:
-            return .definitivelyUnavailable
-        default:
-            return .inconclusive
-        }
-    }
-
-    static func shouldRemoveChannel(
-        streamResults: [LiveStreamProbeResult]
-    ) -> Bool {
-        !streamResults.isEmpty
-            && streamResults.allSatisfy { $0 == .definitivelyUnavailable }
-    }
-}
-
 enum LiveSourceValidationStatus: Equatable {
     case checking(completed: Int, total: Int)
+    case processing(completed: Int, total: Int)
     case completed(removed: Int, total: Int)
+    case cancelled(completed: Int, total: Int)
+    case partial(completed: Int, total: Int)
     case failed(String)
 }
-
 enum ConfigurationImportPhase: Equatable {
     case downloadingAndParsing
     case parsing
@@ -4318,82 +4417,51 @@ enum LiveSourceImportPhase: Equatable {
 
 enum LiveSourceEPGStatus: Equatable {
     case loading
-    case ready
+    case loaded(lastProgrammeEnd: Date?)
     case failed(String)
-}
 
-actor LiveStreamAvailabilityProber {
-    private let httpClient: URLSessionHTTPClient
-
-    init() {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.httpMaximumConnectionsPerHost = 4
-        configuration.timeoutIntervalForRequest = 6
-        configuration.timeoutIntervalForResource = 7
-        httpClient = URLSessionHTTPClient(configuration: configuration)
+    enum Presentation: Equatable {
+        case loading, loaded, expired, empty
+        case failed(String)
     }
 
-    func result(for stream: LiveStream) async -> LiveStreamProbeResult {
-        guard case .direct(let url) = stream.target, !stream.needsParsing else {
-            // Provider targets are metadata, never streams to pre-open.
-            return .inconclusive
+    init(status: EPGRepositoryStatus, failureMessage: String) {
+        if status.availability == .failed || status.consecutiveFailures > 0 {
+            self = .failed(failureMessage)
+        } else {
+            self = .loaded(lastProgrammeEnd: status.summary?.coverageEnd)
         }
-        if url.isFileURL {
-            return FileManager.default.fileExists(atPath: url.path)
-                ? .reachable
-                : .definitivelyUnavailable
-        }
-        guard ["http", "https"].contains(
-            url.scheme?.lowercased() ?? ""
-        ) else {
-            return .inconclusive
-        }
-
-        let first = await probeOnce(stream)
-        guard first == .definitivelyUnavailable else { return first }
-        do {
-            try await Task.sleep(nanoseconds: 400_000_000)
-        } catch {
-            return .inconclusive
-        }
-        let second = await probeOnce(stream)
-        return second == .definitivelyUnavailable
-            ? .definitivelyUnavailable
-            : second == .reachable ? .reachable : .inconclusive
     }
 
-    private func probeOnce(_ stream: LiveStream) async -> LiveStreamProbeResult {
-        guard case .direct(let url) = stream.target else { return .inconclusive }
-        var headers = HTTPHeaders(stream.headers)
-        headers["Range"] = "bytes=0-1023"
-        do {
-            let response = try await httpClient.send(
-                HTTPRequest(
-                    url: url,
-                    headers: headers,
-                    timeout: 6,
-                    maximumResponseBytes: 256 * 1_024,
-                    retryPolicy: .none,
-                    allowsNonSuccessfulStatus: true
-                )
-            )
-            return LiveSourceValidationPolicy.result(
-                forHTTPStatus: response.statusCode
-            )
-        } catch let error as HTTPClientError {
-            if case .responseTooLarge = error {
-                return .reachable
-            }
-            return .inconclusive
-        } catch {
-            return .inconclusive
+    var programmeBoundary: Date? {
+        if case .loaded(let end) = self { return end }
+        return nil
+    }
+
+    /// O(1), display only. No refresh, TTL changes, or programme mutation.
+    func presentation(at now: Date) -> Presentation {
+        switch self {
+        case .loading: return .loading
+        case .failed(let message): return .failed(message)
+        case .loaded(let end):
+            guard let end else { return .empty }
+            return end <= now ? .expired : .loaded
         }
     }
 }
 
-private struct LivePlaybackNavigationContext {
+private final class LivePlaybackNavigationContext {
+    let flowID = UUID()
     let sourceID: LiveSourceID
     let channels: [LiveChannel]
+    let importedCatalog: AcceptedImportedCatalog?
+    var attemptedTransports = Set<ImportedRouteTransport>()
+
+    init(sourceID: LiveSourceID, channels: [LiveChannel], importedCatalog: AcceptedImportedCatalog? = nil) {
+        self.sourceID = sourceID
+        self.channels = channels
+        self.importedCatalog = importedCatalog
+    }
 }
 
 struct PlaybackStartupGateToken {
@@ -4528,6 +4596,7 @@ final class PlaybackStartupGateController {
 @MainActor
 final class AutomaticEpisodeAdvanceController {
     private(set) var requestID: UUID?
+    private(set) var claimedSessionID: UUID?
     private var task: Task<Void, Never>?
 
     func owns(requestID: UUID) -> Bool {
@@ -4537,9 +4606,18 @@ final class AutomaticEpisodeAdvanceController {
     func schedule(
         operation: @escaping @MainActor (UUID) async -> Void
     ) {
+        schedule(sessionID: UUID(), operation: operation)
+    }
+
+    func schedule(
+        sessionID: UUID,
+        operation: @escaping @MainActor (UUID) async -> Void
+    ) {
+        guard claimedSessionID != sessionID else { return }
         cancel()
         let requestID = UUID()
         self.requestID = requestID
+        claimedSessionID = sessionID
         task = Task { @MainActor [weak self] in
             // Let the caller return to AsyncStream iteration before beginning a
             // flow whose completion depends on later events from that stream.
@@ -4550,12 +4628,14 @@ final class AutomaticEpisodeAdvanceController {
             await operation(requestID)
             guard self.requestID == requestID else { return }
             self.requestID = nil
+            self.claimedSessionID = nil
             self.task = nil
         }
     }
 
     func cancel() {
         requestID = nil
+        claimedSessionID = nil
         task?.cancel()
         task = nil
     }
@@ -4808,25 +4888,42 @@ final class AppState: ObservableObject {
     @Published private(set) var historyPlaybackLoadingID: HistoryRecord.ID?
     @Published private(set) var historyPlaybackChoices: [HistoryPlaybackChoice] = []
     @Published private(set) var liveSources: [StoredLiveSource] = []
-    @Published private(set) var loadedLivePlaylists: [UUID: LivePlaylist] = [:]
+    @Published private(set) var acceptedImportedCatalogs: [UUID: AcceptedImportedCatalog] = [:]
+    // Compatibility projection for existing EPG/identity readers; publication
+    // has only one authority, and never allocates contexts on a read.
+    var loadedLivePlaylists: [UUID: LivePlaylist] {
+        acceptedImportedCatalogs.mapValues(\.playlist)
+    }
+
+    private func publishImportedCatalog(_ playlist: LivePlaylist?, sourceID: UUID) {
+        acceptedImportedCatalogs[sourceID] = playlist.map {
+            AcceptedImportedCatalog(sourceID: sourceID, playlist: $0)
+        }
+    }
     @Published private(set) var nativeLiveCatalog: LiveCatalogSnapshot?
     @Published private(set) var nativeLiveCatalogError: String?
     @Published private(set) var liveCatalogLoadingSourceIDs = Set<LiveSourceID>()
     @Published private(set) var nativeLiveFavorites = StoredLiveChannelReferenceEnvelope(setting: nil)
     @Published private(set) var nativeLiveHiddenChannels = StoredLiveChannelReferenceEnvelope(setting: nil)
-    @Published private(set) var loadedEPGGuides: [UUID: XMLTVGuide] = [:]
-    private var loadedEPGScheduleIndexes: [UUID: XMLTVScheduleIndex] = [:]
+    let liveEPG = LiveEPGState()
+    @Published private(set) var epgPreferences = EPGPreferences()
+    @Published private(set) var isSavingEPGPreferences = false
+    @Published private(set) var liveEPGCatalogRevision = UUID()
     @Published private(set) var epgFailures: [UUID: String] = [:]
     @Published private(set) var liveSourceEPGStatuses:
         [UUID: LiveSourceEPGStatus] = [:]
-    @Published private(set) var livePlaybackChannel: LiveChannel?
+    @Published private(set) var livePlaybackChannel: LiveChannel? {
+        didSet { scheduleEPGRefresh() }
+    }
     @Published private(set) var livePlaybackStream: LiveStream?
-    @Published private(set) var livePlaybackSourceID: LiveSourceID?
+    @Published private(set) var livePlaybackSourceID: LiveSourceID? {
+        didSet { scheduleEPGRefresh() }
+    }
     @Published private(set) var isRecoveringLivePlayback = false
     @Published private(set) var hasExhaustedLivePlayback = false
     @Published private(set) var livePlaybackNotice: String?
-    @Published private(set) var liveSourceValidationStatuses:
-        [UUID: LiveSourceValidationStatus] = [:]
+    let liveValidationActivity = LiveValidationActivityModel()
+    var liveSourceValidationStatuses: [UUID: LiveSourceValidationStatus] { liveValidationActivity.statuses }
     @Published private(set) var selectedDetail: VideoDetail?
     @Published private(set) var pendingDetailSummary: VideoSummary?
 
@@ -4840,9 +4937,15 @@ final class AppState: ObservableObject {
     @Published private(set) var deletedLiveChannelIDs: Set<String> = []
     let playerWindowPreferences = PlayerWindowPreferenceStore()
     let playerSnapshotState = PlayerSnapshotState()
+    let danmaku = DanmakuSessionCoordinator()
     private(set) var playerSnapshot: PlayerSnapshot {
         get { playerSnapshotState.snapshot }
-        set { playerSnapshotState.update(newValue) }
+        set {
+            playerSnapshotState.update(newValue)
+            if !isShutdownRequested && !isClosingPlayer && isPlayerPresented {
+                playbackDisplaySleep.update(newValue, requestID: activePlayerRequestID)
+            }
+        }
     }
     @Published private(set) var playerEpisodePresentations: [EpisodePresentation] = []
     @Published private(set) var isPlayerEpisodeListPreparing = false
@@ -4857,13 +4960,29 @@ final class AppState: ObservableObject {
     @Published private(set) var playerAspectRatio: String?
     @Published private(set) var playerHardwareDecoding = true
     @Published private(set) var autoPlayNextEpisode = true
+    @Published private(set) var playbackSkipOpeningEnd: TimeInterval?
+    @Published private(set) var playbackSkipEndingDuration: TimeInterval?
+    @Published private(set) var playbackSkipOpeningEnabled = false
+    @Published private(set) var playbackSkipEndingEnabled = false
+    @Published private(set) var playbackSkipAppliesToAllEpisodes = true
+    @Published private(set) var playbackEndingSkipPrompt:
+        PlaybackEndingSkipPrompt?
     @Published private(set) var playbackResolutionState: PlaybackResolutionState = .idle
     @Published private(set) var currentPlaybackAttempt: PlaybackAttempt?
     @Published private(set) var playbackFailureSummary: String?
     @Published private(set) var playbackQualities: [PlaybackQuality] = []
     @Published private(set) var selectedPlaybackQualityID: String?
     @Published private(set) var isSwitchingPlaybackQuality = false
-    @Published var isPlayerPresented = false
+    @Published var isPlayerPresented = false {
+        didSet {
+            if !isPlayerPresented {
+                playbackDisplaySleep.finishSession(activePlayerRequestID)
+                danmaku.endSession()
+                liveHLSPreparationTask?.task.cancel()
+                liveHLSPreparationTask = nil
+            }
+        }
+    }
     @Published private(set) var isPlayerRenderSurfaceMountEnabled = false
     @Published private(set) var playerWindowCommand: PlayerWindowCommand?
     @Published private(set) var appWindowLayoutCommand: AppWindowLayoutCommand?
@@ -4996,6 +5115,7 @@ final class AppState: ObservableObject {
     private var playerEventTask: Task<Void, Never>?
     private let automaticEpisodeAdvanceController =
         AutomaticEpisodeAdvanceController()
+    private var playbackSkipSession: PlaybackSkipSessionState?
     private var activeSeekConfirmationID: UUID?
     private var cloudAuthorizationPollTask: Task<Void, Never>?
     private var nodeAuthorizationCompletionTask: Task<Void, Never>?
@@ -5019,9 +5139,24 @@ final class AppState: ObservableObject {
     private var livePlaybackNavigationContext: LivePlaybackNavigationContext?
     private var livePlaybackAttemptedIdentifiers = Set<String>()
     private var livePlaybackRecoveryTask: Task<Void, Never>?
+    private var liveHLSPreparationTask: (requestID: UUID, task: Task<HLSStartupSelection?, Error>)?
     private var livePlaybackNoticeTask: Task<Void, Never>?
     private var liveSourceValidationTasks: [UUID: Task<Void, Never>] = [:]
-    private var liveSourceEPGTasks: [UUID: Task<Void, Never>] = [:]
+    private var liveValidationPermits: [UUID: LiveValidationPermit] = [:]
+    private var liveValidationProgressRelays: [UUID: ValidationProgressRelay] = [:]
+    private var liveValidationDeadlines: [UUID: Task<Void, Never>] = [:]
+    private var liveValidationService = LiveValidationService()
+    private var liveValidationSelectedSource: UUID?
+    private var epgRefreshTask: Task<Void, Never>?
+    private var epgBoundaryTask: Task<Void, Never>?
+    private var epgLifecycleTask: Task<Void, Never>?
+    private var epgResourceRefreshTasks: [EPGRequestKey: Task<Void, Never>] = [:]
+    private var epgResourceRefreshOperationIDs: [EPGRequestKey: UUID] = [:]
+    private var epgRefreshGeneration = UUID()
+    private var epgSleeping = false
+    private var epgBrowserSource: LiveSourceID?
+    private var epgBrowserChannels: [LiveChannel] = []
+    private var epgInitialSourceID: UUID?
     private var playerEpisodePresentationCache: PlayerEpisodePresentationCache?
     private var playerEpisodePreparationTask: Task<Void, Never>?
     private var cloudAuthorizationContext: CloudAuthorizationContext?
@@ -5030,7 +5165,17 @@ final class AppState: ObservableObject {
     private var pendingNodePlaybackConfigurationFallback:
         PendingNodePlaybackConfigurationFallback?
     private var playbackSessionID = UUID()
-    private var activePlayerRequestID = UUID()
+    private var activePlayerRequestID = UUID() {
+        didSet {
+            playbackDisplaySleep.beginSession(activePlayerRequestID)
+            if oldValue != activePlayerRequestID {
+                danmaku.endSession()
+                liveHLSPreparationTask?.task.cancel()
+                liveHLSPreparationTask = nil
+            }
+        }
+    }
+    private let playbackDisplaySleep: PlaybackDisplaySleepController
     private var transferRequestGeneration: UInt64 = 0
     private var transferGenerationsByRequestID: [UUID: UInt64] = [:]
     private var preparedTransferReceipts: [UUID: TransferReceipt] = [:]
@@ -5042,6 +5187,7 @@ final class AppState: ObservableObject {
         PlaybackAuthorizationResumeGate()
     private var playbackQualitySwitchSessionID = UUID()
     private var lastHistorySaveAt = Date.distantPast
+    private var historyProgressCheckpoint = PlayerHistoryProgressCheckpoint()
     private var historyPlaybackPreparationID = UUID()
     private var historyPlaybackTask: Task<Void, Never>?
     private var historyPlaybackRequestedItem: HistoryRecord?
@@ -5089,14 +5235,110 @@ final class AppState: ObservableObject {
         }
     }
 
+    private var importedIdentityEnabled: Bool { liveReferenceStore?.importedIdentityAcceptanceEnabled == true }
+    @Published private(set) var importedIdentityMapping: ImportedCatalogMapping?
+    @Published private var importedIdentityMappingFailed = false
+    private var importedIdentitySource: LiveSourceID?
+    private var importedIdentityGeneration: ImportedCatalogGeneration?
+    private var deletingImportedSourceIDs = Set<UUID>()
+    private var importedRefreshDownloads: [UUID: Task<LoadedLiveSource, Error>] = [:]
+    #if DEBUG
+    var importedRetirementBeforeTransactionForTesting: (() async throws -> Void)?
+    #endif
+
+    func selectImportedIdentitySource(_ sourceID: LiveSourceID?) {
+        if case .imported(let id) = sourceID, importedIdentityEnabled {
+            guard !deletingImportedSourceIDs.contains(id), liveSources.contains(where: { $0.id == id }) else { return }
+        }
+        let validationSource: UUID?
+        if case .imported(let id) = sourceID { validationSource = id } else { validationSource = nil }
+        if liveValidationSelectedSource != validationSource {
+            if let old = liveValidationSelectedSource { cancelLiveSourceValidation(old) }
+            liveValidationSelectedSource = validationSource
+        }
+        guard importedIdentityEnabled, sourceID != importedIdentitySource else { return }
+        if case .imported(let previous) = importedIdentitySource {
+            // The existing availability worker can write Hidden state. Revoke
+            // it too, including A -> B -> A, before changing authority.
+            cancelLiveSourceValidation(previous)
+            importedRefreshDownloads[previous]?.cancel()
+            importedRefreshDownloads[previous] = nil
+        }
+        importedIdentityGeneration?.invalidate()
+        importedIdentityMapping = nil
+        importedIdentitySource = sourceID
+        importedIdentityMappingFailed = false
+        importedIdentityGeneration = nil
+        if case .imported(let id) = sourceID {
+            let generation = ImportedCatalogGeneration(sourceID: id)
+            importedIdentityGeneration = generation
+            Task { await refreshImportedIdentityMapping(id, generation: generation) }
+        }
+    }
+
+    private func refreshImportedIdentityMapping(_ id: UUID, generation: ImportedCatalogGeneration) async {
+        guard let database = liveReferenceStore, generation.isCurrent, !deletingImportedSourceIDs.contains(id),
+              liveSources.contains(where: { $0.id == id }), loadedLivePlaylists[id] != nil else { return }
+        do {
+            let mapping = try await database.importedCatalogMapping(sourceID: id, generation: generation)
+            guard generation.isCurrent, importedIdentityGeneration === generation,
+                  importedIdentitySource == .imported(id) else { return }
+            importedIdentityMapping = mapping
+        } catch {
+            guard generation.isCurrent else { return }
+            importedIdentityMappingFailed = true
+            show(error, title: "频道身份暂不可用")
+        }
+    }
+
+    private func editImportedIdentityReferences(_ id: UUID,
+        edits: [(channel: LiveChannel, kind: MigrationReferenceKind, present: Bool)],
+        validationPermit: LiveValidationPermit? = nil) async throws {
+        guard !deletingImportedSourceIDs.contains(id), let database = liveReferenceStore,
+              let mapping = importedIdentityMapping, mapping.sourceID == id else {
+            throw ImportedExecutionError.blocked
+        }
+        let updated = try await database.setImportedReferences(mapping: mapping, edits: edits, validationPermit: validationPermit)
+        guard mapping.generation.isCurrent, importedIdentityGeneration === mapping.generation else { return }
+        importedIdentityMapping = updated
+    }
+
+    #if DEBUG
+    // Intercepts only the final load boundary. Tests exercise the production
+    // selection/flow/recovery path without a window, network, or user database.
+    var importedRouteLoadForTesting: ((LivePlaybackCandidate, ResolvedMedia, UUID) async throws -> Void)?
+    func acceptImportedRoutesForTesting(_ source: StoredLiveSource, playlist: LivePlaylist) {
+        liveSources.removeAll { $0.id == source.id }; liveSources.append(source)
+        publishImportedCatalog(playlist, sourceID: source.id)
+    }
+    func setImportedRouteDeletingForTesting(_ id: UUID, deleting: Bool) {
+        if deleting { deletingImportedSourceIDs.insert(id); revokeImportedPlaybackFlow(id) }
+        else { deletingImportedSourceIDs.remove(id) }
+    }
+    func failImportedRouteForTesting() {
+        recoverLivePlaybackAfterFailure(requestID: activePlayerRequestID, message: "fixture failure")
+    }
+    var importedRouteFlowForTesting: UUID? { livePlaybackNavigationContext?.flowID }
+    var importedRoutePlaybackCatalogForTesting: AcceptedImportedCatalog? { livePlaybackNavigationContext?.importedCatalog }
+    var importedRouteRecoveryTaskForTesting: Task<Void, Never>? { livePlaybackRecoveryTask }
+    var importedRouteAttemptCountForTesting: Int { livePlaybackNavigationContext?.attemptedTransports.count ?? 0 }
+    func setImportedIdentityCatalogForTesting(_ source: StoredLiveSource) throws {
+        liveSources.removeAll { $0.id == source.id }; liveSources.append(source)
+        publishImportedCatalog(try LiveSourceParser().parse(source.rawData, baseURL: source.baseURL), sourceID: source.id)
+    }
+    #endif
+
     init(
         environment: AppEnvironment?,
         startupError: UserFacingError? = nil,
         initialProviders: [String: SiteProvider] = [:],
         liveReferenceStore: SQLiteStore? = nil,
-        liveCredentialStore: (any XtreamCredentialStoring)? = nil
+        liveCredentialStore: (any XtreamCredentialStoring)? = nil,
+        playbackDisplaySleep: PlaybackDisplaySleepController? = nil
     ) {
         self.environment = environment
+        self.playbackDisplaySleep = playbackDisplaySleep ?? PlaybackDisplaySleepController()
+        self.playbackDisplaySleep.beginSession(activePlayerRequestID)
         self.liveReferenceStore = liveReferenceStore ?? environment?.database
         self.liveCredentialStore = liveCredentialStore
             ?? environment?.xtreamCredentialStore
@@ -5313,6 +5555,8 @@ final class AppState: ObservableObject {
             try Task.checkCancellation()
 
             nativeLiveAccountMutationIDs.insert(providerID)
+            liveEPG.remove(.xtream(providerID))
+            await environment.productionEPGRepository.invalidate(EPGSourceKey(.xtream(providerID)))
             if existing == nil || activeConfigurationRecord?.id == providerID {
                 invalidateXtreamLiveCatalog()
             }
@@ -5981,10 +6225,8 @@ final class AppState: ObservableObject {
         }
         let configuration = try Self.configurationContent(for: record)
         let credentials = try await xtreamCredentials(for: record)
-        // An explicitly selected Xtream provider must pass the same account
-        // gate as Test Connection and Save. This also prevents a previously
-        // saved account whose exp_date has elapsed from being committed as the
-        // active provider.
+        // An explicitly selected Xtream provider must pass the same server
+        // account-state gate as Test Connection and Save.
         try await validateXtreamAccountIfNeeded(
             record: record,
             credentials: credentials
@@ -6304,6 +6546,10 @@ final class AppState: ObservableObject {
                 didDeleteXtreamCredentials = true
             }
             try await environment.database.deleteConfiguration(id: id)
+            if deletingXtream {
+                liveEPG.remove(.xtream(id))
+                await environment.productionEPGRepository.invalidate(EPGSourceKey(.xtream(id)))
+            }
             didDeleteConfiguration = true
             if deletingActiveConfiguration {
                 resetSearchForConfigurationChange()
@@ -11327,8 +11573,12 @@ final class AppState: ObservableObject {
         let imageQuiesceTask = Task { @MainActor in
             await environment.imageRepository.cancelInFlightLoads()
         }
+        if continuingRequestID == nil {
+            resetPlaybackSkipSession()
+        }
         playbackSessionID = sessionID
         activePlayerRequestID = sessionID
+        historyProgressCheckpoint.reset(owner: sessionID)
         pendingNodePlaybackConfigurationFallback = nil
         playbackQualitySwitchSessionID = UUID()
         playbackQualities = []
@@ -11791,7 +12041,16 @@ final class AppState: ObservableObject {
                     detail: candidateDetail,
                     source: candidateSource,
                     episode: candidateEpisode,
-                    result: result
+                    result: result,
+                    danmakuContext: makeDanmakuPlaybackContext(
+                        configurationID: playbackConfigurationID,
+                        provider: provider,
+                        detail: candidateDetail,
+                        source: candidateSource,
+                        episode: candidateEpisode,
+                        result: result,
+                        sessionID: sessionID
+                    )
                 )
                 let providerReferenceForAttempt = currentProviderReference
                 let remainingAttempts = max(1, 8 - completedAttempts)
@@ -12245,12 +12504,12 @@ final class AppState: ObservableObject {
             )
             progress(.saving)
             try Task.checkCancellation()
-            try await environment.database.saveLiveSource(record)
+            try await environment.database.createLiveSource(record)
             try Task.checkCancellation()
             progress(.publishing)
             liveSources = try await environment.database.liveSources()
             try Task.checkCancellation()
-            loadedLivePlaylists[record.id] = loaded.playlist
+            publishImportedCatalog(loaded.playlist, sourceID: record.id)
             startLiveSourceBackgroundWork(for: record, playlist: loaded.playlist)
             return true
         } catch is CancellationError {
@@ -12338,7 +12597,7 @@ final class AppState: ObservableObject {
                 }
 
                 try await environment.database.saveLiveSource(record)
-                loadedLivePlaylists[record.id] = playlist
+                publishImportedCatalog(playlist, sourceID: record.id)
                 startLiveSourceBackgroundWork(for: record, playlist: playlist)
                 importedCount += 1
             } catch is CancellationError {
@@ -12372,7 +12631,7 @@ final class AppState: ObservableObject {
            configuration.providerID == record.id {
             sources.append(LiveSourceDescriptor(
                 id: .xtream(record.id), name: record.name,
-                canRefresh: true, canExport: false, supportsEPG: false
+                canRefresh: true, canExport: false, supportsEPG: true
             ))
         }
         return sources
@@ -12393,9 +12652,23 @@ final class AppState: ObservableObject {
 
     func isLiveCatalogLoading(_ sourceID: LiveSourceID) -> Bool {
         liveCatalogLoadingSourceIDs.contains(sourceID)
+            || (importedIdentityEnabled && importedIdentitySource == sourceID
+                && importedIdentityMapping == nil && !importedIdentityMappingFailed
+                && liveCatalog(for: sourceID) != nil)
+    }
+
+    /// UI-only projection. Unknown authority is a loading/error state, never
+    /// an invented "all channels deleted" count. Player/catalog access unchanged.
+    func presentedLiveCatalog(for sourceID: LiveSourceID) -> LiveCatalogSnapshot? {
+        if importedIdentityEnabled, case .imported = sourceID,
+           (importedIdentityMapping?.sourceID).map(LiveSourceID.imported) != sourceID { return nil }
+        return liveCatalog(for: sourceID)
     }
 
     func liveCatalogError(for sourceID: LiveSourceID) -> String? {
+        if importedIdentityEnabled, case .imported = sourceID, importedIdentityMappingFailed {
+            return "频道身份暂不可用，请刷新后重试。"
+        }
         guard case .xtream = sourceID,
               liveSourceDescriptors.contains(where: { $0.id == sourceID }) else { return nil }
         return nativeLiveCatalogError
@@ -12465,6 +12738,7 @@ final class AppState: ObservableObject {
                   activeConfigurationRecord?.id == id,
                   catalog.sourceID == sourceID else { return }
             nativeLiveCatalog = catalog
+            liveEPGCatalogRevision = UUID()
         } catch {
             guard nativeLiveGeneration == generation,
                   nativeLiveCatalogRequestID == requestID,
@@ -12480,6 +12754,9 @@ final class AppState: ObservableObject {
     }
 
     private func invalidateXtreamLiveCatalog() {
+        liveEPG.removeNativeSources()
+        epgBrowserChannels = []
+        scheduleEPGRefresh()
         nativeLiveGeneration = UUID()
         nativeLiveCatalogTask?.cancel()
         nativeLiveCatalogTask = nil
@@ -12515,6 +12792,10 @@ final class AppState: ObservableObject {
 
     func loadLiveSource(_ source: StoredLiveSource) async {
         guard environment != nil else { return }
+        cancelLiveSourceValidation(source.id)
+        if importedIdentityEnabled {
+            guard !deletingImportedSourceIDs.contains(source.id), liveSources.contains(where: { $0.id == source.id }) else { return }
+        }
         liveCatalogLoadingSourceIDs.insert(.imported(source.id))
         isLoading = true
         defer {
@@ -12526,7 +12807,12 @@ final class AppState: ObservableObject {
                 source.rawData,
                 baseURL: source.baseURL
             )
-            loadedLivePlaylists[source.id] = playlist
+            publishImportedCatalog(playlist, sourceID: source.id)
+            if importedIdentityEnabled, let generation = importedIdentityGeneration, generation.sourceID == source.id {
+                await refreshImportedIdentityMapping(source.id, generation: generation)
+                guard generation.isCurrent, !deletingImportedSourceIDs.contains(source.id),
+                      liveSources.contains(where: { $0.id == source.id }) else { return }
+            }
             startLiveSourceBackgroundWork(for: source, playlist: playlist)
         } catch {
             show(error, title: L10n.string("live.source.load.failed", fallback: "Live TV Source Failed to Load"))
@@ -12534,6 +12820,9 @@ final class AppState: ObservableObject {
     }
 
     func refreshLiveSource(_ id: UUID) async {
+        guard !deletingImportedSourceIDs.contains(id) else { return }
+        // Even a refresh that cannot start must terminate the previous check.
+        cancelLiveSourceValidation(id)
         guard let environment,
               let existing = liveSources.first(where: { $0.id == id }) else {
             return
@@ -12547,14 +12836,36 @@ final class AppState: ObservableObject {
             )
             return
         }
+        var identityGeneration: ImportedCatalogGeneration?
+        if importedIdentityEnabled {
+            guard importedIdentitySource == .imported(id) else { return }
+            importedRefreshDownloads[id]?.cancel()
+            importedIdentityGeneration?.invalidate()
+            let generation = ImportedCatalogGeneration(sourceID: id)
+            importedIdentityGeneration = generation
+            identityGeneration = generation
+            importedIdentityMapping = nil
+            importedIdentityMappingFailed = false
+        }
         liveCatalogLoadingSourceIDs.insert(.imported(id))
         isLoading = true
         defer {
-            isLoading = false
-            liveCatalogLoadingSourceIDs.remove(.imported(id))
+            if identityGeneration == nil || importedIdentityGeneration === identityGeneration {
+                isLoading = false
+                liveCatalogLoadingSourceIDs.remove(.imported(id))
+                importedRefreshDownloads[id] = nil
+            }
         }
         do {
-            let loaded = try await environment.liveSourceLoader.load(.remote(url))
+            let loaded: LoadedLiveSource
+            if identityGeneration != nil {
+                let download = Task { try await environment.liveSourceLoader.load(.remote(url)) }
+                importedRefreshDownloads[id] = download
+                loaded = try await withTaskCancellationHandler(operation: { try await download.value }, onCancel: { download.cancel() })
+            } else {
+                loaded = try await environment.liveSourceLoader.load(.remote(url))
+            }
+            if let identityGeneration, !identityGeneration.isCurrent { return }
             let updated = StoredLiveSource(
                 id: existing.id,
                 name: existing.name,
@@ -12564,32 +12875,48 @@ final class AppState: ObservableObject {
                 rawData: loaded.rawData,
                 updatedAt: loaded.loadedAt
             )
-            try await environment.database.saveLiveSource(updated)
+            if let identityGeneration {
+                try await environment.database.acceptImportedRefresh(updated, generation: identityGeneration)
+                guard identityGeneration.isCurrent else { return }
+            } else {
+                try await environment.database.saveLiveSource(updated)
+            }
             liveSources = try await environment.database.liveSources()
-            loadedLivePlaylists[id] = loaded.playlist
-            loadedEPGGuides[id] = nil
-            loadedEPGScheduleIndexes[id] = nil
+            if let identityGeneration, !identityGeneration.isCurrent { return }
+            publishImportedCatalog(loaded.playlist, sourceID: id)
+            if let identityGeneration {
+                await refreshImportedIdentityMapping(id, generation: identityGeneration)
+                guard identityGeneration.isCurrent else { return }
+            }
             epgFailures[id] = nil
             startLiveSourceBackgroundWork(for: updated, playlist: loaded.playlist)
         } catch {
+            if let identityGeneration, !identityGeneration.isCurrent { return }
+            // Failed refresh is not an empty catalog. Recompute authority from
+            // the unchanged stored catalog under the new live generation.
+            if let identityGeneration { await refreshImportedIdentityMapping(id, generation: identityGeneration) }
             show(error, title: L10n.string("live.refresh.failed", fallback: "Live TV Source Refresh Failed"))
         }
     }
 
     func deleteLiveSource(_ id: UUID) async {
-        guard let environment else { return }
-        liveSourceValidationTasks[id]?.cancel()
-        liveSourceValidationTasks[id] = nil
-        liveSourceEPGTasks[id]?.cancel()
-        liveSourceEPGTasks[id] = nil
-        liveSourceValidationStatuses[id] = nil
+        if importedIdentityEnabled {
+            await retireImportedLiveSource(id)
+            return
+        }
+        guard let environment, deletingImportedSourceIDs.insert(id).inserted else { return }
+        revokeImportedPlaybackFlow(id)
+        defer { deletingImportedSourceIDs.remove(id) }
+        cancelLiveSourceValidation(id)
+        liveValidationActivity.clear(id)
         liveSourceEPGStatuses[id] = nil
         do {
             try await environment.database.deleteLiveSource(id: id)
             liveSources = try await environment.database.liveSources()
-            loadedLivePlaylists[id] = nil
-            loadedEPGGuides[id] = nil
-            loadedEPGScheduleIndexes[id] = nil
+            publishImportedCatalog(nil, sourceID: id)
+            liveEPG.remove(.imported(id))
+            await environment.productionEPGRepository.invalidate(EPGSourceKey(.imported(id)))
+            scheduleEPGRefresh()
             epgFailures[id] = nil
             let previousDeletedIDs = deletedLiveChannelIDs
             deletedLiveChannelIDs = LiveChannelDeletionPolicy.removingSource(
@@ -12610,167 +12937,205 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func retireImportedLiveSource(_ id: UUID) async {
+        guard let database = liveReferenceStore, liveSources.contains(where: { $0.id == id }),
+              deletingImportedSourceIDs.insert(id).inserted else { return }
+        revokeImportedPlaybackFlow(id)
+        // Barrier is installed BEFORE the first await. No UI path may mint a
+        // replacement capability until retirement succeeds or fails.
+        let wasCurrent = importedIdentitySource == .imported(id)
+        let revoked = wasCurrent ? (importedIdentityGeneration ?? ImportedCatalogGeneration(sourceID: id)) : ImportedCatalogGeneration(sourceID: id)
+        revoked.invalidate()
+        if wasCurrent { importedIdentityMapping = nil; importedIdentityGeneration = nil }
+        importedRefreshDownloads[id]?.cancel(); importedRefreshDownloads[id] = nil
+        cancelLiveSourceValidation(id)
+        defer { deletingImportedSourceIDs.remove(id) }
+        do {
+            #if DEBUG
+            try await importedRetirementBeforeTransactionForTesting?()
+            #endif
+            try await database.retireImportedSource(id: id, revokedGeneration: revoked)
+        } catch {
+            deletingImportedSourceIDs.remove(id)
+            // SQL rollback does NOT roll back revocation. Only the current
+            // source gets a NEW capability; never disturb a switch to B.
+            if importedIdentitySource == .imported(id) {
+                let replacement = ImportedCatalogGeneration(sourceID: id)
+                importedIdentityGeneration = replacement
+                importedIdentityMappingFailed = false
+                await refreshImportedIdentityMapping(id, generation: replacement)
+            }
+            show(error, title: L10n.string("live.delete-source.failed", fallback: "Live TV Source Deletion Failed"))
+            return
+        }
+        liveSources.removeAll { $0.id == id }
+        publishImportedCatalog(nil, sourceID: id)
+        liveValidationActivity.clear(id)
+        liveSourceEPGStatuses[id] = nil
+        liveCatalogLoadingSourceIDs.remove(.imported(id))
+        if importedIdentitySource == .imported(id) {
+            importedIdentitySource = nil; importedIdentityGeneration = nil
+            importedIdentityMapping = nil; importedIdentityMappingFailed = false
+            isLoading = false
+        }
+        // Existing post-delete EPG cleanup is retained; no EPG engine change.
+        liveEPG.remove(.imported(id))
+        if let environment { await environment.productionEPGRepository.invalidate(EPGSourceKey(.imported(id))) }
+        scheduleEPGRefresh()
+        epgFailures[id] = nil
+        // Legacy arrays are historical evidence. No legacy cleanup writes here.
+    }
+
     private func startLiveSourceBackgroundWork(
         for source: StoredLiveSource,
         playlist: LivePlaylist
     ) {
-        liveSourceEPGTasks[source.id]?.cancel()
-        if playlist.epgURL == nil {
-            loadedEPGGuides[source.id] = nil
-            loadedEPGScheduleIndexes[source.id] = nil
+        if importedIdentityEnabled {
+            guard !deletingImportedSourceIDs.contains(source.id), liveSources.contains(where: { $0.id == source.id }) else { return }
+        }
+        liveEPGCatalogRevision = UUID()
+        if let revision = epgRevision(for: .imported(source.id)) {
+            liveEPG.prepare(source: .imported(source.id), revision: revision)
+        }
+        if resolvedEPGSource(for: .imported(source.id)) == nil {
+            liveEPG.remove(.imported(source.id))
             epgFailures[source.id] = nil
             liveSourceEPGStatuses[source.id] = nil
-            liveSourceEPGTasks[source.id] = nil
         } else {
             liveSourceEPGStatuses[source.id] = .loading
-            liveSourceEPGTasks[source.id] = Task { @MainActor [weak self] in
-                guard let self else { return }
-                await self.loadEPG(for: source, playlist: playlist)
-            }
+            epgInitialSourceID = source.id
         }
+        scheduleEPGRefresh()
         startInitialLiveSourceValidation(
             sourceID: source.id,
             playlist: playlist
         )
     }
 
-    private func startInitialLiveSourceValidation(
-        sourceID: UUID,
-        playlist: LivePlaylist
-    ) {
+    private func cancelLiveSourceValidation(_ sourceID: UUID, expectedRunID: UUID? = nil, budgetExceeded: Bool = false) {
+        guard let permit = liveValidationPermits[sourceID],
+              expectedRunID == nil || permit.id == expectedRunID else { return }
+        // If COMMIT won the race, report its outcome instead of claiming cancel.
+        guard permit.cancel() else { return }
         liveSourceValidationTasks[sourceID]?.cancel()
+        liveValidationDeadlines[sourceID]?.cancel()
+        let latest = liveValidationProgressRelays[sourceID]?.close()
+        switch liveSourceValidationStatuses[sourceID] {
+        case .checking(let done, let total), .processing(let done, let total):
+            let count = max(done, latest?.completed ?? done)
+            liveValidationActivity.transition(budgetExceeded
+                ? .partial(completed: count, total: total) : .cancelled(completed: count, total: total),
+                sourceID: sourceID, runID: permit.id)
+        default: break
+        }
+    }
+
+    private func startInitialLiveSourceValidation(sourceID: UUID, playlist: LivePlaylist) {
+        cancelLiveSourceValidation(sourceID)
+        guard !epgSleeping, !isShutdownRequested, !deletingImportedSourceIDs.contains(sourceID),
+              let source = liveSources.first(where: { $0.id == sourceID }) else { return }
         let channels = playlist.groups.flatMap(\.channels)
-        guard !channels.isEmpty else {
-            liveSourceValidationStatuses[sourceID] = .completed(
-                removed: 0,
-                total: 0
-            )
+        let permit = LiveValidationPermit(sourceID: sourceID)
+        liveValidationPermits[sourceID] = permit
+        liveValidationProgressRelays[sourceID]?.close()
+        liveValidationActivity.begin(sourceID: sourceID, runID: permit.id, total: channels.count)
+        let relay = ValidationProgressRelay(sourceID: sourceID, runID: permit.id, total: channels.count) { [weak self] value in
+            guard let self, self.liveValidationPermits[value.sourceID]?.id == value.runID,
+                  self.liveValidationPermits[value.sourceID]?.isCancelled == false else { return }
+            self.liveValidationActivity.accept(value)
+        }
+        liveValidationProgressRelays[sourceID] = relay
+        let service = liveValidationService
+        liveValidationDeadlines[sourceID]?.cancel()
+        liveValidationDeadlines[sourceID] = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: UInt64(service.maximumRunDuration * 1_000_000_000)) }
+            catch { return }
+            self?.cancelLiveSourceValidation(sourceID, expectedRunID: permit.id, budgetExceeded: true)
+        }
+        liveSourceValidationTasks[sourceID] = Task(priority: .utility) { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                relay.close()
+                // An older finally cannot remove its replacement's handle.
+                if self.liveValidationPermits[sourceID] === permit {
+                    self.liveSourceValidationTasks[sourceID] = nil
+                    self.liveValidationDeadlines[sourceID]?.cancel()
+                    self.liveValidationDeadlines[sourceID] = nil
+                    self.liveValidationPermits[sourceID] = nil
+                    self.liveValidationProgressRelays[sourceID] = nil
+                }
+            }
+            let result = await service.run(channels: channels, permit: permit) { done, total in
+                relay.submit(completed: done, total: total)
+            }
+            relay.close()
+            guard self.liveValidationPermits[sourceID] === permit else { return }
+            switch result.end {
+            case .cancelled:
+                if case .checking = self.liveSourceValidationStatuses[sourceID] {
+                    self.liveValidationActivity.transition(.cancelled(completed: result.completed, total: result.total), sourceID: sourceID, runID: permit.id)
+                }
+                return
+            case .budgetExceeded:
+                self.liveValidationActivity.transition(.partial(completed: result.completed, total: result.total), sourceID: sourceID, runID: permit.id)
+                return
+            case .complete: break
+            }
+            guard !Task.isCancelled, !permit.isCancelled, !self.deletingImportedSourceIDs.contains(sourceID),
+                  self.liveSources.contains(where: { $0.id == sourceID }) else { return }
+            self.liveValidationActivity.transition(.processing(completed: result.completed, total: result.total), sourceID: sourceID, runID: permit.id)
+            do {
+                #if DEBUG
+                try await self.liveValidationBeforeWriteForTesting?()
+                #endif
+                try await self.applyAutomaticallyUnavailableLiveChannels(result.unavailableIDs,
+                    source: source, channels: channels, permit: permit)
+                guard self.liveValidationPermits[sourceID] === permit,
+                      self.liveSources.contains(where: { $0.id == sourceID }) else { return }
+                self.liveValidationActivity.transition(.completed(removed: result.unavailableIDs.count, total: result.total), sourceID: sourceID, runID: permit.id)
+            } catch {
+                guard self.liveValidationPermits[sourceID] === permit else { return }
+                if permit.isCancelled || Task.isCancelled {
+                    if case .processing = self.liveSourceValidationStatuses[sourceID] {
+                        self.liveValidationActivity.transition(.cancelled(completed: result.completed, total: result.total), sourceID: sourceID, runID: permit.id)
+                    }
+                } else {
+                    self.liveValidationActivity.transition(.failed(self.localizedRuntimeErrorMessage(error)), sourceID: sourceID, runID: permit.id)
+                }
+            }
+        }
+    }
+
+    private func applyAutomaticallyUnavailableLiveChannels(_ channelIDs: Set<String>,
+        source: StoredLiveSource, channels: [LiveChannel], permit: LiveValidationPermit) async throws {
+        guard !Task.isCancelled, !permit.isCancelled, liveValidationPermits[source.id] === permit,
+              !deletingImportedSourceIDs.contains(source.id) else { throw CancellationError() }
+        guard !channelIDs.isEmpty else { try permit.commit {}; return }
+        let affected = channels.filter { channelIDs.contains($0.id) }
+        if importedIdentityEnabled {
+            try await editImportedIdentityReferences(source.id, edits: affected.flatMap {
+                [(channel: $0, kind: MigrationReferenceKind.hidden, present: true),
+                 (channel: $0, kind: MigrationReferenceKind.favorite, present: false)]
+            }, validationPermit: permit)
             return
         }
-        liveSourceValidationStatuses[sourceID] = .checking(
-            completed: 0,
-            total: channels.count
-        )
-        let prober = LiveStreamAvailabilityProber()
-        liveSourceValidationTasks[sourceID] = Task { @MainActor [weak self] in
-            guard let self else { return }
-            var unavailableChannelIDs = Set<String>()
-            var completed = 0
-
-            for startIndex in stride(
-                from: 0,
-                to: channels.count,
-                by: 4
-            ) {
-                guard !Task.isCancelled else { return }
-                let endIndex = min(startIndex + 4, channels.count)
-                let batch = Array(channels[startIndex..<endIndex])
-                let results = await withTaskGroup(
-                    of: (String, Bool).self,
-                    returning: [(String, Bool)].self
-                ) { group in
-                    for channel in batch {
-                        group.addTask {
-                            guard !channel.streams.isEmpty else {
-                                return (channel.id, true)
-                            }
-                            var streamResults: [LiveStreamProbeResult] = []
-                            for stream in channel.streams {
-                                guard !Task.isCancelled else {
-                                    return (channel.id, false)
-                                }
-                                streamResults.append(
-                                    await prober.result(for: stream)
-                                )
-                            }
-                            return (
-                                channel.id,
-                                LiveSourceValidationPolicy.shouldRemoveChannel(
-                                    streamResults: streamResults
-                                )
-                            )
-                        }
-                    }
-                    var values: [(String, Bool)] = []
-                    for await result in group {
-                        values.append(result)
-                    }
-                    return values
-                }
-                guard !Task.isCancelled else { return }
-                for (channelID, isUnavailable) in results
-                where isUnavailable {
-                    unavailableChannelIDs.insert(channelID)
-                }
-                completed += batch.count
-                self.liveSourceValidationStatuses[sourceID] = .checking(
-                    completed: completed,
-                    total: channels.count
-                )
-            }
-
-            guard !Task.isCancelled,
-                  self.liveSources.contains(where: { $0.id == sourceID }) else {
-                return
-            }
-            do {
-                try await self.applyAutomaticallyUnavailableLiveChannels(
-                    unavailableChannelIDs,
-                    sourceID: sourceID,
-                    channels: channels
-                )
-                self.liveSourceValidationStatuses[sourceID] = .completed(
-                    removed: unavailableChannelIDs.count,
-                    total: channels.count
-                )
-            } catch {
-                self.liveSourceValidationStatuses[sourceID] = .failed(
-                    self.localizedRuntimeErrorMessage(error)
-                )
-            }
-            self.liveSourceValidationTasks[sourceID] = nil
-        }
+        guard let database = liveReferenceStore else { throw ImportedExecutionError.blocked }
+        let updated = try await database.applyLegacyLiveValidation(source: source, channels: affected, permit: permit)
+        guard liveValidationPermits[source.id] === permit else { return }
+        deletedLiveChannelIDs = updated.hidden
+        favoriteLiveChannelIDs = updated.favorites
     }
 
-    private func applyAutomaticallyUnavailableLiveChannels(
-        _ channelIDs: Set<String>,
-        sourceID: UUID,
-        channels: [LiveChannel]
-    ) async throws {
-        guard !channelIDs.isEmpty else { return }
-        let previousDeletedIDs = deletedLiveChannelIDs
-        let previousFavoriteIDs = favoriteLiveChannelIDs
-        let sourceName = liveSources.first(where: { $0.id == sourceID })?.name
-        for channel in channels where channelIDs.contains(channel.id) {
-            deletedLiveChannelIDs.insert(
-                LiveChannelDeletionPolicy.identifier(
-                    sourceID: sourceID,
-                    channelID: channel.id
-                )
-            )
-            if let sourceName {
-                favoriteLiveChannelIDs.remove(
-                    liveFavoriteID(
-                        sourceName: sourceName,
-                        channel: channel
-                    )
-                )
-            }
-        }
-        do {
-            try await persistDeletedLiveChannels()
-            if favoriteLiveChannelIDs != previousFavoriteIDs {
-                try await persistFavoriteLiveChannels()
-            }
-        } catch {
-            deletedLiveChannelIDs = previousDeletedIDs
-            favoriteLiveChannelIDs = previousFavoriteIDs
-            try? await persistDeletedLiveChannels()
-            try? await persistFavoriteLiveChannels()
-            throw error
-        }
+    #if DEBUG
+    var liveValidationBeforeWriteForTesting: (() async throws -> Void)?
+    func startLiveValidationForTesting(sourceID: UUID, playlist: LivePlaylist, service: LiveValidationService) {
+        self.liveValidationService = service
+        startInitialLiveSourceValidation(sourceID: sourceID, playlist: playlist)
     }
-
+    func cancelLiveValidationForTesting(_ sourceID: UUID) { cancelLiveSourceValidation(sourceID) }
+    func liveValidationRunIDForTesting(_ sourceID: UUID) -> UUID? { liveValidationPermits[sourceID]?.id }
+    func liveValidationRelayForTesting(_ sourceID: UUID) -> ValidationProgressRelay? { liveValidationProgressRelays[sourceID] }
+    #endif
     func playLive(
         channel: LiveChannel,
         stream: LiveStream,
@@ -12778,7 +13143,87 @@ final class AppState: ObservableObject {
         navigationChannels: [LiveChannel]? = nil,
         windowActivation: PlayerWindowActivationPolicy = .userInitiated
     ) async {
-        guard !isShutdownRequested, let environment else { return }
+        // Raw stream entry is Native-only. Imported callers carry a channel-
+        // bound selection captured from an accepted catalog.
+        guard sourceID.isXtream else { return }
+        let context = LivePlaybackNavigationContext(
+            sourceID: sourceID,
+            channels: LiveChannelNavigationPolicy.normalizedChannels(
+                navigationChannels ?? [channel], including: channel
+            )
+        )
+        await beginLivePlayback(channel: channel, stream: stream, context: context, windowActivation: windowActivation)
+    }
+
+    func playImportedLive(
+        _ selection: ImportedRouteSelection,
+        navigationChannels: [LiveChannel],
+        windowActivation: PlayerWindowActivationPolicy = .userInitiated
+    ) async {
+        guard acceptedImportedCatalogs[selection.catalog.sourceID] === selection.catalog,
+              presentedLiveCatalog(for: .imported(selection.catalog.sourceID)) != nil else { return }
+        await beginImportedLive(selection, navigationChannels: navigationChannels, windowActivation: windowActivation)
+    }
+
+    private func importedPlaybackSourceIsActive(_ id: UUID) -> Bool {
+        !deletingImportedSourceIDs.contains(id) && liveSources.contains { $0.id == id }
+    }
+
+    private func revokeImportedPlaybackFlow(_ id: UUID) {
+        guard livePlaybackNavigationContext?.sourceID == .imported(id) else { return }
+        livePlaybackNavigationContext = nil
+        livePlaybackRecoveryTask?.cancel()
+        livePlaybackRecoveryTask = nil
+        livePlaybackNoticeTask?.cancel()
+        livePlaybackNoticeTask = nil
+        livePlaybackNotice = nil
+        isRecoveringLivePlayback = false
+        // An already playing stream is not stopped. Only its permission to
+        // initiate another route dies; SQL rollback cannot revive this flow.
+    }
+
+    private func beginImportedLive(
+        _ selection: ImportedRouteSelection,
+        navigationChannels: [LiveChannel],
+        windowActivation: PlayerWindowActivationPolicy
+    ) async {
+        guard importedPlaybackSourceIsActive(selection.catalog.sourceID),
+              selection.catalog.selection(for: selection.channel, key: selection.id) != nil,
+              navigationChannels.contains(selection.channel),
+              navigationChannels.allSatisfy(selection.catalog.contains),
+              Set(navigationChannels.map(\.id)).count == navigationChannels.count else { return }
+        let context = LivePlaybackNavigationContext(
+            sourceID: .imported(selection.catalog.sourceID), channels: navigationChannels,
+            importedCatalog: selection.catalog
+        )
+        await beginLivePlayback(channel: selection.channel, stream: selection.stream, context: context, windowActivation: windowActivation)
+    }
+
+    private func ownsLiveFlow(_ context: LivePlaybackNavigationContext) -> Bool {
+        livePlaybackNavigationContext === context && !isShutdownRequested && !isClosingPlayer
+    }
+
+    private func liveFlowMayLoad(_ context: LivePlaybackNavigationContext) -> Bool {
+        guard ownsLiveFlow(context) else { return false }
+        if case .imported(let id) = context.sourceID { return importedPlaybackSourceIsActive(id) }
+        return true
+    }
+
+    private var hasLivePlaybackLoader: Bool {
+        #if DEBUG
+        if importedRouteLoadForTesting != nil { return true }
+        #endif
+        return environment != nil
+    }
+
+    private func beginLivePlayback(
+        channel: LiveChannel,
+        stream: LiveStream,
+        context: LivePlaybackNavigationContext,
+        windowActivation: PlayerWindowActivationPolicy
+    ) async {
+        guard !isShutdownRequested, !isClosingPlayer, hasLivePlaybackLoader else { return }
+        let sourceID = context.sourceID
         if case .xtream(let providerID) = sourceID {
             guard xtreamProviderOperationID == nil,
                   configurationImportOperationID == nil,
@@ -12807,10 +13252,9 @@ final class AppState: ObservableObject {
         historyPlaybackRequestedItem = nil
         historyPlaybackChoices = []
         let clickRequestID = UUID()
-        PlayerStartupTraceStore.shared.begin(
-            requestID: clickRequestID,
-            mode: environment.player.mode
-        )
+        if let environment {
+            PlayerStartupTraceStore.shared.begin(requestID: clickRequestID, mode: environment.player.mode)
+        }
         livePlaybackRecoveryTask?.cancel()
         livePlaybackRecoveryTask = nil
         livePlaybackNoticeTask?.cancel()
@@ -12818,23 +13262,7 @@ final class AppState: ObservableObject {
         livePlaybackNotice = nil
         hasExhaustedLivePlayback = false
         livePlaybackAttemptedIdentifiers = []
-        if let navigationChannels {
-            livePlaybackNavigationContext = LivePlaybackNavigationContext(
-                sourceID: sourceID,
-                channels: LiveChannelNavigationPolicy.normalizedChannels(
-                    navigationChannels,
-                    including: channel
-                )
-            )
-        } else if livePlaybackNavigationContext?.sourceID != sourceID
-                    || livePlaybackNavigationContext?.channels.contains(
-                        where: { $0.id == channel.id }
-                    ) != true {
-            livePlaybackNavigationContext = LivePlaybackNavigationContext(
-                sourceID: sourceID,
-                channels: [channel]
-            )
-        }
+        livePlaybackNavigationContext = context
 
         activePlayback = nil
         pendingPlayback = nil
@@ -12849,16 +13277,22 @@ final class AppState: ObservableObject {
         playbackSessionID = clickRequestID
         activePlayerRequestID = clickRequestID
         isPlayerRenderSurfaceMountEnabled = true
-        presentPlayer(
-            requestID: clickRequestID,
-            activation: windowActivation
-        )
+        #if DEBUG
+        if importedRouteLoadForTesting != nil {
+            isPlayerPresented = true
+        } else {
+            presentPlayer(requestID: clickRequestID, activation: windowActivation)
+        }
+        #else
+        presentPlayer(requestID: clickRequestID, activation: windowActivation)
+        #endif
         await attemptLivePlaybackCandidates(
             startingChannel: channel,
             startingStream: stream,
             sourceID: sourceID,
             isAutomaticRecovery: false,
-            initialRequestID: clickRequestID
+            initialRequestID: clickRequestID,
+            context: context
         )
     }
 
@@ -12877,6 +13311,12 @@ final class AppState: ObservableObject {
               let targetStream = targetChannel.streams.first else {
             return
         }
+        if let catalog = context.importedCatalog {
+            guard liveFlowMayLoad(context), let selection = catalog.selections(for: targetChannel).first else { return }
+            // Navigation explicitly remains in the playing snapshot.
+            await beginImportedLive(selection, navigationChannels: context.channels, windowActivation: .preserveFocus)
+            return
+        }
         await playLive(
             channel: targetChannel,
             stream: targetStream,
@@ -12891,35 +13331,50 @@ final class AppState: ObservableObject {
         startingStream: LiveStream,
         sourceID: LiveSourceID,
         isAutomaticRecovery: Bool,
-        initialRequestID: UUID? = nil
+        initialRequestID: UUID? = nil,
+        context: LivePlaybackNavigationContext
     ) async {
-        guard let environment,
-              let context = livePlaybackNavigationContext,
-              context.sourceID == sourceID else {
+        guard hasLivePlaybackLoader, liveFlowMayLoad(context), context.sourceID == sourceID else {
             return
         }
         isRecoveringLivePlayback = true
         hasExhaustedLivePlayback = false
-        let candidates = LivePlaybackRecoveryPolicy.candidates(
-            channels: context.channels,
-            startingChannel: startingChannel,
-            startingStream: startingStream,
-            excluding: livePlaybackAttemptedIdentifiers,
-            scope: sourceID.isXtream ? .currentChannel : .entireSource
-        )
+        let candidates: [LivePlaybackCandidate]
+        if let catalog = context.importedCatalog {
+            guard let key = catalog.routeContext?.key(for: startingStream),
+                  let selection = catalog.selection(for: startingChannel, key: key) else {
+                isRecoveringLivePlayback = false
+                return
+            }
+            candidates = LivePlaybackRecoveryPolicy.importedCandidates(
+                catalog: catalog, channels: context.channels, starting: selection,
+                excluding: context.attemptedTransports
+            )
+        } else {
+            candidates = LivePlaybackRecoveryPolicy.candidates(
+                channels: context.channels, startingChannel: startingChannel,
+                startingStream: startingStream, excluding: livePlaybackAttemptedIdentifiers,
+                scope: .currentChannel
+            )
+        }
         var skippedCount = 0
         var pendingInitialRequestID = initialRequestID
         for candidate in candidates {
-            guard !Task.isCancelled,
+            guard ownsLiveFlow(context) else { return }
+            guard liveFlowMayLoad(context), !Task.isCancelled,
                   !isShutdownRequested,
                   livePlaybackSourceID == sourceID,
                   isPlayerPresented else {
                 isRecoveringLivePlayback = false
                 return
             }
-            livePlaybackAttemptedIdentifiers.insert(candidate.identifier)
+            if let transport = ImportedRouteTransport(candidate.stream), context.importedCatalog != nil {
+                context.attemptedTransports.insert(transport)
+            } else {
+                livePlaybackAttemptedIdentifiers.insert(candidate.nativeIdentifier)
+            }
             let requestID = pendingInitialRequestID ?? UUID()
-            if pendingInitialRequestID == nil {
+            if pendingInitialRequestID == nil, let environment {
                 PlayerStartupTraceStore.shared.begin(
                     requestID: requestID,
                     mode: environment.player.mode
@@ -12943,6 +13398,7 @@ final class AppState: ObservableObject {
                         episodeName: candidate.stream.name
                     )
                 case (.xtream, .provider(let reference)):
+                    guard let environment else { throw CancellationError() }
                     // Xtream URLs contain account secrets. Release the prior
                     // media/client before reading Keychain and materializing a
                     // fresh URL, then keep that URL only in this stack frame.
@@ -12967,42 +13423,69 @@ final class AppState: ObservableObject {
                 default:
                     throw XtreamLivePlaybackError.invalidReference
                 }
-                // A bounded replacement within the existing second-format attempt.
-                // Successful native loads never make an extra manifest request.
-                if skippedCount > 0, media.compatibilityPolicy == .nativeXtreamLive,
-                   NativeXtreamCompatibility.hlsFallbackEnabled, media.format == "m3u8" {
+                // Prepare the first Native attempt too: a provider's .ts route
+                // can redirect to a multi-variant HLS master. The bounded loader
+                // stops non-HLS responses immediately, without reading a stream.
+                let nativeAttemptStarted = ProcessInfo.processInfo.systemUptime
+                if media.compatibilityPolicy == .nativeXtreamLive,
+                   NativeXtreamCompatibility.hlsFallbackEnabled {
                     let preparationStarted = ProcessInfo.processInfo.systemUptime
-                    do {
-                        let response = try await NativeXtreamHLSPreparation.response(
-                            client: environment.xtreamHTTPClient, request: HTTPRequest(
-                            url: media.url, headers: media.headers, timeout: 10,
-                            maximumResponseBytes: 256 * 1024,
-                            earlyResponseLimitBytes: 256 * 1024,
-                            maximumRedirects: 5, redirectPolicy: .follow,
-                            retryPolicy: .none
-                        ))
-                        try Task.checkCancellation()
-                        guard playbackSessionID == requestID,
-                              activePlayerRequestID == requestID,
-                              livePlaybackSourceID == sourceID, isPlayerPresented else {
-                            throw CancellationError()
-                        }
-                        media.hlsStartupSelection = HLSStartupSelection.select(
-                            from: response.body, baseURL: response.url
-                        )
-                    } catch {
-                        if AsyncCancellationPolicy.isCancellation(error) { throw error }
-                        // Unknown/oversized manifests keep the ordinary candidate.
+                    media.hlsStartupSelection = try await prepareLiveHLS(media, requestID: requestID)
+                    try Task.checkCancellation()
+                    guard playbackSessionID == requestID,
+                          activePlayerRequestID == requestID,
+                          livePlaybackSourceID == sourceID, isPlayerPresented else {
+                        throw CancellationError()
                     }
-                    let preparationSeconds = Int(ceil(max(0, ProcessInfo.processInfo.systemUptime - preparationStarted)))
+                    let preparationElapsed = max(0, ProcessInfo.processInfo.systemUptime - preparationStarted)
+                    let preparationSeconds = Int(ceil(preparationElapsed))
                     media.nativeStartupBudgetSeconds = max(1, 60 - preparationSeconds)
+                    if let environment {
+                        PlayerExperimentLogger.performance(
+                            "phase=live_hls_preparation elapsed_ms=\(Int(preparationElapsed * 1000))"
+                                + " selected=\(media.hlsStartupSelection != nil)"
+                                + " variants=\(media.hlsStartupSelection?.variantCount ?? 0)",
+                            playerID: nil, requestID: requestID, mode: environment.player.mode
+                        )
+                    }
                 }
-                try await loadPlayerAfterRenderSurfaceReady(
-                    media,
-                    startPosition: nil,
-                    requestID: requestID
-                )
-                guard playbackSessionID == requestID else { return }
+                guard liveFlowMayLoad(context) else { throw CancellationError() }
+                do {
+                    #if DEBUG
+                    if let loader = importedRouteLoadForTesting, context.importedCatalog != nil {
+                        try await loader(candidate, media, requestID)
+                    } else {
+                        try await loadPlayerAfterRenderSurfaceReady(media, startPosition: nil, requestID: requestID, liveFlow: context)
+                    }
+                    #else
+                    try await loadPlayerAfterRenderSurfaceReady(media, startPosition: nil, requestID: requestID, liveFlow: context)
+                    #endif
+                } catch {
+                    // A reduced master is an optimization, not a new source.
+                    // Retry the original once inside the same total budget if
+                    // the chosen rendition cannot be opened. Never revive an
+                    // old channel switch, cancellation or account failure.
+                    guard media.hlsStartupSelection != nil,
+                          !AsyncCancellationPolicy.isCancellation(error),
+                          liveFlowMayLoad(context), playbackSessionID == requestID,
+                          activePlayerRequestID == requestID, isPlayerPresented,
+                          XtreamLivePlaybackFailurePolicy.permitsFormatFallback(after: error.localizedDescription) else {
+                        throw error
+                    }
+                    let remaining = 60 - Int(ceil(ProcessInfo.processInfo.systemUptime - nativeAttemptStarted))
+                    guard remaining > 0 else { throw error }
+                    media.hlsStartupSelection = nil
+                    media.nativeStartupBudgetSeconds = remaining
+                    if let environment {
+                        PlayerExperimentLogger.performance(
+                            "phase=live_hls_original_fallback remaining_s=\(remaining)",
+                            playerID: nil, requestID: requestID, mode: environment.player.mode
+                        )
+                    }
+                    try await loadPlayerAfterRenderSurfaceReady(media, startPosition: nil, requestID: requestID, liveFlow: context)
+                }
+                guard ownsLiveFlow(context), playbackSessionID == requestID else { return }
+                guard liveFlowMayLoad(context) else { throw CancellationError() }
                 isRecoveringLivePlayback = false
                 hasExhaustedLivePlayback = false
                 if skippedCount > 0 || isAutomaticRecovery {
@@ -13013,7 +13496,7 @@ final class AppState: ObservableObject {
                 return
             } catch {
                 PlayerStartupTraceStore.shared.cancel(requestID: requestID)
-                guard playbackSessionID == requestID else { return }
+                guard ownsLiveFlow(context), playbackSessionID == requestID else { return }
                 if AsyncCancellationPolicy.isCancellation(error) {
                     isRecoveringLivePlayback = false
                     return
@@ -13035,7 +13518,22 @@ final class AppState: ObservableObject {
                 }
             }
         }
+        guard ownsLiveFlow(context) else { return }
         finishExhaustedLivePlayback()
+    }
+
+    private func prepareLiveHLS(_ media: ResolvedMedia, requestID: UUID) async throws -> HLSStartupSelection? {
+        liveHLSPreparationTask?.task.cancel()
+        let task = Task { try await LiveHLSStartupPreparer().prepare(url: media.url, headers: media.headers) }
+        liveHLSPreparationTask = (requestID, task)
+        defer {
+            if liveHLSPreparationTask?.requestID == requestID { liveHLSPreparationTask = nil }
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     private func resolveXtreamLiveMedia(
@@ -13135,7 +13633,9 @@ final class AppState: ObservableObject {
               ),
               let channel = livePlaybackChannel,
               let stream = livePlaybackStream,
-              let sourceID = livePlaybackSourceID else {
+              let sourceID = livePlaybackSourceID,
+              let context = livePlaybackNavigationContext,
+              liveFlowMayLoad(context) else {
             return
         }
         if sourceID.isXtream,
@@ -13159,9 +13659,10 @@ final class AppState: ObservableObject {
                 startingChannel: channel,
                 startingStream: stream,
                 sourceID: sourceID,
-                isAutomaticRecovery: true
+                isAutomaticRecovery: true,
+                context: context
             )
-            self.livePlaybackRecoveryTask = nil
+            if self.ownsLiveFlow(context) { self.livePlaybackRecoveryTask = nil }
         }
     }
 
@@ -13176,9 +13677,10 @@ final class AppState: ObservableObject {
     private func showLivePlaybackNotice(_ message: String) {
         livePlaybackNoticeTask?.cancel()
         livePlaybackNotice = message
+        let flowID = livePlaybackNavigationContext?.flowID
         livePlaybackNoticeTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 4_000_000_000)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, self?.livePlaybackNavigationContext?.flowID == flowID else { return }
             self?.livePlaybackNotice = nil
             self?.livePlaybackNoticeTask = nil
         }
@@ -13195,6 +13697,10 @@ final class AppState: ObservableObject {
     }
 
     func isLiveFavorite(sourceID: LiveSourceID, channel: LiveChannel) -> Bool {
+        if importedIdentityEnabled, case .imported(let id) = sourceID {
+            guard importedIdentityMapping?.sourceID == id else { return false }
+            return importedIdentityMapping?.value(channel: channel, kind: .favorite) == true
+        }
         switch sourceID {
         case .imported(let id):
             guard let source = liveSources.first(where: { $0.id == id }) else { return false }
@@ -13206,6 +13712,14 @@ final class AppState: ObservableObject {
     }
 
     func toggleLiveFavorite(sourceID: LiveSourceID, channel: LiveChannel) async {
+        if importedIdentityEnabled, case .imported(let id) = sourceID {
+            do {
+                guard let mapping = importedIdentityMapping, mapping.sourceID == id,
+                      let value = mapping.value(channel: channel, kind: .favorite) else { throw ImportedExecutionError.blocked }
+                try await editImportedIdentityReferences(id, edits: [(channel, .favorite, !value)])
+            } catch { show(error, title: "无法保存频道收藏") }
+            return
+        }
         switch sourceID {
         case .imported(let id):
             guard let source = liveSources.first(where: { $0.id == id }) else { return }
@@ -13301,29 +13815,26 @@ final class AppState: ObservableObject {
         }
     }
 
-    func playLive(
-        channel: LiveChannel, stream: LiveStream, sourceID: UUID,
-        navigationChannels: [LiveChannel]? = nil,
-        windowActivation: PlayerWindowActivationPolicy = .userInitiated
-    ) async {
-        await playLive(
-            channel: channel,
-            stream: stream,
-            sourceID: .imported(sourceID),
-            navigationChannels: navigationChannels,
-            windowActivation: windowActivation
-        )
-    }
-
     func isLiveFavorite(sourceName: String, channel: LiveChannel) -> Bool {
-        favoriteLiveChannelIDs.contains(liveFavoriteID(sourceName: sourceName, channel: channel))
+        if importedIdentityEnabled {
+            let matches = liveSources.filter { $0.name == sourceName &&
+                loadedLivePlaylists[$0.id]?.groups.flatMap(\.channels).contains(channel) == true }
+            guard matches.count == 1 else { return false }
+            return isLiveFavorite(sourceID: .imported(matches[0].id), channel: channel)
+        }
+        return favoriteLiveChannelIDs.contains(liveFavoriteID(sourceName: sourceName, channel: channel))
     }
 
     func isLiveChannelDeleted(
         sourceID: UUID,
         channel: LiveChannel
     ) -> Bool {
-        LiveChannelDeletionPolicy.contains(
+        if importedIdentityEnabled {
+            guard importedIdentityMapping?.sourceID == sourceID else { return true }
+            // Unknown authority must not reveal a previously claimed Hidden.
+            return importedIdentityMapping?.value(channel: channel, kind: .hidden) ?? true
+        }
+        return LiveChannelDeletionPolicy.contains(
             deletedLiveChannelIDs,
             sourceID: sourceID,
             channelID: channel.id
@@ -13335,6 +13846,11 @@ final class AppState: ObservableObject {
         sourceName: String,
         channel: LiveChannel
     ) async {
+        if importedIdentityEnabled {
+            do { try await editImportedIdentityReferences(sourceID, edits: [(channel, .hidden, true), (channel, .favorite, false)]) }
+            catch { show(error, title: "无法隐藏频道") }
+            return
+        }
         guard environment != nil else { return }
         let previousDeletedIDs = deletedLiveChannelIDs
         let previousFavoriteIDs = favoriteLiveChannelIDs
@@ -13365,6 +13881,11 @@ final class AppState: ObservableObject {
         sourceID: UUID,
         channel: LiveChannel
     ) async {
+        if importedIdentityEnabled {
+            do { try await editImportedIdentityReferences(sourceID, edits: [(channel, .hidden, false)]) }
+            catch { show(error, title: "无法恢复频道") }
+            return
+        }
         let identifier = LiveChannelDeletionPolicy.identifier(
             sourceID: sourceID,
             channelID: channel.id
@@ -13379,6 +13900,13 @@ final class AppState: ObservableObject {
     }
 
     func restoreAllDeletedLiveChannels(sourceID: UUID) async {
+        if importedIdentityEnabled {
+            do {
+                guard let channels = loadedLivePlaylists[sourceID]?.groups.flatMap(\.channels) else { throw ImportedExecutionError.blocked }
+                try await editImportedIdentityReferences(sourceID, edits: channels.map { ($0, .hidden, false) })
+            } catch { show(error, title: "无法恢复频道") }
+            return
+        }
         let previousDeletedIDs = deletedLiveChannelIDs
         deletedLiveChannelIDs = LiveChannelDeletionPolicy.removingSource(
             sourceID,
@@ -13394,6 +13922,13 @@ final class AppState: ObservableObject {
     }
 
     func toggleLiveFavorite(sourceName: String, channel: LiveChannel) async {
+        if importedIdentityEnabled {
+            let matches = liveSources.filter { $0.name == sourceName &&
+                loadedLivePlaylists[$0.id]?.groups.flatMap(\.channels).contains(channel) == true }
+            guard matches.count == 1 else { return }
+            await toggleLiveFavorite(sourceID: .imported(matches[0].id), channel: channel)
+            return
+        }
         guard environment != nil else { return }
         let id = liveFavoriteID(sourceName: sourceName, channel: channel)
         if favoriteLiveChannelIDs.contains(id) {
@@ -13430,6 +13965,12 @@ final class AppState: ObservableObject {
         let history = allHistory.filter {
             $0.configurationID == configuration.id
         }
+        let playbackSkipRules = try await environment.database
+            .playbackSkipRules(configurationID: configuration.id)
+        let playbackCompletionMarkers = try await environment.database
+            .playbackCompletionMarkers(configurationID: configuration.id)
+        let danmakuBindings = try await environment.database
+            .danmakuBindings(configurationID: configuration.id)
         let appVersion = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
         ) as? String ?? L10n.string("common.unknown", fallback: "Unknown")
@@ -13441,6 +13982,9 @@ final class AppState: ObservableObject {
             try PortableBackupCodec.encode(
                 configuration: configuration,
                 history: history,
+                playbackSkipRules: playbackSkipRules,
+                playbackCompletionMarkers: playbackCompletionMarkers,
+                danmakuBindings: danmakuBindings,
                 appVersion: appVersion,
                 appBuild: appBuild,
                 createdAt: createdAt
@@ -13526,6 +14070,63 @@ final class AppState: ObservableObject {
                 configuration: decoded.payload.configuration.storedConfiguration,
                 history: decoded.payload.history
             )
+        let importedConfigurationID = result.configuration.id
+        let existingSkipRules = try await environment.database
+            .playbackSkipRules(configurationID: importedConfigurationID)
+        let existingSkipRulesByIdentity = Dictionary(
+            uniqueKeysWithValues: existingSkipRules.map { ($0.identity, $0) }
+        )
+        for var rule in decoded.payload.playbackSkipRules {
+            rule.identity.configurationID = importedConfigurationID
+            if let existing = existingSkipRulesByIdentity[rule.identity],
+               existing.updatedAt >= rule.updatedAt {
+                continue
+            }
+            try await environment.database.savePlaybackSkipRule(rule)
+        }
+        let oldConfigurationPrefix = decoded.payload.configuration.id
+            .uuidString.lowercased() + "::"
+        let newConfigurationPrefix = importedConfigurationID
+            .uuidString.lowercased() + "::"
+        let existingCompletionMarkers = try await environment.database
+            .playbackCompletionMarkers(configurationID: importedConfigurationID)
+        let existingCompletionMarkersByIdentity = Dictionary(
+            uniqueKeysWithValues: existingCompletionMarkers.map {
+                ($0.identity, $0)
+            }
+        )
+        for var marker in decoded.payload.playbackCompletionMarkers {
+            marker.identity.configurationID = importedConfigurationID
+            if marker.historyRecordID.hasPrefix(oldConfigurationPrefix) {
+                marker.historyRecordID = newConfigurationPrefix
+                    + marker.historyRecordID.dropFirst(
+                        oldConfigurationPrefix.count
+                    )
+            }
+            if let existing = existingCompletionMarkersByIdentity[
+                marker.identity
+            ], existing.completedAt >= marker.completedAt {
+                continue
+            }
+            try await environment.database.savePlaybackCompletionMarker(marker)
+        }
+        let existingDanmakuBindings = try await environment.database
+            .danmakuBindings(configurationID: importedConfigurationID)
+        let existingDanmakuBindingsByIdentity = Dictionary(
+            uniqueKeysWithValues: existingDanmakuBindings.map {
+                ($0.editionIdentity, $0)
+            }
+        )
+        for var binding in decoded.payload.danmakuBindings {
+            binding.editionIdentity.episode.content.configurationID
+                = importedConfigurationID
+            if let existing = existingDanmakuBindingsByIdentity[
+                binding.editionIdentity
+            ], existing.updatedAt >= binding.updatedAt {
+                continue
+            }
+            try await environment.database.saveDanmakuBinding(binding)
+        }
 
         cancelActiveCloudAuthorizationInteraction(nextIdentity: nil)
         resetSearchForConfigurationChange()
@@ -13571,6 +14172,12 @@ final class AppState: ObservableObject {
         let history = allHistory.filter {
             $0.configurationID == configuration.id
         }
+        let playbackSkipRules = try await environment.database
+            .playbackSkipRules(configurationID: configuration.id)
+        let playbackCompletionMarkers = try await environment.database
+            .playbackCompletionMarkers(configurationID: configuration.id)
+        let danmakuBindings = try await environment.database
+            .danmakuBindings(configurationID: configuration.id)
         let appVersion = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
         ) as? String ?? L10n.string("common.unknown", fallback: "Unknown")
@@ -13581,6 +14188,9 @@ final class AppState: ObservableObject {
             try PortableBackupCodec.encode(
                 configuration: configuration,
                 history: history,
+                playbackSkipRules: playbackSkipRules,
+                playbackCompletionMarkers: playbackCompletionMarkers,
+                danmakuBindings: danmakuBindings,
                 appVersion: appVersion,
                 appBuild: appBuild
             )
@@ -13745,6 +14355,268 @@ final class AppState: ObservableObject {
         }
     }
 
+    func setPlaybackSkipAppliesToAllEpisodes(_ enabled: Bool) {
+        playbackSkipAppliesToAllEpisodes = enabled
+        refreshPlaybackSkipPresentation()
+    }
+
+    func markPlaybackOpeningAtCurrentPosition() async {
+        let position = playerSnapshot.position
+        guard canMarkPlaybackOpening,
+              position.isFinite,
+              position > 0,
+              position <= playbackSkipMaximumDuration else {
+            showPlaybackSkipValidationError()
+            return
+        }
+        await updateSelectedPlaybackSkipRule { rule in
+            rule.opening = .enabled(position)
+        }
+    }
+
+    func markPlaybackEndingAtCurrentPosition() async {
+        let duration = playerSnapshot.duration
+        let remaining = duration - playerSnapshot.position
+        guard canMarkPlaybackEnding,
+              duration.isFinite,
+              duration > 0,
+              remaining.isFinite,
+              remaining > 0,
+              remaining <= playbackSkipMaximumDuration else {
+            showPlaybackSkipValidationError()
+            return
+        }
+        // Marking the current frame as the beginning of the ending must not
+        // immediately dismiss the episode the user is still configuring.
+        playbackSkipSession?.endingSkipSuppressed = true
+        playbackEndingSkipPrompt = nil
+        await updateSelectedPlaybackSkipRule { rule in
+            rule.ending = .enabled(remaining)
+        }
+    }
+
+    func adjustPlaybackOpening(by delta: TimeInterval) async {
+        guard let value = playbackSkipOpeningEnd else { return }
+        let adjusted = min(
+            max(1, value + delta),
+            playbackSkipMaximumDuration
+        )
+        await updateSelectedPlaybackSkipRule { rule in
+            rule.opening = .enabled(adjusted)
+        }
+    }
+
+    func adjustPlaybackEnding(by delta: TimeInterval) async {
+        guard let value = playbackSkipEndingDuration else { return }
+        let adjusted = min(
+            max(1, value + delta),
+            playbackSkipMaximumDuration
+        )
+        await updateSelectedPlaybackSkipRule { rule in
+            rule.ending = .enabled(adjusted)
+        }
+    }
+
+    func setPlaybackOpeningSkipEnabled(_ enabled: Bool) async {
+        guard playbackSkipOpeningEnd != nil else { return }
+        await updateSelectedPlaybackSkipRule { rule in
+            if rule.opening.seconds == nil {
+                rule.opening.seconds = playbackSkipOpeningEnd
+            }
+            rule.opening = rule.opening.settingEnabled(enabled)
+        }
+    }
+
+    func setPlaybackEndingSkipEnabled(_ enabled: Bool) async {
+        guard playbackSkipEndingDuration != nil else { return }
+        await updateSelectedPlaybackSkipRule { rule in
+            if rule.ending.seconds == nil {
+                rule.ending.seconds = playbackSkipEndingDuration
+            }
+            rule.ending = rule.ending.settingEnabled(enabled)
+        }
+        if !enabled {
+            playbackEndingSkipPrompt = nil
+        }
+    }
+
+    func clearSelectedPlaybackSkipRule() async {
+        guard var session = playbackSkipSession else { return }
+        let identity = playbackSkipAppliesToAllEpisodes
+            ? session.identity.seriesLineIdentity
+            : session.identity
+        if playbackSkipAppliesToAllEpisodes {
+            session.lineRule = nil
+        } else {
+            session.episodeRule = nil
+        }
+        session.effectiveRule = PlaybackSkipRuleResolver.resolve(
+            line: session.lineRule,
+            episode: session.episodeRule
+        )
+        playbackSkipSession = session
+        refreshPlaybackSkipPresentation()
+        guard !incognitoMode else { return }
+        do {
+            try await environment?.database.deletePlaybackSkipRule(
+                identity: identity
+            )
+        } catch {
+            show(
+                error,
+                title: L10n.string(
+                    "player.skip.save.failed",
+                    fallback: "Unable to Save Skip Settings"
+                ),
+                target: .player
+            )
+        }
+    }
+
+    func suppressEndingSkipForCurrentPlayback() {
+        playbackSkipSession?.endingSkipSuppressed = true
+        playbackEndingSkipPrompt = nil
+    }
+
+    func skipEndingNow() {
+        guard let session = playbackSkipSession,
+              session.episodeSessionID == playbackSessionID else { return }
+        playbackEndingSkipPrompt = nil
+        requestAdvanceToNextEpisode(
+            reason: .manualEndingSkip,
+            sessionID: session.episodeSessionID
+        )
+    }
+
+    var canEditPlaybackSkip: Bool {
+        !isLivePlayback
+            && activePlayback != nil
+            && playerSnapshot.duration.isFinite
+            && playerSnapshot.duration > 0
+            && !playerSnapshot.isSeeking
+    }
+
+    var canMarkPlaybackOpening: Bool {
+        canEditPlaybackSkip && canSeekPlayback
+    }
+
+    var canMarkPlaybackEnding: Bool {
+        canEditPlaybackSkip
+    }
+
+    private var playbackSkipMaximumDuration: TimeInterval {
+        let duration = playerSnapshot.duration
+        guard duration.isFinite, duration > 0 else {
+            return PlaybackSkipPolicy.maximumSkipDuration
+        }
+        return min(
+            PlaybackSkipPolicy.maximumSkipDuration,
+            duration * PlaybackSkipPolicy.maximumDurationFraction
+        )
+    }
+
+    private func updateSelectedPlaybackSkipRule(
+        _ update: (inout PlaybackSkipRule) -> Void
+    ) async {
+        guard var session = playbackSkipSession else { return }
+        let original = session
+        let identity = playbackSkipAppliesToAllEpisodes
+            ? session.identity.seriesLineIdentity
+            : session.identity
+        var rule = playbackSkipAppliesToAllEpisodes
+            ? session.lineRule ?? PlaybackSkipRule(identity: identity)
+            : session.episodeRule ?? PlaybackSkipRule(identity: identity)
+        update(&rule)
+        rule.updatedAt = Date()
+        if playbackSkipAppliesToAllEpisodes {
+            session.lineRule = rule
+        } else {
+            session.episodeRule = rule
+        }
+        session.effectiveRule = PlaybackSkipRuleResolver.resolve(
+            line: session.lineRule,
+            episode: session.episodeRule
+        )
+        playbackSkipSession = session
+        refreshPlaybackSkipPresentation()
+        guard !incognitoMode else { return }
+        do {
+            try await environment?.database.savePlaybackSkipRule(rule)
+        } catch {
+            if playbackSkipSession?.episodeSessionID
+                == original.episodeSessionID {
+                playbackSkipSession = original
+                refreshPlaybackSkipPresentation()
+            }
+            show(
+                error,
+                title: L10n.string(
+                    "player.skip.save.failed",
+                    fallback: "Unable to Save Skip Settings"
+                ),
+                target: .player
+            )
+        }
+    }
+
+    private func refreshPlaybackSkipPresentation() {
+        guard let session = playbackSkipSession else {
+            playbackSkipOpeningEnd = nil
+            playbackSkipEndingDuration = nil
+            playbackSkipOpeningEnabled = false
+            playbackSkipEndingEnabled = false
+            return
+        }
+        let selected = playbackSkipAppliesToAllEpisodes
+            ? session.lineRule
+            : session.episodeRule
+        let opening = presentedPlaybackSkipField(
+            selected?.opening,
+            inherited: session.effectiveRule.openingEnd
+        )
+        let ending = presentedPlaybackSkipField(
+            selected?.ending,
+            inherited: session.effectiveRule.endingDuration
+        )
+        playbackSkipOpeningEnd = opening.seconds
+        playbackSkipEndingDuration = ending.seconds
+        playbackSkipOpeningEnabled = opening.enabled
+        playbackSkipEndingEnabled = ending.enabled
+    }
+
+    private func presentedPlaybackSkipField(
+        _ field: PlaybackSkipFieldRule?,
+        inherited: TimeInterval?
+    ) -> (seconds: TimeInterval?, enabled: Bool) {
+        guard let field else {
+            return (inherited, inherited != nil)
+        }
+        switch field.behavior {
+        case .enabled:
+            return (field.seconds, field.enabledSeconds != nil)
+        case .disabled:
+            return (field.seconds ?? inherited, false)
+        case .inherit:
+            return (inherited, inherited != nil)
+        }
+    }
+
+    private func showPlaybackSkipValidationError() {
+        show(
+            AppError.playback(
+                L10n.string(
+                    "player.skip.invalid-position",
+                    fallback: "Play to the beginning of the opening or ending, then set the marker. The marker must be within the first or last 20%% of the episode."
+                )
+            ),
+            title: L10n.string(
+                "player.skip.unavailable",
+                fallback: "Unable to Set Skip Point"
+            ),
+            target: .player
+        )
+    }
+
     func clearPosterCache() async {
         guard let repository = environment?.imageRepository else { return }
         do {
@@ -13767,6 +14639,9 @@ final class AppState: ObservableObject {
             _ = try await environment.database.deleteHistory(
                 configurationID: configurationID
             )
+            try await environment.database.deletePlaybackCompletionMarkers(
+                configurationID: configurationID
+            )
             historyPlaybackSessionCache.remove(recordIDs)
             try await reloadHistory()
         } catch {
@@ -13785,6 +14660,9 @@ final class AppState: ObservableObject {
                     sourceKey: record.sourceKey
                 )
             }
+            try await environment.database.deletePlaybackCompletionMarkers(
+                historyRecordIDs: ids
+            )
             historyPlaybackSessionCache.remove(ids)
             try await reloadHistory()
         } catch {
@@ -13891,6 +14769,25 @@ final class AppState: ObservableObject {
         }
 
         isShutdownRequested = true
+        liveHLSPreparationTask?.task.cancel()
+        liveHLSPreparationTask = nil
+        playbackDisplaySleep.setSuspended(true)
+        importedIdentityGeneration?.invalidate()
+        importedIdentityMapping = nil
+        for task in importedRefreshDownloads.values { task.cancel() }
+        importedRefreshDownloads.removeAll()
+        epgRefreshTask?.cancel()
+        epgBoundaryTask?.cancel()
+        epgBoundaryTask = nil
+        epgLifecycleTask?.cancel()
+        epgLifecycleTask = nil
+        for task in epgResourceRefreshTasks.values { task.cancel() }
+        epgResourceRefreshTasks.removeAll()
+        epgResourceRefreshOperationIDs.removeAll()
+        liveEPGLoadActivities.removeAll()
+        if let repository = environment?.productionEPGRepository {
+            _ = await repository.close(deadlineNanoseconds: 2_000_000_000)
+        }
         invalidateXtreamLiveCatalog()
         playerRenderSurfaceGate.reset()
         automaticEpisodeAdvanceController.cancel()
@@ -13914,9 +14811,7 @@ final class AppState: ObservableObject {
         livePlaybackRecoveryTask = nil
         livePlaybackNoticeTask?.cancel()
         livePlaybackNoticeTask = nil
-        for task in liveSourceValidationTasks.values {
-            task.cancel()
-        }
+        for id in Array(liveValidationPermits.keys) { cancelLiveSourceValidation(id) }
         liveSourceValidationTasks = [:]
         cloudAuthorizationPollTask?.cancel()
         cloudAuthorizationPollTask = nil
@@ -13985,16 +14880,33 @@ final class AppState: ObservableObject {
         hasCompletedShutdown = true
     }
 
-    func persistPlaybackProgress() async {
+    func persistPlaybackProgress(ownedRequestID: UUID? = nil) async {
         guard activePlayback != nil else { return }
         await finishScheduledHistoryPersistence()
         try? await savePlaybackHistory(
             position: playerSnapshot.position,
-            duration: playerSnapshot.duration
+            duration: playerSnapshot.duration,
+            ownedRequestID: ownedRequestID
         )
     }
 
     func handleSystemSleep() async {
+        playbackDisplaySleep.setSuspended(true)
+        for id in Array(liveValidationPermits.keys) { cancelLiveSourceValidation(id) }
+        epgSleeping = true
+        epgLifecycleTask?.cancel()
+        epgLifecycleTask = nil
+        epgRefreshGeneration = UUID()
+        epgRefreshTask?.cancel()
+        epgBoundaryTask?.cancel()
+        epgBoundaryTask = nil
+        for task in epgResourceRefreshTasks.values { task.cancel() }
+        epgResourceRefreshTasks.removeAll()
+        epgResourceRefreshOperationIDs.removeAll()
+        liveEPGLoadActivities.removeAll()
+        if let repository = environment?.productionEPGRepository {
+            _ = await repository.pause(deadlineNanoseconds: 750_000_000)
+        }
         switch playerSnapshot.status {
         case .playing, .buffering:
             shouldResumeAfterWake = true
@@ -14006,17 +14918,35 @@ final class AppState: ObservableObject {
     }
 
     func handleSystemWake() async {
-        guard shouldResumeAfterWake else { return }
-        shouldResumeAfterWake = false
-        do {
-            try await environment?.player.play()
-        } catch {
-            show(error, title: L10n.string("player.wake-resume.failed", fallback: "Unable to Resume After Wake"), target: .player)
+        playbackDisplaySleep.setSuspended(false)
+        epgSleeping = false
+        liveEPG.tick()
+        if let repository = environment?.productionEPGRepository {
+            epgLifecycleTask?.cancel()
+            epgLifecycleTask = Task(priority: .utility) { @MainActor [weak self] in
+                do { try await repository.resume() } catch { return }
+                guard let self, !Task.isCancelled, !self.epgSleeping,
+                      !self.isShutdownRequested else { return }
+                self.epgLifecycleTask = nil
+                self.scheduleEPGRefresh()
+            }
+        } else {
+            scheduleEPGRefresh()
+        }
+        if shouldResumeAfterWake {
+            shouldResumeAfterWake = false
+            do {
+                try await environment?.player.play()
+            } catch {
+                show(error, title: L10n.string("player.wake-resume.failed", fallback: "Unable to Resume After Wake"), target: .player)
+            }
         }
     }
 
     func closePlayer() async {
         guard !isShutdownRequested else { return }
+        // Capabilities expire before any close-time suspension.
+        livePlaybackNavigationContext = nil
         if isClosingPlayer {
             await withCheckedContinuation { continuation in
                 playerCloseWaiters.append(continuation)
@@ -14047,6 +14977,9 @@ final class AppState: ObservableObject {
             nodeWebPresentation = nil
         }
         isClosingPlayer = true
+        liveHLSPreparationTask?.task.cancel()
+        liveHLSPreparationTask = nil
+        playbackDisplaySleep.finishSession(activePlayerRequestID)
         defer {
             isClosingPlayer = false
             let waiters = playerCloseWaiters
@@ -14059,6 +14992,7 @@ final class AppState: ObservableObject {
             == .tvBox
         playerRenderSurfaceGate.reset()
         automaticEpisodeAdvanceController.cancel()
+        resetPlaybackSkipSession()
         cancelAllPlaybackStartupGates()
         playbackRequestsResolving.removeAll()
         historyPlaybackTask?.cancel()
@@ -14081,7 +15015,7 @@ final class AppState: ObservableObject {
         livePlaybackAttemptedIdentifiers = []
         pendingNodePlaybackConfigurationFallback = nil
         // Capture the final position before stop resets the player snapshot.
-        await persistPlaybackProgress()
+        await persistPlaybackProgress(ownedRequestID: closingRequestID)
         guard activePlayerRequestID == closingTransitionID,
               playbackSessionID == closingTransitionID else { return }
         // Ignore the stop event for history purposes. It otherwise publishes a
@@ -14162,6 +15096,36 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Developer-only bounded comparison; the owned media locator stays here.
+    /// The ordinary Bridge build does not expose this diagnostic operation.
+    func seekAcceptanceReadAudit() async -> Data? {
+        guard ProcessInfo.processInfo.environment["OKVIDEOMAC_SEEK_ACCEPTANCE"] == "1",
+              (try? AppEnvironment.acceptanceWorkspace()) != nil,
+              let media = activePlayback?.media,
+              MPVTVBoxPlaybackPolicy.isBridgeSession(media.url) else { return nil }
+        let owner = activePlayerRequestID
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 35
+        configuration.timeoutIntervalForResource = 35
+        configuration.urlCache = nil
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        var request = URLRequest(url: media.url)
+        request.allHTTPHeaderFields = media.headers.dictionary
+        request.setValue("1", forHTTPHeaderField: "X-OKVideoMac-Range-Audit")
+        do {
+            let (bytes, response) = try await session.bytes(for: request)
+            guard response.mimeType == "application/json" else { return nil }
+            var result = Data()
+            for try await byte in bytes {
+                guard result.count < 16_384, activePlayerRequestID == owner else { return nil }
+                result.append(byte)
+            }
+            guard activePlayerRequestID == owner else { return nil }
+            return result
+        } catch { return nil }
+    }
+
     func seek(by offset: TimeInterval) async {
         guard canSeekPlayback else { return }
         let target = min(
@@ -14170,6 +15134,14 @@ final class AppState: ObservableObject {
                 ? playerSnapshot.duration
                 : .greatestFiniteMagnitude
         )
+        NSLog("[MPV-SEEK] phase=host_relative request=%@ %@",
+              activePlayerRequestID.uuidString,
+              PlayerSeekDiagnostics.fields(
+                position: playerSnapshot.position,
+                duration: playerSnapshot.duration,
+                target: target,
+                offset: offset
+              ))
         await seek(to: target)
     }
 
@@ -14187,8 +15159,17 @@ final class AppState: ObservableObject {
             )
             return
         }
+        noteUserSeekForPlaybackSkip(to: target)
         let previousPosition = playerSnapshot.position
         let isTVBoxPlayback = activePlayback?.media.transportProfile == .tvBox
+        NSLog("[MPV-SEEK] phase=host_absolute request=%@ %@",
+              activePlayerRequestID.uuidString,
+              PlayerSeekDiagnostics.fields(
+                position: previousPosition,
+                duration: playerSnapshot.duration,
+                target: target,
+                requested: position
+              ))
         let confirmationID = UUID()
         activeSeekConfirmationID = confirmationID
         playerSnapshot.isSeeking = true
@@ -14365,7 +15346,8 @@ final class AppState: ObservableObject {
                 detail: playback.detail,
                 source: playback.source,
                 episode: playback.episode,
-                result: playbackResult
+                result: playbackResult,
+                danmakuContext: playback.media.danmakuContext
             )
             var resolvedMedia: ResolvedMedia?
             var failureMessage: String?
@@ -15159,8 +16141,8 @@ final class AppState: ObservableObject {
         sourceID: LiveSourceID,
         at date: Date
     ) -> (current: EPGProgramme?, next: EPGProgramme?) {
-        guard case .imported(let id) = sourceID else { return (nil, nil) }
-        return liveProgrammes(for: channel, sourceID: id, at: date)
+        let result = liveEPG.nowNext(channel: channel, source: sourceID, at: date)
+        return (result.current, result.next)
     }
 
     func liveProgrammes(
@@ -15168,8 +16150,7 @@ final class AppState: ObservableObject {
         sourceID: UUID,
         at date: Date
     ) -> (current: EPGProgramme?, next: EPGProgramme?) {
-        loadedEPGScheduleIndexes[sourceID]?
-            .currentAndNext(for: channel, at: date) ?? (nil, nil)
+        liveProgrammes(for: channel, sourceID: .imported(sourceID), at: date)
     }
 
     var playbackStageDescription: String {
@@ -17424,46 +18405,347 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func loadEPG(
-        for source: StoredLiveSource,
-        playlist: LivePlaylist
-    ) async {
-        guard let environment, let epgURL = playlist.epgURL else {
-            loadedEPGGuides[source.id] = nil
-            loadedEPGScheduleIndexes[source.id] = nil
-            epgFailures[source.id] = nil
-            liveSourceEPGStatuses[source.id] = nil
-            return
+    /// Browser-level demand only. No visibility observers or card networking.
+    func setEPGBrowserDemand(source: LiveSourceID?, channels: [LiveChannel]) {
+        let bounded = Array(channels.prefix(100))
+        if epgBrowserSource == source {
+            guard epgBrowserChannels.isEmpty, !bounded.isEmpty else { return }
         }
+        epgBrowserSource = source
+        epgBrowserChannels = bounded
+        scheduleEPGRefresh()
+    }
+
+    func setEPGChannelVisibility(source: LiveSourceID, channel: LiveChannel, visible: Bool) {
+        guard epgBrowserSource == source else { return }
+        var next = epgBrowserChannels.filter { $0.id != channel.id }
+        if visible, next.count < 100 { next.append(channel) }
+        guard next != epgBrowserChannels else { return }
+        epgBrowserChannels = next
+        scheduleEPGRefresh()
+    }
+
+    func refreshEPGAfterActivation() {
+        liveEPG.tick()
+        scheduleEPGRefresh()
+    }
+
+    /// Drafts reach persistence and the EPG lifecycle only on explicit submission.
+    @discardableResult
+    func saveEPGPreferences(_ draft: EPGPreferences) async -> Bool {
+        guard !isSavingEPGPreferences, let environment else { return false }
+        isSavingEPGPreferences = true
+        defer { isSavingEPGPreferences = false }
         do {
-            let guide = try await environment.epgService.guide(
-                for: epgURL
-            )
-            try Task.checkCancellation()
-            let index = await XMLTVScheduleIndexBuilder.build(guide: guide)
-            try Task.checkCancellation()
-            guard liveSources.contains(where: { $0.id == source.id }) else {
-                return
-            }
-            loadedEPGScheduleIndexes[source.id] = index
-            loadedEPGGuides[source.id] = guide
-            epgFailures[source.id] = nil
-            liveSourceEPGStatuses[source.id] = .ready
-        } catch is CancellationError {
-            return
+            let validated = try draft.validated()
+            try await environment.database.saveEPGPreferences(validated)
+            await applyEPGPreferences(validated)
+            return true
         } catch {
-            loadedEPGGuides[source.id] = nil
-            loadedEPGScheduleIndexes[source.id] = nil
-            let message = localizedRuntimeErrorMessage(error)
-            epgFailures[source.id] = message
-            liveSourceEPGStatuses[source.id] = .failed(
-                message
-            )
+            // Neither URL validation nor transport/storage errors expose token-bearing input.
+            presentedError = UserFacingError(
+                title: L10n.string("settings.epg.save-failed", fallback: "Unable to Save Programme Settings"),
+                message: L10n.string("settings.epg.invalid-url", fallback: "Enter a valid HTTP or HTTPS XMLTV address and try again. Your previous settings have been kept."))
+            return false
         }
+    }
+
+    private func resolvedEPGSource(for source: LiveSourceID) -> ResolvedXMLTVSource? {
+        guard case .imported(let id) = source,
+              liveSources.contains(where: { $0.id == id }), loadedLivePlaylists[id] != nil else { return nil }
+        return epgPreferences.resolvedXMLTV(for: source, embedded: loadedLivePlaylists[id]?.epgURL)
+    }
+
+    /// Read-only, current-configuration projection. Native short EPG is not
+    /// aggregated into a misleading source-wide XMLTV status.
+    func liveBackgroundEPGPresentation(for source: LiveSourceID, at now: Date) -> LiveEPGPresentation? {
+        guard case .imported(let id) = source, loadedLivePlaylists[id] != nil else { return nil }
+        let enabled = epgPreferences.automaticEPGEnabled && epgPreferences.source(id).mode != .disabled
+        let key = epgRevision(for: source).map { EPGRequestKey(source: source, revision: $0, resource: "xmltv") }
+        let status = key.flatMap { liveEPG.status($0) }
+        let failed: Bool
+        if case .failed = liveSourceEPGStatuses[id] { failed = true } else { failed = false }
+        return LiveEPGPresentation(enabled: enabled, key: key, status: status,
+            loading: key.map { liveEPGLoadActivities[$0] != nil } ?? false,
+            refreshFailed: failed, now: now)
+    }
+
+    func liveBackgroundValidationPresentation(for source: LiveSourceID) -> LiveValidationPresentation? {
+        liveValidationActivity.presentation(for: source)
+    }
+
+    /// Popover opening pulls the mailbox once; it does not start/stop any task.
+    func synchronizeLiveValidationPresentation(for source: LiveSourceID) {
+        guard case .imported(let id) = source, let relay = liveValidationProgressRelays[id],
+              let permit = liveValidationPermits[id], !permit.isCancelled else { return }
+        let value = relay.snapshot()
+        guard value.runID == permit.id else { return }
+        liveValidationActivity.accept(value)
+    }
+
+    func stopLiveBackgroundValidation(sourceID: LiveSourceID, runID: UUID) {
+        guard case .imported(let id) = sourceID,
+              liveValidationSelectedSource == id, !isShutdownRequested, !epgSleeping,
+              liveSources.contains(where: { $0.id == id }), !deletingImportedSourceIDs.contains(id),
+              case .checking = liveSourceValidationStatuses[id],
+              liveValidationPermits[id]?.id == runID else { return }
+        cancelLiveSourceValidation(id, expectedRunID: runID)
+    }
+
+    // Observation of existing load scopes only. Never schedules work and
+    // never carries errors, payloads or persistent task history.
+    @Published private var liveEPGLoadActivities: [EPGRequestKey: UUID] = [:]
+
+    func beginLiveEPGLoadPresentation(_ key: EPGRequestKey) -> UUID {
+        let token = UUID()
+        liveEPGLoadActivities[key] = token
+        return token
+    }
+
+    func finishLiveEPGLoadPresentation(_ key: EPGRequestKey, token: UUID) {
+        if liveEPGLoadActivities[key] == token { liveEPGLoadActivities[key] = nil }
+    }
+
+    private func applyEPGPreferences(_ next: EPGPreferences) async {
+        let previous = epgPreferences
+        guard previous != next else { return }
+        let masterChanged = previous.automaticEPGEnabled != next.automaticEPGEnabled
+        let affected = liveSources.map(\.id).filter { id in
+            let embedded = loadedLivePlaylists[id]?.epgURL
+            return masterChanged || previous.source(id) != next.source(id)
+                || previous.resolvedXMLTV(for: .imported(id), embedded: embedded)
+                    != next.resolvedXMLTV(for: .imported(id), embedded: embedded)
+        }
+        epgPreferences = next
+        // Invalidate presentation and the running waiter BEFORE any actor hop.
+        // Source generations are deliberately independent of the persisted URL digest.
+        epgRefreshTask?.cancel()
+        if masterChanged {
+            for task in epgResourceRefreshTasks.values { task.cancel() }
+            epgResourceRefreshTasks.removeAll()
+            epgResourceRefreshOperationIDs.removeAll()
+        } else {
+            for key in Array(epgResourceRefreshTasks.keys) where affected.contains(key.source.id) {
+                epgResourceRefreshTasks.removeValue(forKey: key)?.cancel()
+                epgResourceRefreshOperationIDs[key] = nil
+            }
+        }
+        liveEPGLoadActivities.removeAll()
+        epgRefreshGeneration = UUID()
+        let generation = epgRefreshGeneration
+        if masterChanged {
+            liveEPG.removeAll()
+            epgInitialSourceID = nil
+        }
+        for id in affected {
+            liveEPG.remove(.imported(id))
+            epgFailures[id] = nil
+            liveSourceEPGStatuses[id] = nil
+        }
+        if let environment, masterChanged {
+            if next.automaticEPGEnabled { try? await environment.productionEPGRepository.resume() }
+            else { _ = await environment.productionEPGRepository.pause() }
+        }
+        guard epgRefreshGeneration == generation else { return }
+        // Unchanged embedded/custom/native sources retain their snapshots and flights.
+        scheduleEPGRefresh(cancelSharedRequests: false)
+    }
+
+    #if DEBUG
+    func setEPGInputsForTesting(sources: [StoredLiveSource], playlists: [UUID: LivePlaylist]) {
+        liveSources = sources
+        acceptedImportedCatalogs = Dictionary(uniqueKeysWithValues: playlists.map {
+            ($0.key, AcceptedImportedCatalog(sourceID: $0.key, playlist: $0.value))
+        })
+    }
+    func applyEPGPreferencesForTesting(_ value: EPGPreferences) async throws {
+        await applyEPGPreferences(try value.validated())
+    }
+    #endif
+
+    /// Synchronous scheduling only; never awaited by playLive or channel switch.
+    private func scheduleEPGRefresh(cancelSharedRequests _: Bool = true) {
+        epgRefreshTask?.cancel()
+        epgBoundaryTask?.cancel()
+        epgBoundaryTask = nil
+        epgRefreshGeneration = UUID()
+        guard environment != nil, epgPreferences.automaticEPGEnabled,
+              !isShutdownRequested, !epgSleeping else { return }
+        let generation = epgRefreshGeneration
+        epgRefreshTask = Task(priority: .utility) { @MainActor [weak self] in
+            guard let self, self.epgRefreshGeneration == generation else { return }
+            do {
+                try await Task.sleep(nanoseconds: 150_000_000)
+                while !Task.isCancelled, self.epgRefreshGeneration == generation,
+                      !self.isShutdownRequested, !self.epgSleeping {
+                    await self.refreshEPGDemand(generation: generation)
+                    try await Task.sleep(nanoseconds: 30_000_000_000)
+                }
+            } catch { /* cancellation is not an EPG failure */ }
+        }
+    }
+
+    private func epgRevision(for source: LiveSourceID) -> String? {
+        guard epgPreferences.automaticEPGEnabled else { return nil }
+        switch source {
+        case .imported:
+            // Same endpoint preserves a usable schedule across playlist refresh.
+            return resolvedEPGSource(for: source)?.revision
+        case .xtream(let id):
+            guard !nativeLiveAccountMutationIDs.contains(id),
+                  let record = activeConfigurationRecord, record.id == id,
+                  record.sourceKind == .xtream else { return nil }
+            // No credential values; password-only edits also update updatedAt.
+            return EPGRequestKey.revision(for: record.rawData
+                + Data(String(record.updatedAt.timeIntervalSince1970).utf8))
+        }
+    }
+
+    private func refreshEPGDemand(generation: UUID) async {
+        guard let environment else { return }
+        var channelsBySource: [LiveSourceID: [LiveChannel]] = [:]
+        var sourceOrder: [LiveSourceID] = []
+        func add(_ source: LiveSourceID, _ channel: LiveChannel?) {
+            if channelsBySource[source] == nil {
+                channelsBySource[source] = []
+                sourceOrder.append(source)
+            }
+            guard let channel,
+                  channelsBySource[source]!.count < 100,
+                  !channelsBySource[source]!.contains(where: { $0.id == channel.id }) else { return }
+            channelsBySource[source]!.append(channel)
+        }
+        if let source = livePlaybackSourceID, let channel = livePlaybackChannel {
+            add(source, channel)
+        }
+        if let source = epgBrowserSource {
+            add(source, nil)
+            for channel in epgBrowserChannels { add(source, channel) }
+        }
+        if let id = epgInitialSourceID { add(.imported(id), nil) }
+
+        for source in sourceOrder {
+            guard !Task.isCancelled, epgRefreshGeneration == generation else { return }
+            guard let revision = epgRevision(for: source) else { continue }
+            let channels = channelsBySource[source] ?? []
+            let presentationGeneration = liveEPG.prepare(source: source, revision: revision)
+            switch source {
+            case .imported(let id):
+                let key = EPGRequestKey(source: source, revision: revision, resource: "xmltv")
+                let status = await environment.productionEPGRepository.status(for: key)
+                guard !Task.isCancelled, epgRefreshGeneration == generation,
+                      epgRevision(for: source) == revision else { return }
+                liveEPG.setStatus(status)
+                updateImportedEPGStatus(status, sourceID: id)
+                if status.nextRetryAt <= Date(), let url = resolvedEPGSource(for: source)?.url {
+                    beginXMLTVResourceRefresh(key: key, url: url)
+                }
+                guard status.summary != nil, !channels.isEmpty else { continue }
+                do {
+                    let batch = try await environment.productionEPGRepository.queryXMLTVNowNext(
+                        channels, for: key, at: Date(), demandRevision: generation)
+                    guard !Task.isCancelled, epgRefreshGeneration == generation,
+                          epgRevision(for: source) == revision else { return }
+                    _ = liveEPG.publish(batch, channels: channels, source: source,
+                        revision: revision, generation: presentationGeneration,
+                        demandRevision: generation,
+                        serviceIncarnation: environment.productionEPGRepository.incarnation)
+                } catch { /* query failure is not an empty guide or a playback failure */ }
+
+            case .xtream(let providerID):
+                guard let record = activeConfigurationRecord, record.id == providerID,
+                      let configuration = try? XtreamProviderConfiguration(data: record.rawData) else { continue }
+                for channel in channels {
+                    guard !Task.isCancelled, epgRefreshGeneration == generation else { return }
+                    guard let locator = nativeChannelLocator(sourceID: source, channel: channel) else { continue }
+                    let key = EPGRequestKey(source: source, revision: revision, resource: locator.streamID)
+                    let store = environment.xtreamCredentialStore
+                    let client = environment.xtreamHTTPClient
+                    let userAgent = Self.xtreamUserAgent
+                    do {
+                        let batch = try await environment.productionEPGRepository.loadXtream(
+                            key: key, accountIdentity: configuration.providerID.uuidString,
+                            serverIdentity: configuration.serverBaseURL.absoluteString,
+                            configurationRevision: revision, at: Date(), demandRevision: generation,
+                            fetch: {
+                                try await XtreamEPGAdapter.fetch(configuration: configuration,
+                                    streamID: locator.streamID, credentialStore: store,
+                                    httpClient: client, userAgent: userAgent)
+                            })
+                        guard !Task.isCancelled, epgRefreshGeneration == generation,
+                              epgRevision(for: source) == revision else { return }
+                        _ = liveEPG.publish(batch, channels: [channel], source: source,
+                            revision: revision, generation: presentationGeneration,
+                            demandRevision: generation,
+                            serviceIncarnation: environment.productionEPGRepository.incarnation)
+                    } catch { /* optional enrichment; playback and other channels continue */ }
+                }
+            }
+        }
+        scheduleEPGBoundaryRefresh()
+    }
+
+    private func scheduleEPGBoundaryRefresh() {
+        epgBoundaryTask?.cancel()
+        guard !isShutdownRequested, !epgSleeping,
+              let boundary = liveEPG.nextBoundary(after: Date()) else {
+            epgBoundaryTask = nil
+            return
+        }
+        let nanoseconds = UInt64(max(0.05, boundary.timeIntervalSinceNow + 0.05) * 1_000_000_000)
+        epgBoundaryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+                guard let self, !Task.isCancelled else { return }
+                self.scheduleEPGRefresh(cancelSharedRequests: false)
+            } catch { }
+        }
+    }
+
+    private func beginXMLTVResourceRefresh(key: EPGRequestKey, url: URL, force: Bool = false) {
+        guard epgResourceRefreshTasks[key] == nil, let environment,
+              !isShutdownRequested, !epgSleeping else { return }
+        let activityID = beginLiveEPGLoadPresentation(key)
+        let operationID = UUID()
+        epgResourceRefreshOperationIDs[key] = operationID
+        epgResourceRefreshTasks[key] = Task(priority: .utility) { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.epgResourceRefreshOperationIDs[key] == operationID {
+                    self.epgResourceRefreshOperationIDs[key] = nil
+                    self.epgResourceRefreshTasks[key] = nil
+                    self.finishLiveEPGLoadPresentation(key, token: activityID)
+                }
+            }
+            do {
+                let status = try await environment.productionEPGRepository.refreshXMLTV(
+                    key: key, url: url, force: force)
+                guard !Task.isCancelled, !self.epgSleeping,
+                      self.epgRevision(for: .imported(key.source.id)) == key.revision else { return }
+                self.liveEPG.setStatus(status)
+                self.updateImportedEPGStatus(status, sourceID: key.source.id)
+                self.scheduleEPGRefresh(cancelSharedRequests: false)
+                _ = try? await environment.productionEPGRepository.performMaintenance()
+            } catch { /* cancellation/pause/close never become a user-visible refresh failure */ }
+        }
+    }
+
+    private func updateImportedEPGStatus(_ status: EPGRepositoryStatus, sourceID: UUID) {
+        let message = L10n.string("live.epg.refresh-failed",
+                                  fallback: "Programme refresh failed; any saved schedule is still available.")
+        if status.summary == nil, status.consecutiveFailures == 0 {
+            liveSourceEPGStatuses[sourceID] = .loading
+            epgFailures[sourceID] = nil
+            return
+        }
+        liveSourceEPGStatuses[sourceID] = LiveSourceEPGStatus(status: status, failureMessage: message)
+        epgFailures[sourceID] = status.consecutiveFailures > 0 ? message : nil
+        if epgInitialSourceID == sourceID { epgInitialSourceID = nil }
     }
 
     private func loadSettings() async throws {
         guard let environment else { return }
+        epgPreferences = try await environment.database.epgPreferences()
         if let value = try await environment.database.setting(
             forKey: "privacy.incognito"
         ), case .bool(let enabled) = value {
@@ -17570,6 +18852,118 @@ final class AppState: ObservableObject {
         return playback.source.episodes.indices.contains(currentIndex + offset)
     }
 
+    private func resetPlaybackSkipSession() {
+        playbackSkipSession = nil
+        playbackSkipOpeningEnd = nil
+        playbackSkipEndingDuration = nil
+        playbackSkipOpeningEnabled = false
+        playbackSkipEndingEnabled = false
+        playbackEndingSkipPrompt = nil
+        playbackSkipAppliesToAllEpisodes = true
+    }
+
+    private func noteUserSeekForPlaybackSkip(to target: TimeInterval) {
+        guard var session = playbackSkipSession,
+              session.episodeSessionID == playbackSessionID else { return }
+        if let opening = session.effectiveRule.openingEnd,
+           target < opening {
+            session.openingSkipSuppressed = true
+        }
+        if let ending = session.effectiveRule.endingDuration,
+           let boundary = PlaybackSkipPolicy.endingBoundary(
+                duration: playerSnapshot.duration,
+                endingDuration: ending
+           ) {
+            let promptStart = PlaybackSkipPolicy.endingPromptStart(
+                boundary: boundary,
+                speed: playerSnapshot.speed
+            )
+            if target >= promptStart {
+                session.endingSkipSuppressed = true
+            } else {
+                session.observedPlaybackBeforeEndingPrompt = true
+            }
+        }
+        playbackSkipSession = session
+        playbackEndingSkipPrompt = nil
+    }
+
+    private func handlePlaybackSkipSnapshot(
+        _ snapshot: PlayerSnapshot,
+        requestID: UUID?
+    ) {
+        guard requestID == activePlayerRequestID,
+              var session = playbackSkipSession,
+              session.episodeSessionID == playbackSessionID,
+              activePlayback != nil,
+              hasNextEpisode,
+              !session.endingSkipSuppressed,
+              snapshot.historyProgressIsReliable,
+              !snapshot.isSeeking,
+              !snapshot.isPausedForCache,
+              let rawEnding = session.effectiveRule.endingDuration else {
+            playbackEndingSkipPrompt = nil
+            return
+        }
+        let validated = PlaybackSkipPolicy.validated(
+            session.effectiveRule,
+            duration: snapshot.duration
+        )
+        guard let ending = validated.endingDuration,
+              let boundary = PlaybackSkipPolicy.endingBoundary(
+                duration: snapshot.duration,
+                endingDuration: ending
+              ), rawEnding == ending else {
+            playbackEndingSkipPrompt = nil
+            return
+        }
+        let promptStart = PlaybackSkipPolicy.endingPromptStart(
+            boundary: boundary,
+            speed: snapshot.speed
+        )
+        if snapshot.position < promptStart {
+            if snapshot.status == .playing {
+                session.observedPlaybackBeforeEndingPrompt = true
+                playbackSkipSession = session
+            }
+            playbackEndingSkipPrompt = nil
+            return
+        }
+        guard snapshot.status == .playing else {
+            return
+        }
+        if snapshot.position < boundary {
+            let seconds = Int(ceil(
+                (boundary - snapshot.position) / max(snapshot.speed, 0.1)
+            ))
+            let prompt = PlaybackEndingSkipPrompt(
+                secondsUntilBoundary: max(1, seconds),
+                willAdvanceAutomatically: autoPlayNextEpisode
+                    && session.observedPlaybackBeforeEndingPrompt
+            )
+            if playbackEndingSkipPrompt != prompt {
+                playbackEndingSkipPrompt = prompt
+            }
+            return
+        }
+        if autoPlayNextEpisode,
+           session.observedPlaybackBeforeEndingPrompt {
+            playbackEndingSkipPrompt = nil
+            requestAdvanceToNextEpisode(
+                reason: .endingSkip,
+                sessionID: session.episodeSessionID
+            )
+        } else {
+            let prompt = PlaybackEndingSkipPrompt(
+                secondsUntilBoundary: 0,
+                willAdvanceAutomatically: false
+            )
+            if playbackEndingSkipPrompt != prompt {
+                playbackEndingSkipPrompt = prompt
+            }
+        }
+    }
+
     private func startPlayerEventLoop() {
         guard !isShutdownRequested,
               playerEventTask == nil,
@@ -17586,6 +18980,11 @@ final class AppState: ObservableObject {
                         continue
                     }
                     self.playerSnapshot = snapshot
+                    self.handlePlaybackSkipSnapshot(
+                        snapshot,
+                        requestID: requestID
+                    )
+                    self.historyProgressCheckpoint.observe(snapshot, owner: requestID)
                     let subtitleTracks = snapshot.tracks.filter {
                         $0.type == .subtitle
                     }
@@ -17638,6 +19037,9 @@ final class AppState: ObservableObject {
                         continue
                     }
                     if let requestID {
+                        if !self.isClosingPlayer && !self.isShutdownRequested {
+                            self.playbackDisplaySleep.mediaLoaded(requestID)
+                        }
                         await self.activatePreparedTransferLease(
                             requestID: requestID
                         )
@@ -17650,6 +19052,7 @@ final class AppState: ObservableObject {
                     )
                 case .mediaReleased(let requestID):
                     if let requestID {
+                        self.playbackDisplaySleep.finishSession(requestID)
                         await self.releaseTransferMediaLease(
                             requestID: requestID,
                             reason: .mediaReleased
@@ -17672,6 +19075,7 @@ final class AppState: ObservableObject {
                     ) else {
                         continue
                     }
+                    self.playbackDisplaySleep.playbackEnded(self.activePlayerRequestID)
                     switch origin {
                     case .premature(let message):
                         self.handlePlayerEventFailure(
@@ -17801,6 +19205,7 @@ final class AppState: ObservableObject {
         _ message: String,
         requestID: UUID?
     ) {
+        playbackDisplaySleep.finishSession(activePlayerRequestID)
         if livePlaybackChannel != nil {
             recoverLivePlaybackAfterFailure(
                 requestID: requestID,
@@ -17833,32 +19238,66 @@ final class AppState: ObservableObject {
     }
 
     private func scheduleAdvanceAfterNaturalEnd(endedSessionID: UUID) {
-        automaticEpisodeAdvanceController.schedule { [weak self] requestID in
-            await self?.advanceAfterNaturalEnd(
-                endedSessionID: endedSessionID,
+        requestAdvanceToNextEpisode(
+            reason: .naturalEnd,
+            sessionID: endedSessionID
+        )
+    }
+
+    private func requestAdvanceToNextEpisode(
+        reason: EpisodeAdvanceReason,
+        sessionID: UUID
+    ) {
+        guard !reason.requiresAutoPlay || autoPlayNextEpisode else { return }
+        automaticEpisodeAdvanceController.schedule(
+            sessionID: sessionID
+        ) { [weak self] requestID in
+            await self?.advanceToNextEpisode(
+                reason: reason,
+                episodeSessionID: sessionID,
                 automaticAdvanceRequestID: requestID
             )
         }
     }
 
-    private func advanceAfterNaturalEnd(
-        endedSessionID: UUID,
+    private func advanceToNextEpisode(
+        reason: EpisodeAdvanceReason,
+        episodeSessionID: UUID,
         automaticAdvanceRequestID: UUID
     ) async {
         guard automaticEpisodeAdvanceController.owns(
                   requestID: automaticAdvanceRequestID
               ),
               !Task.isCancelled,
-              playbackSessionID == endedSessionID,
+              playbackSessionID == episodeSessionID,
               isPlayerPresented,
               livePlaybackChannel == nil,
+              (!reason.requiresAutoPlay || autoPlayNextEpisode),
               let playback = activePlayback,
               let nextEpisode = PlayerEpisodeAdvancePolicy.nextEpisode(
                   in: playback.source.episodes,
                   currentEpisodeID: playback.episode.id,
-                  enabled: autoPlayNextEpisode
+                  enabled: true
               ) else {
             return
+        }
+        if reason == .endingSkip || reason == .manualEndingSkip {
+            try? await savePlaybackHistory(
+                position: playerSnapshot.position,
+                duration: playerSnapshot.duration
+            )
+            if !incognitoMode,
+               let session = playbackSkipSession,
+               session.episodeSessionID == episodeSessionID {
+                try? await environment?.database.savePlaybackCompletionMarker(
+                    PlaybackCompletionMarker(
+                        identity: session.identity,
+                        historyRecordID: session.historyRecordID,
+                        position: playerSnapshot.position,
+                        duration: playerSnapshot.duration
+                    )
+                )
+            }
         }
         await startPlayback(
             detail: playback.detail,
@@ -18048,7 +19487,57 @@ final class AppState: ObservableObject {
                     || $0.videoID == detail.summary.videoID)
                 && Self.historyRecord($0, matches: source, episode: episode)
         }
-        let startPosition = Self.historyResumePosition(from: existing)
+        let skipIdentity = PlaybackSkipRuleIdentity(
+            configurationID: configurationID,
+            siteKey: detail.summary.siteKey,
+            contentID: replacementVideoID,
+            lineID: source.referenceIdentity ?? source.stableIdentity,
+            episodeID: episode.referenceIdentity ?? episode.stableIdentity
+        )
+        let skipRules = (try? await environment.database.playbackSkipRules(
+            configurationID: configurationID
+        )) ?? []
+        let completionMarkers = (try? await environment.database
+            .playbackCompletionMarkers(
+                configurationID: configurationID
+            )) ?? []
+        let lineSkipRule = skipRules.first {
+            $0.identity == skipIdentity.seriesLineIdentity
+        }
+        let episodeSkipRule = skipRules.first {
+            $0.identity == skipIdentity
+        }
+        let effectiveSkipRule = PlaybackSkipRuleResolver.resolve(
+            line: lineSkipRule,
+            episode: episodeSkipRule
+        )
+        let mediaCanSeek = playbackResult?.mediaSession?.rangePolicy
+            != .unsupported
+        let historyRecordID = HistoryRecord(
+            configurationID: configurationID,
+            siteKey: detail.summary.siteKey,
+            videoID: replacementVideoID,
+            title: detail.summary.title,
+            sourceKey: source.id
+        ).id
+        let wasCompletedByEndingSkip = completionMarkers.contains {
+            $0.identity == skipIdentity
+        }
+        let startPosition = PlaybackSkipPolicy.startPosition(
+            resumePosition: wasCompletedByEndingSkip
+                ? nil
+                : Self.historyResumePosition(from: existing),
+            openingEnd: effectiveSkipRule.openingEnd,
+            canSeek: mediaCanSeek
+        )
+        let skipSession = PlaybackSkipSessionState(
+            episodeSessionID: sessionID,
+            identity: skipIdentity,
+            historyRecordID: historyRecordID,
+            lineRule: lineSkipRule,
+            episodeRule: episodeSkipRule,
+            effectiveRule: effectiveSkipRule
+        )
         let playback = ActivePlaybackContext(
             configurationID: configurationID,
             detail: detail,
@@ -18186,6 +19675,20 @@ final class AppState: ObservableObject {
             )
         }
         activePlayback = playback
+        danmaku.begin(
+            context: scopedMedia.danmakuContext,
+            playbackSessionID: sessionID,
+            database: environment.database
+        )
+        playbackSkipSession = skipSession
+        playbackSkipAppliesToAllEpisodes = true
+        refreshPlaybackSkipPresentation()
+        playbackEndingSkipPrompt = nil
+        if wasCompletedByEndingSkip, !incognitoMode {
+            try? await environment.database.deletePlaybackCompletionMarker(
+                identity: skipIdentity
+            )
+        }
         if let authoritativeHistoryRecord {
             historyPlaybackSessionCache.store(
                 playback,
@@ -18204,14 +19707,94 @@ final class AppState: ObservableObject {
         )
     }
 
+    private func makeDanmakuPlaybackContext(
+        configurationID: UUID,
+        provider: SiteProvider,
+        detail: VideoDetail,
+        source: PlaySource,
+        episode: PlayEpisode,
+        result: SitePlaybackResult,
+        sessionID: UUID
+    ) -> DanmakuPlaybackContext {
+        let ecosystem: DanmakuEcosystem
+        switch provider.capability {
+        case .xtream:
+            ecosystem = .xtream
+        case .javaScriptSpider where provider is NodeHTTPSpiderSiteProvider:
+            ecosystem = .catPaw
+        case .javaScriptSpider, .javaDexSpider:
+            ecosystem = .tvBox
+        case .standardXML, .standardJSON, .base64JSON,
+             .unsupportedSpider:
+            ecosystem = .unknown
+        }
+
+        let contentIdentity = DanmakuContentIdentity(
+            configurationID: configurationID,
+            siteKey: detail.summary.siteKey,
+            contentID: detail.summary.videoID,
+            title: detail.summary.title
+        )
+        let episodePresentation = EpisodeNameParser.presentation(for: episode)
+        let episodeIdentity = DanmakuEpisodeIdentity(
+            content: contentIdentity,
+            episodeID: episode.referenceIdentity ?? episode.stableIdentity,
+            title: episode.name,
+            seasonNumber: episodePresentation.seasonNumber,
+            episodeNumber: episodePresentation.episodeNumber
+        )
+        // Xtream PlaySource represents a season. Its source identity is not a
+        // video edition, so bind to the account/site edition and let the
+        // episode identity carry season and episode specificity.
+        let editionID = ecosystem == .xtream
+            ? "xtream-site:\(detail.summary.siteKey)"
+            : (source.referenceIdentity ?? source.stableIdentity)
+        let generation = Self.danmakuRuntimeGeneration(for: sessionID)
+        let baseURL = URL(
+            string: result.mediaSession?.mediaURL ?? result.url
+        )?.deletingLastPathComponent() ?? activeConfigurationRecord?.baseURL
+        let providerName = "\(ecosystem.rawValue):\(detail.summary.siteKey)"
+        let providedSources = DanmakuSourceNormalizer.sources(
+            from: result.danmaku,
+            provider: providerName,
+            baseURL: baseURL,
+            inheritedHeaders: result.headers,
+            runtimeGeneration: generation
+        )
+        var searchCapabilities: [DanmakuSearchCapability] = []
+        if let configured = activeConfiguration?.danmaku?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !configured.isEmpty {
+            searchCapabilities.append(.configuredEndpoint(value: configured))
+        }
+        return DanmakuPlaybackContext(
+            ecosystem: ecosystem,
+            contentIdentity: contentIdentity,
+            editionIdentity: DanmakuEditionIdentity(
+                episode: episodeIdentity,
+                editionID: editionID
+            ),
+            providedSources: providedSources,
+            searchCapabilities: searchCapabilities,
+            runtimeGeneration: generation
+        )
+    }
+
+    private static func danmakuRuntimeGeneration(for sessionID: UUID) -> UInt64 {
+        let compact = sessionID.uuidString.replacingOccurrences(of: "-", with: "")
+        return UInt64(compact.prefix(16), radix: 16) ?? 1
+    }
+
     private func savePlaybackHistory(
         position: TimeInterval,
         duration: TimeInterval,
-        reloadHistoryAfterSaving: Bool = true
+        reloadHistoryAfterSaving: Bool = true,
+        ownedRequestID: UUID? = nil
     ) async throws {
         guard let write = playbackHistoryWrite(
             position: position,
-            duration: duration
+            duration: duration,
+            ownedRequestID: ownedRequestID
         ) else { return }
         if !write.incognito, let activePlayback {
             historyPlaybackSessionCache.store(
@@ -18228,9 +19811,15 @@ final class AppState: ObservableObject {
 
     private func playbackHistoryWrite(
         position: TimeInterval,
-        duration: TimeInterval
+        duration: TimeInterval,
+        ownedRequestID: UUID? = nil
     ) -> PlaybackHistoryWrite? {
         guard let playback = activePlayback else { return nil }
+        guard let trusted = historyProgressCheckpoint.resolve(position: position, duration: duration,
+            reliable: PlayerHistoryProgressCheckpoint.isReliable(playerSnapshot),
+            owner: ownedRequestID ?? activePlayerRequestID) else { return nil }
+        let position = trusted.position
+        let duration = trusted.duration
         let detail = playback.detail
         let providerResourceReference = playback.providerResourceReference
         let persistedVideoID = persistentHistoryVideoID(
@@ -18443,14 +20032,16 @@ final class AppState: ObservableObject {
     private func loadPlayerAfterRenderSurfaceReady(
         _ media: ResolvedMedia,
         startPosition: TimeInterval?,
-        requestID: UUID
+        requestID: UUID,
+        liveFlow: LivePlaybackNavigationContext? = nil
     ) async throws {
         guard let environment else {
             throw AppError.playback(
                 L10n.string("app.environment.uninitialized", fallback: "The application environment has not been initialized.")
             )
         }
-        guard isPlayerPresented,
+        guard liveFlow.map(liveFlowMayLoad) ?? true,
+              isPlayerPresented,
               activePlayerRequestID == requestID else {
             throw CancellationError()
         }
@@ -18465,7 +20056,8 @@ final class AppState: ObservableObject {
                     renderOwnerID: renderOwnerID
                 )
                 try Task.checkCancellation()
-                guard self.isPlayerPresented,
+                guard liveFlow.map(self.liveFlowMayLoad) ?? true,
+                      self.isPlayerPresented,
                       self.activePlayerRequestID == requestID,
                       environment.player.renderPlayer?.renderOwnerID
                         == renderOwnerID else {

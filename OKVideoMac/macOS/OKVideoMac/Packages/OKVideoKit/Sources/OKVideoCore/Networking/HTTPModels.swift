@@ -80,6 +80,8 @@ public enum HTTPRedirectPolicy: Equatable, Sendable {
     /// Preserve the existing provider behavior and follow redirects up to the
     /// request's redirect-count limit.
     case follow
+    /// XMLTV may move to a CDN, but must never downgrade HTTPS or leave HTTP(S).
+    case noDowngrade
     /// Restrict redirects to the original scheme, host, and effective port.
     /// This also prevents an HTTPS-to-HTTP downgrade.
     case sameOriginNoDowngrade

@@ -53,12 +53,25 @@ assert_contains() {
   fi
 }
 
+# A release may be described either before publication or after publication.
+# Both forms must still name the exact source version/build from project.yml.
+assert_contains_either() {
+  file="$1"
+  first="$2"
+  second="$3"
+  if ! grep -Fq -- "$first" "$file" && ! grep -Fq -- "$second" "$file"; then
+    echo "Documentation metadata is stale: $file" >&2
+    echo "Expected text: $first OR $second" >&2
+    exit 1
+  fi
+}
+
 assert_exact_line "$README" "- 当前版本：${VERSION}（Build ${BUILD}）"
 assert_exact_line "$COMPATIBILITY" "- 对照版本：${VERSION}（Build ${BUILD}）"
 assert_exact_line "$PERFORMANCE" "- 对照版本：${VERSION}（Build ${BUILD}）"
-assert_contains "$ROOT_README" "current source version is **${VERSION} (Build ${BUILD})**"
-assert_contains "$ROOT_README_ZH" "当前源码版本为 **${VERSION}（Build ${BUILD}）**"
-assert_exact_line "$CHANGELOG" "## [${VERSION}] - 2026-09-09"
+assert_contains_either "$ROOT_README" "current source version is **${VERSION} (Build ${BUILD})**" "latest stable release is **${VERSION} (Build ${BUILD})**"
+assert_contains_either "$ROOT_README_ZH" "当前源码版本为 **${VERSION}（Build ${BUILD}）**" "最新稳定版本为 **${VERSION}（Build ${BUILD}）**"
+assert_exact_line "$CHANGELOG" "## [${VERSION}] - 2026-09-19"
 assert_contains "$NOTICES" "OKVideoMac ${VERSION} (Build ${BUILD})"
 assert_contains "$README" "- Xcode：721 total / 713 passed / 8 intentionally skipped / 0 failed"
 assert_contains "$README" "- OKVideoKit：261 passed / 0 failed"
@@ -68,7 +81,7 @@ assert_exact_line "$PERFORMANCE" "- 多站搜索全局并发 20；共享同一 N
 assert_contains "$SOURCE_RELEASE_PROCESS" "OKVideoMac-${VERSION}.dmg"
 assert_contains "$SOURCE_RELEASE_PROCESS" "OKVideoMac-${VERSION}-macOS-arm64.zip"
 assert_exact_line "$REPOSITORY_ROOT/Docs/RELEASE_NOTES_${VERSION}.md" "# OKVideoMac ${VERSION}（Build ${BUILD}）Release Notes"
-assert_contains "$README" "目标 tag 为 \`v${VERSION}\`"
+assert_contains_either "$README" "目标 tag 为 \`v${VERSION}\`" "Tag \`v${VERSION}\` 在全部正式分发门禁通过后创建"
 assert_contains "$README" "OKVideoMac-${VERSION}-build${BUILD}-SOURCE_RELEASE_INDEX.json"
 assert_contains "$COMPATIBILITY" "tag \`v${VERSION}\`"
 

@@ -441,6 +441,10 @@ final class BridgeMediaSessionRegistry {
         final BridgeProviderOwnerRegistry.Binding owner;
         final Map<String, String> headers;
         volatile String upstreamFingerprint;
+        // Runtime-only representation proof, owned by this exact session and
+        // header revision. It is neither a URL cache nor a permanent identity.
+        VirtualMediaRange virtualRange;
+        boolean virtualRangeProbeAttempted;
         final long createdAt = System.currentTimeMillis();
         volatile long expiresAt = createdAt + SESSION_TTL_MS;
 
@@ -467,11 +471,16 @@ final class BridgeMediaSessionRegistry {
                     );
                 }
             }
+            String previousFingerprint = upstreamFingerprint;
             upstreamFingerprint = requestContextFingerprint(
                     upstreamURL,
                     headers,
                     owner
             );
+            if (previousFingerprint != null && !previousFingerprint.equals(upstreamFingerprint)) {
+                virtualRange = null;
+                virtualRangeProbeAttempted = false;
+            }
         }
 
         synchronized Map<String, String> headerSnapshot() {

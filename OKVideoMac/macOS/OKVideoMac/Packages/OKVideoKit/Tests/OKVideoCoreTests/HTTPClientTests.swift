@@ -391,6 +391,13 @@ final class HTTPClientTests: XCTestCase {
         )
     }
 
+    func testXMLTVRedirectPolicyAllowsCDNButNeverHTTPSDowngrade() throws {
+        let origin = try XCTUnwrap(URL(string: "https://example.invalid/guide.xml?token=fixture"))
+        XCTAssertTrue(HTTPRedirectSecurity.isAllowed(URL(string: "https://cdn.invalid/guide.gz"), from: origin, policy: .noDowngrade))
+        XCTAssertFalse(HTTPRedirectSecurity.isAllowed(URL(string: "http://cdn.invalid/guide.gz"), from: origin, policy: .noDowngrade))
+        XCTAssertFalse(HTTPRedirectSecurity.isAllowed(URL(string: "file:///tmp/guide.xml"), from: origin, policy: .noDowngrade))
+    }
+
     private func makeClient() -> URLSessionHTTPClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]

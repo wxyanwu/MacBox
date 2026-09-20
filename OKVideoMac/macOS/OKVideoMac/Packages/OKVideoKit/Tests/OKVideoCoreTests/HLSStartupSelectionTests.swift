@@ -26,8 +26,11 @@ final class HLSStartupSelectionTests: XCTestCase {
         XCTAssertFalse(result.playlist.contains("master=secret"))
         XCTAssertEqual(result.playlist.components(separatedBy: "#EXT-X-STREAM-INF:").count, 2)
     }
-    func testSmallAndMediaPlaylistsStayOnOriginalPath() {
-        XCTAssertNil(HLSStartupSelection.select(from: Data(master(count: 5).utf8), baseURL: base))
+    func testSmallMastersAreSelectedButSingleAndMediaPlaylistsStayOriginal() throws {
+        let selected = try XCTUnwrap(HLSStartupSelection.select(from: Data(master(count: 5).utf8), baseURL: base))
+        XCTAssertEqual(selected.variantCount, 5)
+        XCTAssertTrue(selected.routingURL.path.hasSuffix("video5.m3u8"))
+        XCTAssertNil(HLSStartupSelection.select(from: Data(master(count: 1).utf8), baseURL: base))
         XCTAssertNil(HLSStartupSelection.select(from: Data("#EXTM3U\n#EXTINF:5,\na.ts\n".utf8), baseURL: base))
     }
     func testMissingAudioGroupUnknownExtensionsAndInvalidAttributesDeclineSelection() {
@@ -35,9 +38,28 @@ final class HLSStartupSelectionTests: XCTestCase {
                      master() + "#EXT-X-DEFINE:NAME=\"x\",VALUE=\"y\"\n",
                      master() + "#EXT-X-SESSION-KEY:METHOD=AES-128,URI=\"key\"\n",
                      master().replacingOccurrences(of: "BANDWIDTH=1000,", with: "BANDWIDTH=1000,BANDWIDTH=2000,"),
-                     master().replacingOccurrences(of: "mp4a.40.2", with: "ac-3")] {
+                     master().replacingOccurrences(of: "mp4a.40.2", with: "unknown-codec")] {
             XCTAssertNil(HLSStartupSelection.select(from: Data(text.utf8), baseURL: base))
         }
+    }
+    func testMissingCodecDeclarationsPreserveSelectedVariantAndGroups() throws {
+        let text = master(count: 6).replacingOccurrences(of: ",CODECS=\"avc1.64002a,mp4a.40.2\"", with: "")
+        let selected = try XCTUnwrap(HLSStartupSelection.select(from: Data(text.utf8), baseURL: base))
+        XCTAssertTrue(selected.routingURL.path.hasSuffix("video6.m3u8"))
+        XCTAssertTrue(selected.playlist.contains("audio.m3u8?token=a%2Bb"))
+        XCTAssertFalse(selected.playlist.contains("CODECS="))
+    }
+    func testHEVCAndSurroundAudioDoNotForce1080pDowngrade() throws {
+        let text = master(count: 2).replacingOccurrences(of: "1920x1080", with: "3840x2160")
+            .replacingOccurrences(of: "avc1.64002a,mp4a.40.2", with: "hvc1.2.4.L153.B0,ec-3")
+        let selected = try XCTUnwrap(HLSStartupSelection.select(from: Data(text.utf8), baseURL: base))
+        XCTAssertTrue(selected.playlist.contains("3840x2160"))
+        XCTAssertTrue(selected.playlist.contains("ec-3"))
+        XCTAssertTrue(selected.playlist.contains("audio.m3u8"))
+    }
+    func testUnsupportedHigherQualityKeepsOriginalInsteadOfDowngrading() {
+        let text = master(count: 2) + "#EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=3840x2160,CODECS=\"unknown-video,mp4a.40.2\"\nother.m3u8\n"
+        XCTAssertNil(HLSStartupSelection.select(from: Data(text.utf8), baseURL: base))
     }
     func testRejectsOversizedAndUnsafeManifests() {
         let prefix = master()

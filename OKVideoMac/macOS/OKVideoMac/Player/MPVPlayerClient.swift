@@ -705,6 +705,13 @@ struct PlayerPostSeekEndGuard: Equatable {
         context = nil
     }
 
+    func permitsHistory(_ snapshot: PlayerSnapshot, requestGeneration: UInt64) -> Bool {
+        if case .failed = snapshot.status { return false }
+        return !snapshot.isSeeking && (!isProtecting(requestGeneration: requestGeneration)
+            || isBoundarySeek(requestGeneration: requestGeneration,
+                position: snapshot.position, duration: snapshot.duration))
+    }
+
     func isProtecting(requestGeneration: UInt64) -> Bool {
         context?.requestGeneration == requestGeneration
     }
@@ -724,11 +731,153 @@ struct PlayerPostSeekEndGuard: Equatable {
     ) -> Bool {
         guard let context,
               context.requestGeneration == requestGeneration,
+              context.target.isFinite,
+              context.target >= 0,
               position.isFinite,
               duration.isFinite,
               duration > 0 else { return false }
         let boundary = max(0, duration - max(0, completionTolerance))
-        return context.target >= boundary || position >= boundary
+        // Native EOF position is an observation, not evidence of user intent.
+        // A broken mid-file seek may itself report position == duration.
+        return context.target >= boundary
+    }
+
+    func activeTarget(requestGeneration: UInt64) -> TimeInterval? {
+        guard context?.requestGeneration == requestGeneration else { return nil }
+        return context?.target
+    }
+}
+
+/// Keep the last confirmed progress for this playback owner only. A failed
+/// seek's native tail position must not replace the user's resumable history.
+struct PlayerHistoryProgressCheckpoint {
+    private var owner: UUID?
+    private var progress: (position: TimeInterval, duration: TimeInterval)?
+    mutating func reset(owner: UUID) { self.owner = owner; progress = nil }
+    static func isReliable(_ snapshot: PlayerSnapshot) -> Bool {
+        if case .failed = snapshot.status { return false }
+        return snapshot.historyProgressIsReliable && !snapshot.isSeeking
+    }
+    mutating func observe(_ snapshot: PlayerSnapshot, owner: UUID?) {
+        guard owner == self.owner, owner != nil, Self.isReliable(snapshot),
+              snapshot.position.isFinite, snapshot.duration.isFinite,
+              snapshot.position >= 0, snapshot.duration > 0 else { return }
+        switch snapshot.status {
+        case .playing, .paused, .ended: progress = (snapshot.position, snapshot.duration)
+        default: break
+        }
+    }
+    func resolve(position: TimeInterval, duration: TimeInterval, reliable: Bool,
+                 owner: UUID) -> (position: TimeInterval, duration: TimeInterval)? {
+        guard position.isFinite, duration.isFinite, position >= 0, duration >= 0 else { return nil }
+        if reliable { return (position, duration) }
+        return owner == self.owner ? progress : nil
+    }
+}
+
+/// Only numeric timeline observations enter seek diagnostics. No media URL,
+/// title, headers, or native error payload is accepted by this formatter.
+enum PlayerSeekDiagnostics {
+    static func fields(
+        position: TimeInterval,
+        duration: TimeInterval,
+        target: TimeInterval?,
+        requested: TimeInterval? = nil,
+        offset: TimeInterval? = nil
+    ) -> String {
+        func seconds(_ value: TimeInterval?) -> String {
+            guard let value else { return "none" }
+            guard value.isFinite else { return "nonfinite" }
+            return String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), value)
+        }
+        return "observed_position=\(seconds(position))"
+            + " observed_duration=\(seconds(duration))"
+            + " seek_target=\(seconds(target))"
+            + " requested_position=\(seconds(requested))"
+            + " relative_offset=\(seconds(offset))"
+    }
+}
+
+enum PlayerSeekReadDiagnostics {
+    static let environmentKey = "OKVIDEOMAC_SEEK_READ_DIAGNOSTICS"
+    static let properties = ["time-pos", "audio-pts", "duration", "seekable", "partially-seekable",
+                             "eof-reached", "seeking", "paused-for-cache", "demuxer-via-network",
+                             "demuxer-cache-duration", "stream-pos", "file-size", "file-format"]
+
+    static func route(_ url: URL?) -> String {
+        guard let url else { return "unknown" }
+        if url.isFileURL { return "file" }
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return "other" }
+        if MPVTVBoxPlaybackPolicy.isBridgeSession(url) { return "bridge_session" }
+        if SystemMediaProxyResolver.isLoopback(url.host ?? "") { return "loopback_http" }
+        // Describes the entry URL, not a claim that OS/environment proxying is absent.
+        return "remote_http"
+    }
+
+    static func property(_ name: String, value: String?) -> String {
+        guard properties.contains(name), let value, value.utf8.count <= 256 else { return "unknown" }
+        if name == "file-format" {
+            return ["matroska", "webm", "matroska,webm", "mov", "mp4", "mov,mp4,m4a,3gp,3g2,mj2", "mpegts", "hls", "dash", "avi", "lavf"].contains(value)
+                ? value : "other"
+        }
+        if ["seekable", "partially-seekable", "eof-reached", "seeking", "paused-for-cache", "demuxer-via-network"].contains(name) {
+            return ["yes", "no"].contains(value) ? value : "unknown"
+        }
+        guard let number = Double(value), number.isFinite else { return "unknown" }
+        return String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), number)
+    }
+
+    static func warning(prefix: String, level: Int32, text: String) -> String {
+        // All output vocabulary is fixed; never return arbitrary substrings.
+        let component = ["ffmpeg", "demux", "lavf", "cplayer", "vd", "ad", "stream"].first {
+            prefix == $0 || prefix.hasPrefix($0 + "/")
+        } ?? "other"
+        let severity = [10: "fatal", 20: "error", 30: "warn"][Int(level)] ?? "other"
+        let message = String(text.prefix(4096)).lowercased()
+        let rules: [(String, String)] = [
+            ("stream ends prematurely", "short_read"), ("partial file", "partial_file"),
+            ("http error", "http_error"), ("failed to seek", "seek_failed"),
+            ("seek failed", "seek_failed"), ("not seekable", "not_seekable"),
+            ("invalid data", "invalid_data"), ("moov atom not found", "missing_index"),
+            ("index", "index_warning"), ("connection reset", "connection_reset"),
+            ("timed out", "timeout"), ("end of file", "eof"),
+            ("error reading", "read_error"), ("failed to read", "read_error"),
+            ("failed to open", "open_failed"), ("decode", "decode_error")
+        ]
+        let category = rules.first { message.contains($0.0) }?.1 ?? "unclassified"
+        var result = "component=\(component) severity=\(severity) issue=\(category)"
+        func numbers(_ pattern: String) -> [String]? {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: message, range: NSRange(message.startIndex..., in: message)) else { return nil }
+            var output: [String] = []
+            for index in 1..<match.numberOfRanges {
+                guard let range = Range(match.range(at: index), in: message),
+                      let number = UInt64(message[range]) else { return nil }
+                output.append(String(number))
+            }
+            return output
+        }
+        if let fields = numbers(#"stream ends prematurely at ([0-9]{1,20}), should be ([0-9]{1,20})(?![0-9])"#) {
+            result += " stream_end_offset=\(fields[0]) expected_end_offset=\(fields[1])"
+        }
+        if let status = numbers(#"http error ([1-5][0-9]{2})(?![0-9])"#)?.first {
+            result += " http_status=\(status)"
+        }
+        return result
+    }
+}
+
+struct PlayerSeekReadWindow {
+    let requestGeneration: UInt64
+    let seekGeneration: UInt64
+    let deadline: TimeInterval
+    private(set) var remaining = 24
+
+    mutating func consume(request: UInt64, seek: UInt64, now: TimeInterval) -> Bool {
+        guard request == requestGeneration, seek == seekGeneration,
+              now.isFinite, now < deadline, remaining > 0 else { return false }
+        remaining -= 1
+        return true
     }
 }
 
@@ -753,6 +902,7 @@ final class MPVPlayerClient: PlayerClient {
     }
 
     private enum NativeEvent {
+        static let logMessage: Int32 = 2
         static let none: Int32 = 0
         static let shutdown: Int32 = 1
         static let endFile: Int32 = 7
@@ -791,6 +941,8 @@ final class MPVPlayerClient: PlayerClient {
     private var didEmitFileLoadedForCurrentMedia = false
     private var startupTimelinePosition: Double?
     private var diagnosticsGeneration = UUID()
+    private let seekReadDiagnosticsEnabled = ProcessInfo.processInfo.environment[PlayerSeekReadDiagnostics.environmentKey] == "1"
+    private var seekReadWindow: PlayerSeekReadWindow?
     private var currentMediaTransportProfile: MediaTransportProfile = .standard
     private var currentMedia: ResolvedMedia?
     private var tvBoxFormatFallbackAvailable = false
@@ -986,6 +1138,7 @@ final class MPVPlayerClient: PlayerClient {
                 let previousSnapshot = self.snapshot
                 let previousDidEmitEnded = self.didEmitEndedForCurrentMedia
                 let previousDidEmitFileLoaded = self.didEmitFileLoadedForCurrentMedia
+                self.endSeekReadDiagnostics()
                 self.playbackRequestGeneration &+= 1
                 self.replacingMediaRequestID = self.activeMediaRequestID
                 self.currentRequestID = requestID
@@ -1187,6 +1340,20 @@ final class MPVPlayerClient: PlayerClient {
                 requestGeneration: requestGeneration,
                 target: target
             )
+            PlayerExperimentLogger.performance(
+                "phase=seek_command request_generation=\(requestGeneration)"
+                    + " seek_generation=\(seekGeneration)"
+                    + " tvbox=\(self.currentMediaTransportProfile == .tvBox) "
+                    + PlayerSeekDiagnostics.fields(
+                        position: self.snapshot.position,
+                        duration: self.snapshot.duration,
+                        target: target,
+                        requested: position
+                    ),
+                playerID: self.renderOwnerID,
+                requestID: self.currentRequestID,
+                mode: self.teardownMode
+            )
             let tvBoxGeneration: UInt64?
             if self.currentMediaTransportProfile == .tvBox {
                 self.completedTVBoxSeekGeneration = nil
@@ -1196,6 +1363,8 @@ final class MPVPlayerClient: PlayerClient {
             }
             self.emitSnapshot()
             do {
+                self.beginSeekReadDiagnostics(request: requestGeneration, seek: seekGeneration)
+                self.logSeekReadState(phase: "seek_read_before")
                 try self.command(Self.seekCommand(to: target), client: client)
                 if let tvBoxGeneration {
                     self.queue.asyncAfter(deadline: .now() + .seconds(15)) {
@@ -1211,6 +1380,7 @@ final class MPVPlayerClient: PlayerClient {
                         // Do not issue a compensating seek. This is only a UI
                         // state failsafe for relays that omit one mpv property
                         // transition while video has already restarted.
+                        self.logSeekObservation(phase: "seek_ui_deadline")
                         self.completedTVBoxSeekGeneration = tvBoxGeneration
                         self.snapshot.isSeeking = false
                         self.snapshot.seekTarget = nil
@@ -1218,6 +1388,8 @@ final class MPVPlayerClient: PlayerClient {
                     }
                 }
             } catch {
+                self.logSeekObservation(phase: "seek_command_failed")
+                self.endSeekReadDiagnostics()
                 self.postSeekEndGuard.cancel(
                     requestGeneration: requestGeneration,
                     seekGeneration: seekGeneration
@@ -1985,6 +2157,8 @@ final class MPVPlayerClient: PlayerClient {
 
     private func process(_ event: NativeMPVEvent) {
         switch event.eventID {
+        case NativeEvent.logMessage:
+            recordSeekReadWarning(event)
         case NativeEvent.fileLoaded:
             guard let client else { return }
             let isFirstFileLoaded = !didEmitFileLoadedForCurrentMedia
@@ -2148,6 +2322,7 @@ final class MPVPlayerClient: PlayerClient {
             let eofSeekGeneration = eofSignal?.seekGeneration.map(String.init)
                 ?? "none"
             pendingEOFSignal = nil
+            logSeekReadState(phase: "seek_read_end_file")
             let disposition = MPVPlaybackEndPolicy.disposition(
                 endFileReason: event.endFileReason,
                 error: event.error,
@@ -2169,7 +2344,8 @@ final class MPVPlayerClient: PlayerClient {
                 "phase=end_arbiter"
                     + " disposition=\(String(describing: disposition))"
                     + " eof_signal=\(eofSignal != nil)"
-                    + " seek_generation=\(eofSeekGeneration)",
+                    + " seek_generation=\(eofSeekGeneration) "
+                    + seekObservationFields(),
                 playerID: renderOwnerID,
                 requestID: currentRequestID,
                 mode: teardownMode
@@ -2248,6 +2424,8 @@ final class MPVPlayerClient: PlayerClient {
             postSeekEndGuard.markPlaybackRestart(
                 requestGeneration: playbackRequestGeneration
             )
+            logSeekObservation(phase: "seek_playback_restart")
+            logSeekReadState(phase: "seek_read_restart")
             if currentMediaTransportProfile == .tvBox {
                 completedTVBoxSeekGeneration = activeSeekGeneration
             }
@@ -2291,11 +2469,15 @@ final class MPVPlayerClient: PlayerClient {
         case "time-pos":
             let position = max(0, event.doubleValue)
             snapshot.position = position
+            let wasProtectingSeek = postSeekEndGuard.isProtecting(requestGeneration: playbackRequestGeneration)
             postSeekEndGuard.observePosition(
                 position,
                 requestGeneration: playbackRequestGeneration,
                 isSeeking: snapshot.isSeeking
             )
+            if wasProtectingSeek && !postSeekEndGuard.isProtecting(requestGeneration: playbackRequestGeneration) {
+                logSeekReadState(phase: "confirmed_progress")
+            }
             if let previous = startupTimelinePosition {
                 if abs(position - previous) >= 0.05,
                    let requestID = playbackStartSignal
@@ -2410,6 +2592,8 @@ final class MPVPlayerClient: PlayerClient {
     }
 
     private func emitSnapshot() {
+        snapshot.historyProgressIsReliable = postSeekEndGuard.permitsHistory(snapshot,
+            requestGeneration: playbackRequestGeneration)
         guard snapshot != lastEmittedSnapshot else { return }
         lastEmittedSnapshot = snapshot
         lastTimelineEmissionUptime = DispatchTime.now().uptimeNanoseconds
@@ -2437,6 +2621,7 @@ final class MPVPlayerClient: PlayerClient {
         let protectsUserSeek = postSeekEndGuard.isProtecting(
             requestGeneration: requestGeneration
         )
+        logSeekReadState(phase: "seek_read_eof")
         let disposition = MPVKeepOpenEOFPolicy.disposition(
             signalRequestGeneration: signal.requestGeneration,
             currentRequestGeneration: requestGeneration,
@@ -2459,7 +2644,8 @@ final class MPVPlayerClient: PlayerClient {
                 + " disposition=\(String(describing: disposition))"
                 + " signal_generation=\(signal.requestGeneration)"
                 + " request_generation=\(requestGeneration)"
-                + " seek_generation=\(signal.seekGeneration.map(String.init) ?? "none")",
+                + " seek_generation=\(signal.seekGeneration.map(String.init) ?? "none") "
+                + seekObservationFields(),
             playerID: renderOwnerID,
             requestID: currentRequestID,
             mode: teardownMode
@@ -2477,6 +2663,97 @@ final class MPVPlayerClient: PlayerClient {
         case .stopped, .failed, .ignored:
             break
         }
+    }
+
+    private func seekObservationFields() -> String {
+        PlayerSeekDiagnostics.fields(
+            position: snapshot.position,
+            duration: snapshot.duration,
+            target: postSeekEndGuard.activeTarget(
+                requestGeneration: playbackRequestGeneration
+            )
+        )
+    }
+
+    private func logSeekObservation(phase: StaticString) {
+        PlayerExperimentLogger.performance(
+            "phase=\(phase) request_generation=\(playbackRequestGeneration)"
+                + " seek_generation=\(postSeekEndGuard.activeSeekGeneration(requestGeneration: playbackRequestGeneration).map(String.init) ?? "none") "
+                + seekObservationFields(),
+            playerID: renderOwnerID,
+            requestID: currentRequestID,
+            mode: teardownMode
+        )
+    }
+
+    private func beginSeekReadDiagnostics(request: UInt64, seek: UInt64) {
+        endSeekReadDiagnostics()
+        guard seekReadDiagnosticsEnabled, let client else { return }
+        let result = "warn".withCString { library.requestLogMessages?(client, $0) ?? -1 }
+        seekReadWindow = PlayerSeekReadWindow(
+            requestGeneration: request, seekGeneration: seek,
+            deadline: ProcessInfo.processInfo.systemUptime + 20
+        )
+        PlayerExperimentLogger.performance(
+            "phase=seek_read_open native_warnings=\(result >= 0) request_generation=\(request) seek_generation=\(seek)",
+            playerID: renderOwnerID, requestID: currentRequestID, mode: teardownMode
+        )
+        queue.asyncAfter(deadline: .now() + .seconds(20), execute: DispatchWorkItem { [weak self] in
+            guard let self, self.seekReadWindow?.requestGeneration == request,
+                  self.seekReadWindow?.seekGeneration == seek else { return }
+            self.endSeekReadDiagnostics()
+        })
+    }
+
+    private func endSeekReadDiagnostics() {
+        guard let window = seekReadWindow else { return }
+        seekReadWindow = nil
+        if let client {
+            _ = "no".withCString { library.requestLogMessages?(client, $0) }
+        }
+        PlayerExperimentLogger.performance(
+            "phase=seek_read_closed observations=\(24 - window.remaining) request_generation=\(window.requestGeneration) seek_generation=\(window.seekGeneration)",
+            playerID: renderOwnerID, requestID: currentRequestID, mode: teardownMode
+        )
+    }
+
+    private func takeSeekReadSlot() -> Bool {
+        guard var window = seekReadWindow else { return false }
+        guard window.consume(request: playbackRequestGeneration,
+                             seek: postSeekEndGuard.latestSeekGeneration,
+                             now: ProcessInfo.processInfo.systemUptime) else {
+            endSeekReadDiagnostics()
+            return false
+        }
+        seekReadWindow = window
+        return true
+    }
+
+    private func logSeekReadState(phase: StaticString) {
+        guard let client, takeSeekReadSlot() else { return }
+        let fields = PlayerSeekReadDiagnostics.properties.map { name in
+            "\(name)=\(PlayerSeekReadDiagnostics.property(name, value: propertyString(name, client: client)))"
+        }.joined(separator: " ")
+        PlayerExperimentLogger.performance(
+            "phase=\(phase) request_generation=\(playbackRequestGeneration) seek_generation=\(postSeekEndGuard.latestSeekGeneration)"
+                + " entry_route=\(PlayerSeekReadDiagnostics.route(currentMedia?.url)) " + fields,
+            playerID: renderOwnerID, requestID: currentRequestID, mode: teardownMode
+        )
+    }
+
+    private func recordSeekReadWarning(_ event: NativeMPVEvent) {
+        guard takeSeekReadSlot() else { return }
+        let fields = PlayerSeekReadDiagnostics.warning(
+            prefix: event.propertyName.map { String(cString: $0) } ?? "",
+            level: event.propertyFormat,
+            text: event.stringValue.map { String(cString: $0) } ?? ""
+        )
+        // mpv log events carry no media/seek ID. These are observations in the
+        // current diagnostic window, never authority for playback decisions.
+        PlayerExperimentLogger.performance(
+            "phase=seek_read_warning attribution=current_window request_generation=\(playbackRequestGeneration) seek_generation=\(postSeekEndGuard.latestSeekGeneration) " + fields,
+            playerID: renderOwnerID, requestID: currentRequestID, mode: teardownMode
+        )
     }
 
     private func emitEndedIfNeeded(origin: PlaybackEndOrigin) {
@@ -2508,6 +2785,7 @@ final class MPVPlayerClient: PlayerClient {
     }
 
     private func clearTransientPlaybackActivity() {
+        endSeekReadDiagnostics()
         postSeekEndGuard.reset()
         pendingEOFSignal = nil
         snapshot.isSeeking = false

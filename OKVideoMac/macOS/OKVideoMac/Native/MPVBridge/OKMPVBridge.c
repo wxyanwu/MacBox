@@ -156,6 +156,11 @@ int okmpv_probe_dolby_vision(
     );
 }
 
+int okmpv_request_log_messages(OKMPVClient *client, const char *level) {
+    if (client == NULL || level == NULL) return MPV_ERROR_INVALID_PARAMETER;
+    return mpv_request_log_messages(client->handle, level);
+}
+
 static void copy_string(char *destination, size_t size, const char *source) {
     if (size == 0) {
         return;
@@ -398,6 +403,13 @@ int okmpv_wait_event(
                     break;
             }
         }
+    } else if (event->event_id == MPV_EVENT_LOG_MESSAGE && event->data != NULL) {
+        mpv_event_log_message *message = event->data;
+        copy_string(client->property_name, sizeof(client->property_name), message->prefix);
+        copy_string(client->string_value, sizeof(client->string_value), message->text);
+        output->property_name = client->property_name;
+        output->string_value = client->string_value;
+        output->property_format = message->log_level;
     } else if (event->event_id == MPV_EVENT_END_FILE && event->data != NULL) {
         mpv_event_end_file *end_file = event->data;
         output->end_file_reason = end_file->reason;

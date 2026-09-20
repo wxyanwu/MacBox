@@ -6,6 +6,7 @@ import Foundation
 public struct HLSStartupSelection: Equatable, Sendable {
     public let playlist: String
     public let routingURL: URL
+    public let variantCount: Int
 
     public static func select(from data: Data, baseURL: URL) -> Self? {
         // At the read limit, the response may be only a prefix of a larger master.
@@ -45,26 +46,39 @@ public struct HLSStartupSelection: Equatable, Sendable {
                 return nil
             }
         }
-        guard pending == nil, variants.count >= 12 else { return nil }
-        // Conservative first implementation: H.264 + AAC, at most 1080p/60.
-        // Do not discard unsupported codecs and accidentally select video-only.
+        guard pending == nil, variants.count >= 2 else { return nil }
+        // Choose a video rendition without imposing a new resolution ceiling.
+        // CODECS is optional in HLS (including the Open HLS fixture). A missing
+        // declaration is left to the player; the complete associated media
+        // groups remain attached and the caller can retry the original master.
         let eligible = variants.filter { item in
             let a = item.attributes
-            guard let codecs = value(a["CODECS"]),
-                  codecs.split(separator: ",").allSatisfy({
-                      $0.hasPrefix("avc1.") || $0.hasPrefix("avc3.") || $0.hasPrefix("mp4a.40.")
-                  }), codecs.contains("avc"), codecs.contains("mp4a.40."),
-                  let resolution = a["RESOLUTION"] else { return false }
+            guard let resolution = a["RESOLUTION"] else { return false }
+            if let codecs = value(a["CODECS"]) {
+                let parts = codecs.split(separator: ",").map(String.init)
+                let video = ["avc1.", "avc3.", "hvc1.", "hev1."]
+                guard parts.contains(where: { part in video.contains(where: { part.hasPrefix($0) }) }),
+                      parts.allSatisfy({ part in
+                          video.contains(where: { part.hasPrefix($0) })
+                              || part.hasPrefix("mp4a.40.") || part == "ac-3" || part == "ec-3"
+                      }) else { return false }
+            }
             let size = resolution.split(separator: "x").compactMap { Int($0) }
-            guard size.count == 2, size[0] > 0, size[0] <= 1920,
-                  size[1] > 0, size[1] <= 1080 else { return false }
+            guard size.count == 2, size[0] > 0, size[1] > 0 else { return false }
             if let rawFPS = a["FRAME-RATE"] {
-                guard let fps = Double(rawFPS), fps.isFinite, fps > 0, fps <= 60 else { return false }
+                guard let fps = Double(rawFPS), fps.isFinite, fps > 0 else { return false }
             }
             return a["VIDEO"] == nil
         }
         guard let selected = eligible.max(by: {
             (Int($0.attributes["BANDWIDTH"] ?? "") ?? 0) < (Int($1.attributes["BANDWIDTH"] ?? "") ?? 0)
+        }) else { return nil }
+        // An unsupported higher-quality rendition should keep the original
+        // master's selection behavior rather than silently downgrade quality.
+        let selectedBandwidth = Int(selected.attributes["BANDWIDTH"] ?? "") ?? 0
+        guard !variants.contains(where: {
+            $0.attributes["RESOLUTION"] != nil
+                && (Int($0.attributes["BANDWIDTH"] ?? "") ?? 0) > selectedBandwidth
         }) else { return nil }
         var result = globals
         for (key, type) in [("AUDIO", "AUDIO"), ("SUBTITLES", "SUBTITLES"), ("CLOSED-CAPTIONS", "CLOSED-CAPTIONS")] {
@@ -81,7 +95,7 @@ public struct HLSStartupSelection: Equatable, Sendable {
         }
         result.append("#EXT-X-STREAM-INF:" + serialize(selected.attributes))
         result.append(selected.url.absoluteString)
-        return Self(playlist: result.joined(separator: "\n") + "\n", routingURL: selected.url)
+        return Self(playlist: result.joined(separator: "\n") + "\n", routingURL: selected.url, variantCount: variants.count)
     }
 
     private static func resolve(_ value: String, against base: URL) -> URL? {

@@ -114,7 +114,8 @@ final class XtreamLiveCatalogTests: XCTestCase {
         )
         let snapshot = try await provider(http: http).liveCatalog()
         let json = String(decoding: try JSONEncoder().encode(snapshot.groups), as: UTF8.self)
-        for forbidden in ["fixture-user", "fixture", "example.invalid", "direct_source", "private-epg", "sourceIdentity", "episodeIdentity"] {
+        XCTAssertEqual(snapshot.groups.first?.channels.first?.tvgID, "private-epg")
+        for forbidden in ["fixture-user", "fixture", "example.invalid", "direct_source", "sourceIdentity", "episodeIdentity"] {
             XCTAssertFalse(json.contains(forbidden))
         }
         let requests = await http.requests

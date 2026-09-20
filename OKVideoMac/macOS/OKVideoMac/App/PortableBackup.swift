@@ -13,7 +13,7 @@ extension UTType {
 
 struct PortableBackupManifest: Codable, Equatable, Sendable {
     static let formatIdentifier = "com.okvideomac.portable-backup"
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 3
 
     var format: String
     var schemaVersion: Int
@@ -63,6 +63,55 @@ struct PortableConfigurationRecord: Codable, Equatable, Sendable {
 struct PortableBackupPayload: Codable, Equatable, Sendable {
     var configuration: PortableConfigurationRecord
     var history: [HistoryRecord]
+    var playbackSkipRules: [PlaybackSkipRule]
+    var playbackCompletionMarkers: [PlaybackCompletionMarker]
+    var danmakuBindings: [DanmakuBinding]
+
+    init(
+        configuration: PortableConfigurationRecord,
+        history: [HistoryRecord],
+        playbackSkipRules: [PlaybackSkipRule] = [],
+        playbackCompletionMarkers: [PlaybackCompletionMarker] = [],
+        danmakuBindings: [DanmakuBinding] = []
+    ) {
+        self.configuration = configuration
+        self.history = history
+        self.playbackSkipRules = playbackSkipRules
+        self.playbackCompletionMarkers = playbackCompletionMarkers
+        self.danmakuBindings = danmakuBindings
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case configuration
+        case history
+        case playbackSkipRules
+        case playbackCompletionMarkers
+        case danmakuBindings
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        configuration = try container.decode(
+            PortableConfigurationRecord.self,
+            forKey: .configuration
+        )
+        history = try container.decode(
+            [HistoryRecord].self,
+            forKey: .history
+        )
+        playbackSkipRules = try container.decodeIfPresent(
+            [PlaybackSkipRule].self,
+            forKey: .playbackSkipRules
+        ) ?? []
+        playbackCompletionMarkers = try container.decodeIfPresent(
+            [PlaybackCompletionMarker].self,
+            forKey: .playbackCompletionMarkers
+        ) ?? []
+        danmakuBindings = try container.decodeIfPresent(
+            [DanmakuBinding].self,
+            forKey: .danmakuBindings
+        ) ?? []
+    }
 }
 
 struct PortableBackupEnvelope: Codable, Equatable, Sendable {
@@ -131,6 +180,9 @@ enum PortableBackupCodec {
     static func encode(
         configuration: StoredConfiguration,
         history: [HistoryRecord],
+        playbackSkipRules: [PlaybackSkipRule] = [],
+        playbackCompletionMarkers: [PlaybackCompletionMarker] = [],
+        danmakuBindings: [DanmakuBinding] = [],
         appVersion: String,
         appBuild: String,
         createdAt: Date = Date()
@@ -150,7 +202,20 @@ enum PortableBackupCodec {
         )
         let payload = PortableBackupPayload(
             configuration: PortableConfigurationRecord(configuration),
-            history: sanitizedHistory
+            history: sanitizedHistory,
+            playbackSkipRules: try normalizedPlaybackSkipRules(
+                playbackSkipRules,
+                configurationID: configuration.id
+            ),
+            playbackCompletionMarkers:
+                try normalizedPlaybackCompletionMarkers(
+                    playbackCompletionMarkers,
+                    configurationID: configuration.id
+                ),
+            danmakuBindings: try normalizedDanmakuBindings(
+                danmakuBindings,
+                configurationID: configuration.id
+            )
         )
         let payloadData = try encoder().encode(payload)
         let manifest = PortableBackupManifest(
@@ -238,6 +303,20 @@ enum PortableBackupCodec {
         guard history == payload.history else {
             throw PortableBackupError.invalidHistory
         }
+        guard try normalizedPlaybackSkipRules(
+            payload.playbackSkipRules,
+            configurationID: configuration.id
+        ) == payload.playbackSkipRules,
+              try normalizedPlaybackCompletionMarkers(
+                payload.playbackCompletionMarkers,
+                configurationID: configuration.id
+              ) == payload.playbackCompletionMarkers,
+              try normalizedDanmakuBindings(
+                payload.danmakuBindings,
+                configurationID: configuration.id
+              ) == payload.danmakuBindings else {
+            throw PortableBackupError.invalidDocument
+        }
         return DecodedPortableBackup(
             manifest: envelope.manifest,
             payload: payload
@@ -280,6 +359,128 @@ enum PortableBackupCodec {
             }
             return $0.id < $1.id
         }
+    }
+
+    private static func normalizedPlaybackSkipRules(
+        _ rules: [PlaybackSkipRule],
+        configurationID: UUID
+    ) throws -> [PlaybackSkipRule] {
+        guard rules.count <= maximumHistoryCount else {
+            throw PortableBackupError.invalidDocument
+        }
+        var newest: [PlaybackSkipRuleIdentity: PlaybackSkipRule] = [:]
+        for rule in rules {
+            guard rule.identity.configurationID == configurationID,
+                  isValid(rule.identity),
+                  rule.updatedAt.timeIntervalSince1970.isFinite else {
+                throw PortableBackupError.invalidDocument
+            }
+            for field in [rule.opening, rule.ending] {
+                if let seconds = field.seconds,
+                   (!seconds.isFinite
+                    || seconds < 0
+                    || seconds > PlaybackSkipPolicy.maximumSkipDuration) {
+                    throw PortableBackupError.invalidDocument
+                }
+            }
+            if let existing = newest[rule.identity],
+               existing.updatedAt >= rule.updatedAt {
+                continue
+            }
+            newest[rule.identity] = rule
+        }
+        return newest.values.sorted {
+            if $0.updatedAt != $1.updatedAt {
+                return $0.updatedAt > $1.updatedAt
+            }
+            return $0.identity.lineID < $1.identity.lineID
+        }
+    }
+
+    private static func normalizedPlaybackCompletionMarkers(
+        _ markers: [PlaybackCompletionMarker],
+        configurationID: UUID
+    ) throws -> [PlaybackCompletionMarker] {
+        guard markers.count <= maximumHistoryCount else {
+            throw PortableBackupError.invalidDocument
+        }
+        var newest: [PlaybackSkipRuleIdentity: PlaybackCompletionMarker] = [:]
+        for marker in markers {
+            guard marker.identity.configurationID == configurationID,
+                  marker.identity.episodeID != nil,
+                  isValid(marker.identity),
+                  isBounded(marker.historyRecordID, maximum: 16_384),
+                  marker.position.isFinite,
+                  marker.duration.isFinite,
+                  marker.completedAt.timeIntervalSince1970.isFinite else {
+                throw PortableBackupError.invalidDocument
+            }
+            if let existing = newest[marker.identity],
+               existing.completedAt >= marker.completedAt {
+                continue
+            }
+            newest[marker.identity] = marker
+        }
+        return newest.values.sorted {
+            if $0.completedAt != $1.completedAt {
+                return $0.completedAt > $1.completedAt
+            }
+            return $0.identity.lineID < $1.identity.lineID
+        }
+    }
+
+    private static func normalizedDanmakuBindings(
+        _ bindings: [DanmakuBinding],
+        configurationID: UUID
+    ) throws -> [DanmakuBinding] {
+        guard bindings.count <= maximumHistoryCount else {
+            throw PortableBackupError.invalidDocument
+        }
+        var newest: [DanmakuEditionIdentity: DanmakuBinding] = [:]
+        for binding in bindings {
+            let edition = binding.editionIdentity
+            let episode = edition.episode
+            let content = episode.content
+            let locator = binding.locator
+            guard content.configurationID == configurationID,
+                  isBounded(content.siteKey, maximum: 1_024),
+                  isBounded(content.contentID, maximum: 4_096),
+                  content.title.utf8.count <= 4_096,
+                  isBounded(episode.episodeID, maximum: 4_096),
+                  episode.title.utf8.count <= 4_096,
+                  isBounded(edition.editionID, maximum: 4_096),
+                  isBounded(locator.provider, maximum: 1_024),
+                  isBounded(locator.resourceID, maximum: 16_384),
+                  isBounded(locator.displayName, maximum: 4_096),
+                  binding.offset.isFinite,
+                  abs(binding.offset) <= 21_600,
+                  binding.updatedAt.timeIntervalSince1970.isFinite else {
+                throw PortableBackupError.invalidDocument
+            }
+            if let existing = newest[edition],
+               existing.updatedAt >= binding.updatedAt {
+                continue
+            }
+            newest[edition] = binding
+        }
+        return newest.values.sorted {
+            if $0.updatedAt != $1.updatedAt {
+                return $0.updatedAt > $1.updatedAt
+            }
+            return $0.editionIdentity.editionID
+                < $1.editionIdentity.editionID
+        }
+    }
+
+    private static func isValid(
+        _ identity: PlaybackSkipRuleIdentity
+    ) -> Bool {
+        isBounded(identity.siteKey, maximum: 1_024)
+            && isBounded(identity.contentID, maximum: 4_096)
+            && isBounded(identity.lineID, maximum: 4_096)
+            && identity.episodeID.map {
+                isBounded($0, maximum: 4_096)
+            } ?? true
     }
 
     private static func isBounded(_ value: String, maximum: Int) -> Bool {

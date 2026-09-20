@@ -52,14 +52,17 @@ struct LiveView: View {
         }
         .onDisappear {
             session.isActive = false
+            updateEPGDemand()
         }
         .onChange(of: navigation.selectedSection) { section in
             updateActivation(for: section)
         }
         .onChange(of: session.selectedSourceID) { _ in
+            state.selectImportedIdentitySource(session.selectedSourceID)
             session.searchText = ""
             session.selectedGroupID = nil
             session.showsFavoritesOnly = false
+            updateEPGDemand()
             guard session.isActive else { return }
             Task { await loadSelectedIfNeeded() }
         }
@@ -85,11 +88,16 @@ struct LiveView: View {
                   source.canRefresh else { return }
             Task { await state.refreshLiveSource(source.id) }
         }
+        .onChange(of: session.selectedGroupID) { _ in updateEPGDemand() }
+        .onChange(of: session.searchText) { _ in updateEPGDemand() }
+        .onChange(of: session.showsFavoritesOnly) { _ in updateEPGDemand() }
+        .onChange(of: state.liveEPGCatalogRevision) { _ in updateEPGDemand() }
         .onChange(of: state.shortcutLiveSourceSelection) { request in
             guard let request,
                   state.liveSourceDescriptors.contains(where: {
                       $0.id == request.sourceID
                   }) else { return }
+            state.selectImportedIdentitySource(request.sourceID)
             session.selectedSourceID = request.sourceID
         }
     }
@@ -113,7 +121,7 @@ struct LiveView: View {
     @ViewBuilder
     private var channelContent: some View {
         if let source = selectedSource {
-            if let catalog = state.liveCatalog(for: source.id) {
+            if let catalog = state.presentedLiveCatalog(for: source.id) {
                 playlistContent(
                     catalog,
                     sourceID: source.id,
@@ -154,6 +162,12 @@ struct LiveView: View {
         sourceID: LiveSourceID,
         sourceName: String
     ) -> some View {
+        let importedCatalog: AcceptedImportedCatalog?
+        if case .imported(let id) = sourceID {
+            importedCatalog = state.acceptedImportedCatalogs[id]
+        } else {
+            importedCatalog = nil
+        }
         let visibleGroups = playlist.groups.filter { $0.password == nil }
         let hiddenCount = playlist.groups.count - visibleGroups.count
         let allowsLogoFallback: Bool = {
@@ -164,15 +178,12 @@ struct LiveView: View {
             visibleGroups.flatMap(\.channels),
             sourceID: sourceID
         )
-        let programmeDate = Date()
         return GeometryReader { viewport in
             ScrollView {
                 BrowserToolbarScrollMarker(
                     coordinateSpaceName: channelScrollCoordinateSpace
                 )
                 VStack(spacing: 0) {
-                    liveSourceBackgroundStatus(sourceID: sourceID)
-
                     if channels.isEmpty {
                         EmptyStateView(
                             systemImage: session.showsFavoritesOnly
@@ -202,11 +213,6 @@ struct LiveView: View {
                             spacing: 20
                         ) {
                             ForEach(channels) { channel in
-                                let programmes = state.liveProgrammes(
-                                    for: channel,
-                                    sourceID: sourceID,
-                                    at: programmeDate
-                                )
                                 LiveChannelCard(
                                     channel: channel,
                                     artworkURLs: logoURLCache.urls(
@@ -216,8 +222,7 @@ struct LiveView: View {
                                     navigationChannels: channels,
                                     sourceID: sourceID,
                                     sourceName: sourceName,
-                                    currentEPGProgramme: programmes.current,
-                                    nextEPGProgramme: programmes.next
+                                    importedCatalog: importedCatalog
                                 )
                                 .environmentObject(state)
                             }
@@ -243,99 +248,6 @@ struct LiveView: View {
         }
     }
 
-    @ViewBuilder
-    private func liveSourceBackgroundStatus(sourceID: LiveSourceID) -> some View {
-        if let message = state.liveCatalogError(for: sourceID) {
-            backgroundStatusLabel(
-                message,
-                systemImage: "exclamationmark.triangle",
-                color: .orange
-            )
-        }
-        // Xtream Basic Live deliberately has no EPG or background channel
-        // probing. Keep the existing imported-source status domain intact.
-        if case .imported(let importedID) = sourceID {
-            importedSourceBackgroundStatus(sourceID: importedID)
-        }
-    }
-
-    @ViewBuilder
-    private func importedSourceBackgroundStatus(sourceID: UUID) -> some View {
-        if let epgStatus = state.liveSourceEPGStatuses[sourceID] {
-            switch epgStatus {
-            case .loading:
-                backgroundStatusLabel(
-                    L10n.string("live.epg.loading", fallback: "Downloading and preparing the program guide in the background…"),
-                    systemImage: "clock.arrow.circlepath",
-                    color: .secondary,
-                    showsProgress: true
-                )
-            case .ready:
-                backgroundStatusLabel(
-                    L10n.string("live.epg.ready", fallback: "Program guide ready"),
-                    systemImage: "checkmark.circle",
-                    color: .green
-                )
-            case .failed(let message):
-                backgroundStatusLabel(
-                    L10n.string("live.epg.failed", fallback: "EPG unavailable: %@", message),
-                    systemImage: "exclamationmark.triangle",
-                    color: .orange
-                )
-            }
-        }
-
-        if let validation = state.liveSourceValidationStatuses[sourceID] {
-            switch validation {
-            case .checking(let completed, let total):
-                backgroundStatusLabel(
-                    L10n.string("live.health-check.progress", fallback: "Checking channels in the background: %d/%d", completed, total),
-                    systemImage: "waveform.path.ecg",
-                    color: .secondary,
-                    showsProgress: true
-                )
-            case .completed(let removed, let total):
-                backgroundStatusLabel(
-                    removed == 0
-                        ? L10n.string("live.health-check.clean", fallback: "Checked %d channels; no confirmed failures found", total)
-                        : L10n.string("live.health-check.removed", fallback: "Checked %d channels; removed %d recoverable failures", total, removed),
-                    systemImage: removed == 0
-                        ? "checkmark.circle"
-                        : "trash.slash",
-                    color: .secondary
-                )
-            case .failed(let message):
-                backgroundStatusLabel(
-                    L10n.string("live.health-check.failed", fallback: "Background channel check did not finish: %@", message),
-                    systemImage: "exclamationmark.triangle",
-                    color: .orange
-                )
-            }
-        }
-    }
-
-    private func backgroundStatusLabel(
-        _ title: String,
-        systemImage: String,
-        color: Color,
-        showsProgress: Bool = false
-    ) -> some View {
-        HStack(spacing: 8) {
-            if showsProgress {
-                AppActivityIndicator(size: .mini)
-            } else {
-                Image(systemName: systemImage)
-            }
-            Text(title)
-                .lineLimit(2)
-        }
-        .font(.caption)
-        .foregroundColor(color)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 20)
-        .padding(.vertical, 8)
-        .background(color.opacity(0.07))
-    }
 
     private var selectedSource: LiveSourceDescriptor? {
         guard let selectedSourceID = session.selectedSourceID else { return nil }
@@ -344,15 +256,16 @@ struct LiveView: View {
 
     private var selectedCatalog: LiveCatalogSnapshot? {
         guard let selectedSourceID = session.selectedSourceID else { return nil }
-        return state.liveCatalog(for: selectedSourceID)
+        return state.presentedLiveCatalog(for: selectedSourceID)
     }
 
-    private func filteredChannels(
-        _ channels: [LiveChannel],
-        sourceID: LiveSourceID
-    ) -> [LiveChannel] {
+    private func filteredChannels<S: Sequence>(
+        _ channels: S,
+        sourceID: LiveSourceID,
+        limit: Int? = nil
+    ) -> [LiveChannel] where S.Element == LiveChannel {
         let query = session.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return channels.filter { channel in
+        let matches = channels.lazy.filter { channel in
             let isDeleted = state.isLiveChannelDeleted(
                 sourceID: sourceID,
                 channel: channel
@@ -371,6 +284,8 @@ struct LiveView: View {
                 && favoriteMatches
                 && queryMatches
         }
+        if let limit { return Array(matches.prefix(limit)) }
+        return Array(matches)
     }
 
     private func selectFirstSourceIfNeeded() {
@@ -379,22 +294,35 @@ struct LiveView: View {
 
     private func updateActivation(for section: AppSection) {
         session.isActive = section == .live
+        updateEPGDemand()
         guard session.isActive else { return }
 
         let previousSourceID = session.selectedSourceID
         selectFirstSourceIfNeeded()
+        state.selectImportedIdentitySource(session.selectedSourceID)
         if previousSourceID == session.selectedSourceID {
             Task { await loadSelectedIfNeeded() }
         }
     }
 
     private func loadSelectedIfNeeded() async {
+        defer { updateEPGDemand() }
         guard let source = selectedSource,
               state.liveCatalog(for: source.id) == nil,
               !state.isLiveCatalogLoading(source.id) else {
             return
         }
         await state.loadLiveSource(source.id)
+    }
+
+    private func updateEPGDemand() {
+        guard session.isActive, let catalog = selectedCatalog else {
+            state.setEPGBrowserDemand(source: nil, channels: [])
+            return
+        }
+        let channels = filteredChannels(catalog.groups.lazy.filter { $0.password == nil }.flatMap(\.channels),
+                                        sourceID: catalog.sourceID, limit: 8)
+        state.setEPGBrowserDemand(source: catalog.sourceID, channels: channels)
     }
 }
 
@@ -408,7 +336,7 @@ struct LiveToolbarView: View {
             if let source = selectedSource {
                 // Source selection and retry must survive an absent/failed
                 // catalog. Do not condition the toolbar on loading success.
-                let groups = (state.liveCatalog(for: source.id)?.groups ?? [])
+                let groups = (state.presentedLiveCatalog(for: source.id)?.groups ?? [])
                     .filter { $0.password == nil }
                 let allChannels = groups.flatMap(\.channels)
                 let deletedChannels = allChannels.filter {
@@ -490,6 +418,8 @@ struct LiveToolbarView: View {
             }
 
             PrimaryToolbarDivider()
+            LiveBackgroundActivityControl(epgState: state.liveEPG,
+                validationToolbar: state.liveValidationActivity.toolbar, source: source)
             refreshControl(sourceID: source.id)
                 .primaryToolbarIconControl()
         }
@@ -503,6 +433,7 @@ struct LiveToolbarView: View {
         Menu {
             ForEach(state.liveSourceDescriptors) { source in
                 Button {
+                    state.selectImportedIdentitySource(source.id)
                     session.selectedSourceID = source.id
                 } label: {
                     menuLabel(
@@ -672,6 +603,8 @@ struct LiveToolbarView: View {
     private func menuLabel(_ title: String, selected: Bool) -> some View {
         if selected {
             Label(title, systemImage: "checkmark")
+                // The toolbar's icon-only style must not hide menu row titles.
+                .labelStyle(.titleAndIcon)
         } else {
             Text(title)
         }
@@ -685,6 +618,224 @@ struct LiveToolbarView: View {
     }
 }
 
+
+@MainActor
+final class LiveEPGState: ObservableObject {
+    @Published private(set) var revision = 0
+    private struct ChannelKey: Hashable {
+        let source: EPGSourceKey
+        let channelID: String
+    }
+    private struct StoredResult {
+        let item: EPGNowNextItem
+        let token: EPGResultToken
+        let availability: EPGAvailability
+        let cost: Int
+    }
+    private var revisions: [EPGSourceKey: String] = [:]
+    private var generations: [EPGSourceKey: UUID] = [:]
+    private var results: [ChannelKey: StoredResult] = [:]
+    private var order: [ChannelKey] = []
+    private var statuses: [EPGRequestKey: EPGRepositoryStatus] = [:]
+    var isEmpty: Bool { results.isEmpty }
+
+    func tick() { revision &+= 1 }
+    func nextBoundary(after date: Date) -> Date? {
+        results.values.flatMap {
+            [$0.item.current?.end, $0.item.next?.start, $0.item.next?.end]
+                .compactMap { $0 }
+        }
+        .filter { $0 > date }
+        .min()
+    }
+    func status(_ key: EPGRequestKey) -> EPGRepositoryStatus? { statuses[key] }
+    func setStatus(_ status: EPGRepositoryStatus) {
+        guard revisions[status.key.source] == status.key.revision else { return }
+        statuses[status.key] = status
+        tick()
+    }
+
+    @discardableResult
+    func prepare(source: LiveSourceID, revision: String) -> UUID {
+        let sourceKey = EPGSourceKey(source)
+        if revisions[sourceKey] == revision, let generation = generations[sourceKey] { return generation }
+        remove(source)
+        revisions[sourceKey] = revision
+        let generation = UUID()
+        generations[sourceKey] = generation
+        return generation
+    }
+
+    @discardableResult
+    func publish(_ batch: EPGNowNextBatch, channels: [LiveChannel], source: LiveSourceID,
+                 revision: String, generation: UUID, demandRevision: UUID,
+                 serviceIncarnation: UUID) -> Bool {
+        let sourceKey = EPGSourceKey(source)
+        guard revisions[sourceKey] == revision, generations[sourceKey] == generation,
+              batch.token.serviceIncarnation == serviceIncarnation,
+              batch.token.demandRevision == demandRevision,
+              batch.items.count == channels.count else { return false }
+        if let priorEpoch = results.first(where: { $0.key.source == sourceKey })?.value.token.sourceEpoch,
+           priorEpoch != batch.token.sourceEpoch {
+            removeResults(sourceKey)
+        }
+        for key in order where results[key]?.token.resourceIdentity == batch.token.resourceIdentity
+            && results[key]?.token.dataVersion != batch.token.dataVersion {
+            results[key] = nil
+        }
+        order.removeAll { results[$0] == nil }
+        for (channel, item) in zip(channels, batch.items) {
+            let key = ChannelKey(source: sourceKey, channelID: channel.id)
+            let cost = Self.cost(item) + batch.token.resourceIdentity.utf8.count
+                + batch.token.sourceEpoch.utf8.count + batch.token.dataVersion.utf8.count + 128
+            results[key] = StoredResult(item: item, token: batch.token,
+                                        availability: batch.availability, cost: cost)
+            order.removeAll { $0 == key }
+            order.append(key)
+        }
+        while order.count > 100 || results.values.reduce(0, { $0 + $1.cost }) > 8 * 1_024 * 1_024 {
+            results[order.removeFirst()] = nil
+        }
+        tick()
+        return true
+    }
+
+    func remove(_ source: LiveSourceID) {
+        let key = EPGSourceKey(source)
+        removeResults(key)
+        statuses = statuses.filter { $0.key.source != key }
+        revisions[key] = nil
+        generations[key] = nil
+        tick()
+    }
+
+    func removeAll() {
+        revisions.removeAll()
+        generations.removeAll()
+        results.removeAll()
+        statuses.removeAll()
+        order.removeAll()
+        tick()
+    }
+
+    func removeNativeSources() {
+        for key in Array(revisions.keys) where key.kind == .xtream {
+            remove(.xtream(key.id))
+        }
+    }
+
+    func nowNext(channel: LiveChannel, source: LiveSourceID, at date: Date) -> EPGNowNextSnapshot {
+        let key = ChannelKey(source: EPGSourceKey(source), channelID: channel.id)
+        guard let stored = results[key] else { return EPGNowNextSnapshot() }
+        var current = stored.item.current, next = stored.item.next
+        if let value = current, !(value.start <= date && date < value.end) { current = nil }
+        if current == nil, let value = next, value.start <= date && date < value.end {
+            current = value; next = nil
+        } else if let value = next, value.start <= date { next = nil }
+        return EPGNowNextSnapshot(current: current, next: next, availability: stored.availability)
+    }
+
+    private func removeResults(_ source: EPGSourceKey) {
+        results = results.filter { $0.key.source != source }
+        order.removeAll { $0.source == source }
+    }
+
+    #if DEBUG
+    var storedResultCountForTesting: Int { results.count }
+    func containsForTesting(source: LiveSourceID, channel: LiveChannel) -> Bool {
+        results[ChannelKey(source: EPGSourceKey(source), channelID: channel.id)] != nil
+    }
+    #endif
+
+    private static func cost(_ item: EPGNowNextItem) -> Int {
+        [item.current, item.next].compactMap { $0 }.reduce(64) {
+            $0 + $1.channelID.utf8.count + $1.title.utf8.count + 96
+        }
+    }
+}
+
+/// Presentation clock only: no per-card tasks, requests, or visibility tracking.
+struct EPGTimelineSchedule: TimelineSchedule {
+    var boundaries: [Date]
+    func entries(from startDate: Date, mode: TimelineScheduleMode) -> AnySequence<Date> {
+        AnySequence {
+            var next = startDate
+            return AnyIterator<Date> {
+                let value = next
+                next = min(value.addingTimeInterval(mode == .lowFrequency ? 60 : 15),
+                           boundaries.filter { $0 > value }.min() ?? .distantFuture)
+                return value
+            }
+        }
+    }
+}
+
+struct LiveNowNextView: View {
+    @ObservedObject var epg: LiveEPGState
+    let channel: LiveChannel
+    let source: LiveSourceID
+
+    var body: some View {
+        let initial = epg.nowNext(channel: channel, source: source, at: Date())
+        let boundaries = [initial.current?.end, initial.next?.start, initial.next?.end].compactMap { $0 }
+        TimelineView(EPGTimelineSchedule(boundaries: boundaries)) { context in
+            let info = epg.nowNext(channel: channel, source: source, at: context.date)
+            VStack(alignment: .leading, spacing: 4) {
+                if let current = info.current {
+                    Text(L10n.string("live.now-playing", fallback: "Now Playing: %@", current.title))
+                        .lineLimit(1)
+                    HStack(spacing: 8) {
+                        Text(current.start, style: .time)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .layoutPriority(1)
+                        if let progress = info.progress(at: context.date) {
+                            ProgressView(value: progress)
+                                .progressViewStyle(.linear)
+                                .frame(maxWidth: .infinity)
+                                .accessibilityLabel(L10n.string("live.epg.progress", fallback: "Programme progress"))
+                        }
+                        Text(current.end, style: .time)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .layoutPriority(1)
+                    }
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    if info.availability == .stale {
+                        Text(L10n.string("live.epg.cached", fallback: "Cached"))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                } else {
+                    Text(emptyLabel(info.availability))
+                        .foregroundColor(.secondary)
+                }
+                if let next = info.next {
+                    HStack(spacing: 4) {
+                        Text(next.start, style: .time)
+                        Text(L10n.string("live.next-program", fallback: "Next: %@", next.title))
+                    }
+                    .lineLimit(1)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                } else {
+                    Text(L10n.string("live.epg.no-next", fallback: "Next: —"))
+                        .font(.caption2).foregroundColor(.secondary)
+                }
+            }
+            .font(.caption)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func emptyLabel(_ availability: EPGAvailability) -> String {
+        switch availability {
+        case .unsupported: return L10n.string("live.epg.unsupported", fallback: "Provider has no programme guide")
+        case .failed: return L10n.string("live.epg.unavailable", fallback: "Programme guide unavailable")
+        default: return L10n.string("live.epg.no-current", fallback: "No current programme")
+        }
+    }
+}
+
 private struct LiveChannelCard: View {
     @EnvironmentObject private var state: AppState
     @Environment(\.colorScheme) private var colorScheme
@@ -693,8 +844,7 @@ private struct LiveChannelCard: View {
     let navigationChannels: [LiveChannel]
     let sourceID: LiveSourceID
     let sourceName: String
-    let currentEPGProgramme: EPGProgramme?
-    let nextEPGProgramme: EPGProgramme?
+    let importedCatalog: AcceptedImportedCatalog?
 
     @State private var isHovering = false
     @State private var showsDeleteConfirmation = false
@@ -727,12 +877,12 @@ private struct LiveChannelCard: View {
             )
             .contentShape(Rectangle())
             .onTapGesture {
-                play(channel.streams.first)
+                playDefaultRoute()
             }
 
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Button {
-                    play(channel.streams.first)
+                    playDefaultRoute()
                 } label: {
                     Text(channel.name)
                         .font(.headline)
@@ -742,7 +892,7 @@ private struct LiveChannelCard: View {
                 }
                 .buttonStyle(.plain)
 
-                if channel.streams.count > 1 {
+                if routeCount > 1 {
                     streamMenu
                 } else {
                     Image(systemName: "tv")
@@ -752,19 +902,7 @@ private struct LiveChannelCard: View {
                 }
             }
 
-            if let programmeSummary {
-                Text(programmeSummary)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-            }
-
-            if let nextProgramme {
-                Text(L10n.string("live.next-program", fallback: "Next: %@", nextProgramme))
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-            }
+            LiveNowNextView(epg: state.liveEPG, channel: channel, source: sourceID)
         }
         .contentShape(Rectangle())
         .background {
@@ -789,15 +927,15 @@ private struct LiveChannelCard: View {
         )
         .zIndex(isHovering ? 1 : 0)
         .animation(.easeOut(duration: 0.14), value: isHovering)
+        .onAppear {
+            state.setEPGChannelVisibility(source: sourceID, channel: channel, visible: true)
+        }
+        .onDisappear {
+            state.setEPGChannelVisibility(source: sourceID, channel: channel, visible: false)
+        }
         .onHover { isHovering = $0 }
         .contextMenu {
-            ForEach(channel.streams) { stream in
-                Button {
-                    play(stream)
-                } label: {
-                    Label(stream.name, systemImage: "play.fill")
-                }
-            }
+            routeMenuItems
             Divider()
             Button {
                 toggleFavorite()
@@ -914,15 +1052,9 @@ private struct LiveChannelCard: View {
 
     private var streamMenu: some View {
         Menu {
-            ForEach(channel.streams) { stream in
-                Button {
-                    play(stream)
-                } label: {
-                    Label(stream.name, systemImage: "play.fill")
-                }
-            }
+            routeMenuItems
         } label: {
-            Text(L10n.string("live.stream-count-short", fallback: "%d streams", channel.streams.count))
+            Text(L10n.string("live.stream-count-short", fallback: "%d streams", routeCount))
                 .font(.caption2.weight(.semibold))
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3)
@@ -938,20 +1070,6 @@ private struct LiveChannelCard: View {
         state.isLiveFavorite(sourceID: sourceID, channel: channel)
     }
 
-    private var programmeSummary: String? {
-        if let current = currentEPGProgramme {
-            return L10n.string("live.now-playing", fallback: "Now Playing: %@", current.title)
-        }
-        guard channel.streams.count > 1 else { return nil }
-        let format = channel.streams.first?.format?.uppercased()
-            ?? L10n.string("live.format", fallback: "Live")
-        return L10n.string("live.format-stream-count", fallback: "%@ · %d streams", format, channel.streams.count)
-    }
-
-    private var nextProgramme: String? {
-        nextEPGProgramme?.title
-    }
-
     private func badge(_ text: String) -> some View {
         Text(text)
             .font(.caption2.weight(.semibold))
@@ -963,7 +1081,43 @@ private struct LiveChannelCard: View {
             .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
 
-    private func play(_ stream: LiveStream?) {
+    @ViewBuilder
+    private var routeMenuItems: some View {
+        if case .imported = sourceID {
+            ForEach(importedCatalog?.selections(for: channel) ?? []) { selection in
+                Button { play(selection) } label: {
+                    Label(selection.stream.name, systemImage: "play.fill")
+                }
+            }
+        } else {
+            // Native route IDs retain their provider locator semantics.
+            ForEach(channel.streams) { stream in
+                Button { playNative(stream) } label: {
+                    Label(stream.name, systemImage: "play.fill")
+                }
+            }
+        }
+    }
+
+    private var routeCount: Int {
+        if case .imported = sourceID { return importedCatalog?.selections(for: channel).count ?? 0 }
+        return channel.streams.count
+    }
+
+    private func playDefaultRoute() {
+        if case .imported = sourceID {
+            guard let selection = importedCatalog?.selections(for: channel).first else { return }
+            play(selection)
+        } else {
+            playNative(channel.streams.first)
+        }
+    }
+
+    private func play(_ selection: ImportedRouteSelection) {
+        Task { await state.playImportedLive(selection, navigationChannels: navigationChannels) }
+    }
+
+    private func playNative(_ stream: LiveStream?) {
         guard let stream else { return }
         Task {
             await state.playLive(

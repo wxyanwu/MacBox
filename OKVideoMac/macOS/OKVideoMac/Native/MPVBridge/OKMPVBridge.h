@@ -14,6 +14,9 @@ typedef void *(*OKMPVGetProcAddress)(void *context, const char *name);
 typedef void (*OKMPVRenderUpdateCallback)(void *context);
 
 typedef struct OKMPVEvent {
+    /* For MPV_EVENT_LOG_MESSAGE: property_name = prefix, string_value = text,
+     * property_format = mpv_log_level. Buffers expire at the next wait_event.
+     * Never print these raw strings; the host must classify/redact first. */
     int event_id;
     int error;
     uint64_t reply_userdata;
@@ -28,6 +31,7 @@ typedef struct OKMPVEvent {
 
 OKMPVClient *okmpv_create(void);
 int okmpv_initialize(OKMPVClient *client);
+int okmpv_request_log_messages(OKMPVClient *client, const char *level);
 void okmpv_wakeup(OKMPVClient *client);
 void okmpv_destroy(OKMPVClient *client);
 

@@ -4,10 +4,2194 @@ import Combine
 import CryptoKit
 import SwiftUI
 import XCTest
+import IOKit.pwr_mgt
 import AndroidRuntimeKit
 import OKVideoCore
 import OKVideoPersistence
 @testable import OKVideoMac
+
+@MainActor
+final class ImportedRouteWiringTests: XCTestCase {
+    private func route(_ label: String, header: String = "a", format: String? = nil, parsing: Bool = false) -> LiveStream {
+        LiveStream(name: label, url: URL(string: "https://fixture.invalid/live?token=SECRET_TOKEN_DO_NOT_LOG")!,
+                   headers: ["Authorization": header], format: format, needsParsing: parsing)
+    }
+    private func channel(_ name: String = "X", streams: [LiveStream]) -> LiveChannel {
+        LiveChannel(groupName: "G", name: name, streams: streams)
+    }
+    private func playlist(_ channels: [LiveChannel]) -> LivePlaylist {
+        LivePlaylist(format: .m3u, groups: [LiveGroup(name: "G", channels: channels)])
+    }
+    private func fixture(_ channels: [LiveChannel]) -> (AppState, StoredLiveSource, AcceptedImportedCatalog) {
+        let state = AppState(environment: nil)
+        let source = StoredLiveSource(name: "Fixture", sourceKind: .pasted, rawData: Data())
+        state.acceptImportedRoutesForTesting(source, playlist: playlist(channels))
+        return (state, source, state.acceptedImportedCatalogs[source.id]!)
+    }
+    private func candidates(_ catalog: AcceptedImportedCatalog, _ channels: [LiveChannel], start: Int = 0,
+                            attempted: Set<ImportedRouteTransport> = []) -> [LivePlaybackCandidate] {
+        LivePlaybackRecoveryPolicy.importedCandidates(catalog: catalog, channels: channels,
+            starting: catalog.selections(for: channels[0])[start], excluding: attempted)
+    }
+
+    func testHeaderVariantsKeepDistinctMenuAndCandidateKeys() {
+        let c = channel(streams: [route("A"), route("B", header: "b")])
+        let (_, _, catalog) = fixture([c])
+        let menu = catalog.selections(for: c), recovery = candidates(catalog, [c])
+        XCTAssertEqual(menu.count, 2)
+        XCTAssertNotEqual(menu[0].id, menu[1].id)
+        XCTAssertEqual(recovery.compactMap(\.routeKey), menu.map(\.id))
+        XCTAssertEqual(recovery.map(\.stream), c.streams)
+    }
+    func testFormatAndParsingVariantsSurviveEveryCandidateStage() {
+        let c = channel(streams: [route("A"), route("B", format: "ts"), route("C", parsing: true)])
+        let (_, _, catalog) = fixture([c])
+        XCTAssertEqual(candidates(catalog, [c]).map(\.stream), c.streams)
+        XCTAssertEqual(candidates(catalog, [c], attempted: [ImportedRouteTransport(c.streams[0])!]).count, 2)
+    }
+    func testLabelOnlyDuplicateKeepsFirstOccurrence() {
+        let c = channel(streams: [route("first"), route("alias")])
+        let (_, _, catalog) = fixture([c])
+        XCTAssertEqual(catalog.selections(for: c).map { $0.stream.name }, ["first"])
+        XCTAssertEqual(candidates(catalog, [c]).map { $0.stream.name }, ["first"])
+    }
+    func testSelectedVariantFirstAndOtherHeaderStillEligible() {
+        let c = channel(streams: [route("A"), route("B", header: "b")])
+        let (_, _, catalog) = fixture([c])
+        XCTAssertEqual(candidates(catalog, [c], start: 1).map { $0.stream.name }, ["B", "A"])
+    }
+    func testSameTupleAcrossChannelsKeepsOwnLabelsButRecoveryDeduplicates() {
+        let a = channel("A", streams: [route("label A")]), b = channel("B", streams: [route("label B")])
+        let (_, _, catalog) = fixture([a, b])
+        XCTAssertEqual(catalog.selections(for: a)[0].id, catalog.selections(for: b)[0].id)
+        XCTAssertEqual(catalog.selections(for: b)[0].stream.name, "label B")
+        XCTAssertEqual(candidates(catalog, [a, b]).count, 1)
+    }
+    func testChannelBindingRejectsForeignRouteAndForgedChannel() {
+        let a = channel("A", streams: [route("A")]), b = channel("B", streams: [route("B", header: "b")])
+        let (_, _, catalog) = fixture([a, b])
+        XCTAssertNil(catalog.selection(for: b, key: catalog.selections(for: a)[0].id))
+        var forged = a; forged.streams = b.streams
+        XCTAssertTrue(catalog.selections(for: forged).isEmpty)
+    }
+    func testChannelIDCollisionFailsClosedWithoutAllocatingChannelIdentity() {
+        let a = channel(streams: [route("A")]), b = channel(streams: [route("B", header: "b")])
+        XCTAssertEqual(a.id, b.id)
+        let (_, _, catalog) = fixture([a, b])
+        XCTAssertTrue(catalog.selections(for: a).isEmpty)
+        XCTAssertTrue(catalog.selections(for: b).isEmpty)
+        XCTAssertEqual(catalog.playlist, playlist([a, b]))
+    }
+    func testRepeatedLookupStableOnlyWithinSameContext() {
+        let c = channel(streams: [route("A")])
+        let (_, source, catalog) = fixture([c])
+        let next = AcceptedImportedCatalog(sourceID: source.id, playlist: catalog.playlist)
+        let key = catalog.selections(for: c)[0].id
+        XCTAssertEqual(key, catalog.selections(for: c)[0].id)
+        XCTAssertNotEqual(key, next.selections(for: c)[0].id)
+        XCTAssertNil(next.selection(for: c, key: key))
+    }
+    func testDifferentSourceContextCannotResolveOldKey() {
+        let c = channel(streams: [route("A")])
+        let (_, _, a) = fixture([c]), (_, _, b) = fixture([c])
+        XCTAssertNil(b.selection(for: c, key: a.selections(for: c)[0].id))
+    }
+    func testCatalogAndContextPublishTogetherAndUnrelatedSourceStaysStable() {
+        let c = channel(streams: [route("A")])
+        let (state, source, first) = fixture([c])
+        let other = StoredLiveSource(name: "Other", sourceKind: .pasted, rawData: Data())
+        state.acceptImportedRoutesForTesting(other, playlist: playlist([c]))
+        let untouched = state.acceptedImportedCatalogs[other.id]
+        var publications = 0
+        let observation = state.$acceptedImportedCatalogs.dropFirst().sink { values in
+            publications += 1
+            let value = values[source.id]!
+            for channel in value.playlist.groups.flatMap(\.channels) {
+                XCTAssertEqual(value.selections(for: channel).map(\.stream), channel.streams)
+            }
+        }
+        let updated = channel(streams: [route("B", header: "new")])
+        state.acceptImportedRoutesForTesting(source, playlist: playlist([updated]))
+        XCTAssertEqual(publications, 1)
+        XCTAssertFalse(state.acceptedImportedCatalogs[source.id] === first)
+        XCTAssertTrue(state.acceptedImportedCatalogs[other.id] === untouched)
+        XCTAssertEqual(state.loadedLivePlaylists[source.id], playlist([updated]))
+        withExtendedLifetime(observation) {}
+    }
+    func testFinalDefaultHeadersAreExactlyPlaybackHeaders() async throws {
+        let c = channel(streams: [route("A", header: "stream override", format: "ts")])
+        let final = playlist([c]).applyingDefaultHeaders(["Authorization": "default", "User-Agent": "fixture"])
+        let (state, source, _) = fixture([c])
+        state.acceptImportedRoutesForTesting(source, playlist: final)
+        let catalog = state.acceptedImportedCatalogs[source.id]!, channel = final.groups[0].channels[0]
+        var loads = 0
+        state.importedRouteLoadForTesting = { candidate, media, _ in
+            loads += 1
+            XCTAssertEqual(candidate.stream, channel.streams[0])
+            XCTAssertEqual(media.headers, HTTPHeaders(channel.streams[0].headers))
+            XCTAssertEqual(media.url, channel.streams[0].url)
+            XCTAssertEqual(media.format, "ts")
+        }
+        await state.playImportedLive(catalog.selections(for: channel)[0], navigationChannels: [channel])
+        XCTAssertEqual(loads, 1)
+        await state.closePlayer()
+    }
+    func testActualRecoveryLoadsBothHeaderVariantsBeforeNextChannel() async {
+        let a = channel("A", streams: [route("A1"), route("A2", header: "b")])
+        let b = channel("B", streams: [route("B1", header: "c")])
+        let (state, _, catalog) = fixture([a, b])
+        var loads: [LiveStream] = [], flows: [UUID?] = [], requests: [UUID] = []
+        state.importedRouteLoadForTesting = { candidate, media, request in
+            loads.append(candidate.stream); flows.append(state.importedRouteFlowForTesting); requests.append(request)
+            XCTAssertEqual(media.headers, HTTPHeaders(candidate.stream.headers))
+            if loads.count < 3 { throw AppError.playback("fixture") }
+        }
+        await state.playImportedLive(catalog.selections(for: a)[0], navigationChannels: [a, b])
+        XCTAssertEqual(loads, a.streams + b.streams)
+        XCTAssertEqual(Set(flows).count, 1)
+        XCTAssertEqual(Set(requests).count, 3)
+        XCTAssertFalse(state.hasExhaustedLivePlayback)
+        await state.closePlayer()
+        state.importedRouteLoadForTesting = nil
+    }
+    func testStaleMenuCannotStartOrDisturbCurrentFlow() async {
+        let c = channel(streams: [route("A")])
+        let (state, source, old) = fixture([c])
+        var loads = 0
+        state.importedRouteLoadForTesting = { _, _, _ in loads += 1 }
+        await state.playImportedLive(old.selections(for: c)[0], navigationChannels: [c])
+        let flow = state.importedRouteFlowForTesting
+        state.acceptImportedRoutesForTesting(source, playlist: playlist([c]))
+        await state.playImportedLive(old.selections(for: c)[0], navigationChannels: [c])
+        XCTAssertEqual(loads, 1); XCTAssertEqual(state.importedRouteFlowForTesting, flow)
+        await state.closePlayer()
+    }
+    func testRefreshDoesNotChangeRecoveryOrAdjacentNavigationSnapshot() async {
+        let a = channel("A", streams: [route("A1"), route("A2", header: "b")])
+        let b = channel("B", streams: [route("B", header: "c")])
+        let (state, source, old) = fixture([a, b])
+        var loads: [LiveStream] = []
+        state.importedRouteLoadForTesting = { candidate, _, _ in loads.append(candidate.stream) }
+        await state.playImportedLive(old.selections(for: a)[0], navigationChannels: [a, b])
+        state.acceptImportedRoutesForTesting(source, playlist: playlist([channel(streams: [route("NEW", header: "new")])]))
+        state.failImportedRouteForTesting()
+        await state.importedRouteRecoveryTaskForTesting?.value
+        XCTAssertEqual(loads, a.streams)
+        XCTAssertTrue(state.importedRoutePlaybackCatalogForTesting === old)
+        await state.switchLiveChannel(by: 1)
+        XCTAssertEqual(loads.last, b.streams[0])
+        XCTAssertTrue(state.importedRoutePlaybackCatalogForTesting === old)
+        await state.closePlayer()
+    }
+    func testExplicitNewActionUsesNewContextNotOldAttemptedSet() async {
+        let c = channel(streams: [route("A")])
+        let (state, source, old) = fixture([c])
+        var keys: [ImportedRouteRuntimeKey?] = []
+        state.importedRouteLoadForTesting = { candidate, _, _ in keys.append(candidate.routeKey) }
+        await state.playImportedLive(old.selections(for: c)[0], navigationChannels: [c])
+        let oldFlow = state.importedRouteFlowForTesting
+        state.acceptImportedRoutesForTesting(source, playlist: playlist([c]))
+        let next = state.acceptedImportedCatalogs[source.id]!
+        await state.playImportedLive(next.selections(for: c)[0], navigationChannels: [c])
+        XCTAssertEqual(keys.count, 2); XCTAssertNotEqual(keys[0], keys[1])
+        XCTAssertNotEqual(state.importedRouteFlowForTesting, oldFlow)
+        XCTAssertEqual(state.importedRouteAttemptCountForTesting, 1)
+        await state.closePlayer()
+    }
+    func testRawImportedEntryCannotBypassSelectionGate() async {
+        let c = channel(streams: [route("A")])
+        let (state, source, _) = fixture([c])
+        var loads = 0; state.importedRouteLoadForTesting = { _, _, _ in loads += 1 }
+        await state.playLive(channel: c, stream: c.streams[0], sourceID: .imported(source.id))
+        XCTAssertEqual(loads, 0); XCTAssertNil(state.importedRouteFlowForTesting)
+    }
+    func testUnknownOrMixedNavigationCatalogRejected() async {
+        let c = channel(streams: [route("A")])
+        let (state, _, catalog) = fixture([c])
+        var loads = 0; state.importedRouteLoadForTesting = { _, _, _ in loads += 1 }
+        let unknown = channel("unknown", streams: [route("x")])
+        for channels in [[unknown], [c, unknown], [c, c], []] {
+            await state.playImportedLive(catalog.selections(for: c)[0], navigationChannels: channels)
+        }
+        XCTAssertEqual(loads, 0)
+    }
+    func testDeletingBlocksNewLoadAndRollbackDoesNotReviveOldFlow() async {
+        let c = channel(streams: [route("A"), route("B", header: "b")])
+        let (state, source, catalog) = fixture([c])
+        var loads = 0; state.importedRouteLoadForTesting = { _, _, _ in loads += 1 }
+        await state.playImportedLive(catalog.selections(for: c)[0], navigationChannels: [c])
+        let oldFlow = state.importedRouteFlowForTesting
+        state.setImportedRouteDeletingForTesting(source.id, deleting: true)
+        await state.playImportedLive(catalog.selections(for: c)[0], navigationChannels: [c])
+        XCTAssertEqual(loads, 1)
+        state.setImportedRouteDeletingForTesting(source.id, deleting: false)
+        state.failImportedRouteForTesting()
+        XCTAssertNil(state.importedRouteRecoveryTaskForTesting)
+        XCTAssertNil(state.importedRouteFlowForTesting)
+        await state.playImportedLive(catalog.selections(for: c)[0], navigationChannels: [c])
+        XCTAssertNotEqual(state.importedRouteFlowForTesting, oldFlow); XCTAssertEqual(loads, 2)
+        await state.closePlayer()
+    }
+
+    private final class Gate {
+        let started: XCTestExpectation
+        var continuation: CheckedContinuation<Void, Error>?
+        init(_ test: XCTestCase) { started = test.expectation(description: "load suspended") }
+        func wait() async throws {
+            try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation; started.fulfill()
+            }
+        }
+        func finish(_ error: Error? = nil) {
+            let saved = continuation; continuation = nil
+            if let error { saved?.resume(throwing: error) } else { saved?.resume() }
+        }
+    }
+    private func lateInitial(_ error: Error?, otherSource: Bool = false) async {
+        let c = channel(streams: [route("A"), route("B", header: "b")])
+        let (state, _, catalog) = fixture([c])
+        let bCatalog: AcceptedImportedCatalog
+        if otherSource {
+            let source = StoredLiveSource(name: "B", sourceKind: .pasted, rawData: Data())
+            state.acceptImportedRoutesForTesting(source, playlist: playlist([c]))
+            bCatalog = state.acceptedImportedCatalogs[source.id]!
+        } else { bCatalog = catalog }
+        let old = Gate(self), new = Gate(self)
+        var count = 0
+        state.importedRouteLoadForTesting = { _, _, _ in
+            count += 1
+            if count == 1 { try await old.wait() } else { try await new.wait() }
+        }
+        let a = Task { await state.playImportedLive(catalog.selections(for: c)[0], navigationChannels: [c]) }
+        await fulfillment(of: [old.started], timeout: 2)
+        let b = Task { await state.playImportedLive(bCatalog.selections(for: c)[1], navigationChannels: [c]) }
+        await fulfillment(of: [new.started], timeout: 2)
+        let flow = state.importedRouteFlowForTesting
+        old.finish(error); await a.value
+        XCTAssertEqual(state.importedRouteFlowForTesting, flow)
+        XCTAssertEqual(state.livePlaybackSourceID, .imported(bCatalog.sourceID))
+        XCTAssertEqual(state.livePlaybackStream, c.streams[1])
+        XCTAssertEqual(state.importedRouteAttemptCountForTesting, 1)
+        XCTAssertTrue(state.isRecoveringLivePlayback); XCTAssertFalse(state.hasExhaustedLivePlayback)
+        XCTAssertEqual(count, 2)
+        new.finish(); await b.value
+        await state.closePlayer()
+    }
+    func testOldSuccessCannotOverwriteNewPendingFlow() async { await lateInitial(nil) }
+    func testOldFailureCannotStartRecoveryOrExhaustNewFlow() async { await lateInitial(AppError.playback("fixture")) }
+    func testOldCancellationCannotClearNewRecoveringFlag() async { await lateInitial(CancellationError()) }
+    func testOldSourceCannotOverwriteNewSourceFlow() async { await lateInitial(AppError.playback("late"), otherSource: true) }
+    func testDefaultHeaderCollapseKeepsOnlyOneRuntimeRoute() {
+        let a = LiveStream(name: "first", url: URL(string: "https://fixture.invalid/a")!)
+        let b = LiveStream(name: "second", url: a.url!, headers: ["User-Agent": "fixture"])
+        let p = playlist([channel(streams: [a, b])]).applyingDefaultHeaders(["User-Agent": "fixture"])
+        let catalog = AcceptedImportedCatalog(sourceID: UUID(), playlist: p)
+        let c = p.groups[0].channels[0]
+        XCTAssertEqual(c.streams.count, 2) // accepted parser facts unchanged
+        XCTAssertEqual(catalog.selections(for: c).map { $0.stream.name }, ["first"])
+        XCTAssertEqual(candidates(catalog, [c]).count, 1)
+    }
+    func testOldRecoveryCleanupCannotClearNewRecoveryHandle() async {
+        let c = channel(streams: [route("A"), route("B", header: "b")])
+        let (state, _, catalog) = fixture([c])
+        let old = Gate(self), new = Gate(self)
+        var count = 0
+        state.importedRouteLoadForTesting = { _, _, _ in
+            count += 1
+            if count == 2 { try await old.wait() }
+            if count == 4 { try await new.wait() }
+        }
+        await state.playImportedLive(catalog.selections(for: c)[0], navigationChannels: [c])
+        state.failImportedRouteForTesting()
+        let oldTask = state.importedRouteRecoveryTaskForTesting
+        await fulfillment(of: [old.started], timeout: 2)
+        await state.playImportedLive(catalog.selections(for: c)[1], navigationChannels: [c])
+        state.failImportedRouteForTesting()
+        let newTask = state.importedRouteRecoveryTaskForTesting
+        await fulfillment(of: [new.started], timeout: 2)
+        let flow = state.importedRouteFlowForTesting
+        old.finish(AppError.playback("late failure")); await oldTask?.value
+        XCTAssertNotNil(state.importedRouteRecoveryTaskForTesting)
+        XCTAssertEqual(state.importedRouteFlowForTesting, flow)
+        XCTAssertTrue(state.isRecoveringLivePlayback)
+        XCTAssertEqual(state.importedRouteAttemptCountForTesting, 2)
+        new.finish(); await newTask?.value
+        XCTAssertNil(state.importedRouteRecoveryTaskForTesting)
+        await state.closePlayer()
+    }
+    func testDeleteDuringSuspendedLoadThenRollbackCannotResumeRecovery() async {
+        let c = channel(streams: [route("A"), route("B", header: "b")])
+        let (state, source, catalog) = fixture([c])
+        let gate = Gate(self)
+        var count = 0
+        state.importedRouteLoadForTesting = { _, _, _ in count += 1; try await gate.wait() }
+        let task = Task { await state.playImportedLive(catalog.selections(for: c)[0], navigationChannels: [c]) }
+        await fulfillment(of: [gate.started], timeout: 2)
+        state.setImportedRouteDeletingForTesting(source.id, deleting: true)
+        state.setImportedRouteDeletingForTesting(source.id, deleting: false)
+        gate.finish(AppError.playback("late")); await task.value
+        XCTAssertEqual(count, 1); XCTAssertNil(state.importedRouteFlowForTesting)
+        XCTAssertFalse(state.isRecoveringLivePlayback)
+        await state.closePlayer()
+    }
+    func testContextRetainedByFlowNotBrowserAndReleasedOnClose() async {
+        let c = channel(streams: [route("A")])
+        let state = AppState(environment: nil), source = StoredLiveSource(name: "Fixture", sourceKind: .pasted, rawData: Data())
+        state.importedRouteLoadForTesting = { _, _, _ in }
+        state.acceptImportedRoutesForTesting(source, playlist: playlist([c]))
+        weak var context = state.acceptedImportedCatalogs[source.id]?.routeContext
+        await state.playImportedLive(state.acceptedImportedCatalogs[source.id]!.selections(for: c)[0], navigationChannels: [c])
+        state.acceptImportedRoutesForTesting(source, playlist: playlist([c]))
+        XCTAssertNotNil(context)
+        await state.closePlayer()
+        XCTAssertNil(context)
+    }
+    func testRuntimeDiagnosticsDoNotExposeTransportOrMetadata() {
+        let c = channel("SECRET_TOKEN_DO_NOT_LOG", streams: [route("SECRET_TOKEN_DO_NOT_LOG")])
+        let (_, _, catalog) = fixture([c])
+        let selection = catalog.selections(for: c)[0]
+        let output = String(describing: catalog) + String(reflecting: selection)
+        XCTAssertFalse(output.contains("SECRET_TOKEN_DO_NOT_LOG"))
+        XCTAssertFalse(output.contains("fixture.invalid"))
+        XCTAssertEqual(Mirror(reflecting: selection).children.count, 1)
+    }
+}
+
+@MainActor
+final class ValidationProgressIsolationTests: XCTestCase {
+    func testDenseProgressDoesNotNotifyAppStateOrToolbar() {
+        let state = AppState(environment: nil), source = UUID(), run = UUID()
+        var appUpdates = 0, toolbarUpdates = 0, detailUpdates = 0
+        let a = state.objectWillChange.sink { appUpdates += 1 }
+        let b = state.liveValidationActivity.toolbar.objectWillChange.sink { toolbarUpdates += 1 }
+        let c = state.liveValidationActivity.objectWillChange.sink { detailUpdates += 1 }
+        state.liveValidationActivity.begin(sourceID: source, runID: run, total: 300)
+        for n in 1...300 {
+            state.liveValidationActivity.accept(.init(sourceID: source, runID: run, completed: n, total: 300))
+        }
+        XCTAssertEqual(appUpdates, 0)
+        XCTAssertEqual(toolbarUpdates, 1)
+        XCTAssertEqual(detailUpdates, 301)
+        state.liveValidationActivity.transition(.processing(completed: 300, total: 300), sourceID: source, runID: run)
+        XCTAssertEqual(toolbarUpdates, 1)
+        state.liveValidationActivity.transition(.completed(removed: 0, total: 300), sourceID: source, runID: run)
+        XCTAssertEqual(toolbarUpdates, 2)
+        XCTAssertEqual(appUpdates, 0)
+        withExtendedLifetime([a, b, c]) {}
+    }
+
+    func testThreeHundredSubmissionsCollapseToOneLatestDelivery() async {
+        let delivered = expectation(description: "latest progress"), source = UUID(), run = UUID()
+        var values: [ValidationProgressRelay.Value] = []
+        let relay = ValidationProgressRelay(sourceID: source, runID: run, total: 300) { value in
+            values.append(value); delivered.fulfill()
+        }
+        for n in 1...300 { relay.submit(completed: n, total: 300) }
+        XCTAssertTrue(values.isEmpty)
+        await fulfillment(of: [delivered], timeout: 2)
+        relay.close()
+        XCTAssertEqual(values, [.init(sourceID: source, runID: run, completed: 300, total: 300)])
+    }
+
+    func testLatestMailboxIgnoresWrongTotalAndRegressingCount() {
+        let relay = ValidationProgressRelay(sourceID: UUID(), runID: UUID(), total: 84) { _ in XCTFail("closed") }
+        relay.submit(completed: 50, total: 84)
+        relay.submit(completed: 20, total: 84)
+        relay.submit(completed: 100, total: 100)
+        XCTAssertEqual(relay.close().completed, 50)
+        relay.submit(completed: 84, total: 84)
+        XCTAssertEqual(relay.snapshot().completed, 50)
+    }
+
+    func testCloseDropsAlreadyQueuedMainActorDelivery() async {
+        let queue = DispatchQueue(label: "test.validation.queued")
+        let unexpected = expectation(description: "no late delivery"); unexpected.isInverted = true
+        let relay = ValidationProgressRelay(sourceID: UUID(), runID: UUID(), total: 84,
+            interval: 0.001, queue: queue) { _ in unexpected.fulfill() }
+        relay.submit(completed: 80, total: 84)
+        // Hold MainActor until the utility queue has enqueued the delivery.
+        let queued = DispatchSemaphore(value: 0)
+        queue.asyncAfter(deadline: .now() + 0.03) { queued.signal() }
+        XCTAssertEqual(queued.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(relay.close().completed, 80)
+        await fulfillment(of: [unexpected], timeout: 0.1)
+    }
+
+    func testWorkerPoolDoesNotWaitForMainActorProgress() async throws {
+        let playlist = try LiveSourceParser().parse(Data("#EXTM3U\n#EXTINF:-1,X\nhttps://fixture.invalid/x\n".utf8))
+        let channels = Array(repeating: playlist.groups[0].channels[0], count: 300)
+        let done = DispatchSemaphore(value: 0), permit = LiveValidationPermit(sourceID: UUID())
+        var deliveries = 0
+        let relay = ValidationProgressRelay(sourceID: permit.sourceID, runID: permit.id, total: 300) { _ in deliveries += 1 }
+        let task = Task.detached(priority: .utility) {
+            let service = LiveValidationService(prober: LiveValidationAppProbe(.reachable, delay: 0))
+            let result = await service.run(channels: channels, permit: permit) { n, total in
+                relay.submit(completed: n, total: total)
+            }
+            done.signal(); return result
+        }
+        // Engine can finish despite MainActor being intentionally unavailable.
+        XCTAssertEqual(done.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(deliveries, 0)
+        XCTAssertEqual(relay.close().completed, 300)
+        let result = await task.value
+        XCTAssertEqual(result.end, .complete)
+        XCTAssertEqual(result.completed, 300)
+        XCTAssertTrue(result.unavailableIDs.isEmpty)
+    }
+
+    func testTerminalPhasesImmediatelyRejectAllLateProgress() {
+        let source = UUID()
+        let terminals: [LiveSourceValidationStatus] = [.cancelled(completed: 80, total: 84),
+            .partial(completed: 80, total: 84), .failed("fixture"), .completed(removed: 0, total: 84)]
+        for status in terminals {
+            let model = LiveValidationActivityModel(), run = UUID()
+            model.begin(sourceID: source, runID: run, total: 84)
+            model.transition(status, sourceID: source, runID: run)
+            model.accept(.init(sourceID: source, runID: run, completed: 84, total: 84))
+            model.transition(.processing(completed: 84, total: 84), sourceID: source, runID: run)
+            XCTAssertEqual(model.statuses[source], status)
+        }
+    }
+
+    func testProcessingCannotReturnToCheckingAndHasNoStop() {
+        let model = LiveValidationActivityModel(), source = UUID(), run = UUID()
+        model.begin(sourceID: source, runID: run, total: 84)
+        model.transition(.processing(completed: 84, total: 84), sourceID: source, runID: run)
+        model.accept(.init(sourceID: source, runID: run, completed: 84, total: 84))
+        model.transition(.checking(completed: 84, total: 84), sourceID: source, runID: run)
+        XCTAssertEqual(model.presentation(for: .imported(source))?.phase, .processing)
+        XCTAssertFalse(model.presentation(for: .imported(source))!.canStop)
+        XCTAssertEqual(model.toolbar.indicators[source], .active)
+    }
+
+    func testOldRunCannotPublishProgressFailureOrClearReplacement() {
+        let model = LiveValidationActivityModel(), source = UUID(), a = UUID(), b = UUID()
+        model.begin(sourceID: source, runID: a, total: 84)
+        model.transition(.cancelled(completed: 0, total: 84), sourceID: source, runID: a)
+        model.begin(sourceID: source, runID: b, total: 84)
+        model.accept(.init(sourceID: source, runID: a, completed: 80, total: 84))
+        model.transition(.failed("old failure"), sourceID: source, runID: a)
+        XCTAssertEqual(model.presentation(for: .imported(source))?.runID, b)
+        XCTAssertEqual(model.statuses[source], .checking(completed: 0, total: 84))
+    }
+
+    func testClearSourceRejectsOldRunAndOtherSourceRemainsUntouched() {
+        let model = LiveValidationActivityModel(), a = UUID(), b = UUID(), run = UUID()
+        model.begin(sourceID: a, runID: run, total: 84)
+        model.begin(sourceID: b, runID: UUID(), total: 30)
+        model.clear(a)
+        model.accept(.init(sourceID: a, runID: run, completed: 80, total: 84))
+        XCTAssertNil(model.statuses[a]); XCTAssertNil(model.toolbar.indicators[a])
+        XCTAssertEqual(model.statuses[b], .checking(completed: 0, total: 30))
+    }
+
+    func testToolbarFailureClearedByNewRunWithoutNumericNotifications() {
+        let model = LiveValidationActivityModel(), source = UUID(), run = UUID()
+        model.begin(sourceID: source, runID: run, total: 84)
+        model.transition(.failed("fixture"), sourceID: source, runID: run)
+        XCTAssertEqual(model.toolbar.indicators[source], .warning)
+        model.begin(sourceID: source, runID: UUID(), total: 84)
+        XCTAssertEqual(model.toolbar.indicators[source], .active)
+        XCTAssertNil(model.presentation(for: .xtream(source)))
+    }
+
+    func testPopoverReadDoesNotConsumeOrClearLatestProgress() {
+        let model = LiveValidationActivityModel(), source = UUID(), run = UUID()
+        model.begin(sourceID: source, runID: run, total: 84)
+        model.accept(.init(sourceID: source, runID: run, completed: 80, total: 84))
+        for _ in 0..<100 { XCTAssertEqual(model.presentation(for: .imported(source))?.completed, 80) }
+        XCTAssertEqual(model.statuses[source], .checking(completed: 80, total: 84))
+    }
+}
+
+@MainActor
+final class LiveBackgroundPopoverTests: XCTestCase {
+    private func fixture() throws -> (AppState, StoredLiveSource, EPGRequestKey) {
+        let source = StoredLiveSource(name: "Fixture", sourceKind: .remote, rawData:
+            Data("#EXTM3U url-tvg=\"https://fixture.invalid/epg\"\n#EXTINF:-1,X\nhttps://fixture.invalid/x\n".utf8))
+        let playlist = try LiveSourceParser().parse(source.rawData)
+        let state = AppState(environment: nil)
+        state.setEPGInputsForTesting(sources: [source], playlists: [source.id: playlist])
+        let revision = try XCTUnwrap(EPGPreferences().resolvedXMLTV(for: .imported(source.id), embedded: playlist.epgURL)?.revision)
+        return (state, source, EPGRequestKey(source: .imported(source.id), revision: revision, resource: "xmltv"))
+    }
+    func testOwnedPresentationActivityOldFinallyCannotClearReplacement() throws {
+        let (state, source, key) = try fixture()
+        let a = state.beginLiveEPGLoadPresentation(key)
+        let b = state.beginLiveEPGLoadPresentation(key)
+        state.finishLiveEPGLoadPresentation(key, token: a)
+        XCTAssertEqual(state.liveBackgroundEPGPresentation(for: .imported(source.id), at: Date())?.activity, .loading)
+        state.finishLiveEPGLoadPresentation(key, token: b)
+        XCTAssertEqual(state.liveBackgroundEPGPresentation(for: .imported(source.id), at: Date())?.activity, .idle)
+    }
+    func testConfigChangeAndSleepClearPresentationActivity() async throws {
+        let (state, source, key) = try fixture()
+        _ = state.beginLiveEPGLoadPresentation(key)
+        try await state.applyEPGPreferencesForTesting(.init(automaticEPGEnabled: false))
+        XCTAssertEqual(state.liveBackgroundEPGPresentation(for: .imported(source.id), at: Date())?.activity, .idle)
+        try await state.applyEPGPreferencesForTesting(.init())
+        XCTAssertEqual(state.liveBackgroundEPGPresentation(for: .imported(source.id), at: Date())?.activity, .idle)
+        _ = state.beginLiveEPGLoadPresentation(key)
+        await state.handleSystemSleep()
+        XCTAssertEqual(state.liveBackgroundEPGPresentation(for: .imported(source.id), at: Date())?.activity, .idle)
+    }
+    func testNativeDoesNotAcquireImportedDisplayState() throws {
+        let (state, source, _) = try fixture()
+        XCTAssertNil(state.liveBackgroundEPGPresentation(for: .xtream(source.id), at: Date()))
+        XCTAssertNil(state.liveBackgroundValidationPresentation(for: .xtream(source.id)))
+    }
+    func testRepeatedReadProjectionDoesNotStartWorkOrChangeEPG() throws {
+        let (state, source, _) = try fixture()
+        let revision = state.liveEPG.revision
+        for _ in 0..<100 {
+            XCTAssertEqual(state.liveBackgroundEPGPresentation(for: .imported(source.id), at: Date())?.activity, .idle)
+            XCTAssertEqual(state.liveBackgroundValidationPresentation(for: .imported(source.id))?.phase, .idle)
+        }
+        XCTAssertEqual(state.liveEPG.revision, revision)
+        XCTAssertNil(state.liveValidationRunIDForTesting(source.id))
+        XCTAssertTrue(state.liveSourceEPGStatuses.isEmpty)
+    }
+    func testPopoverFitsLocalizedStateCombinationsWithoutInvokingStop() {
+        let source = LiveSourceID.imported(UUID()), now = Date()
+        let key = EPGRequestKey(source: source, revision: "fixture", resource: "xmltv")
+        let epg = LiveEPGPresentation(enabled: true, key: key, status: nil,
+                                      loading: true, refreshFailed: false, now: now)
+        let states: [LiveSourceValidationStatus?] = [nil, .checking(completed: 32, total: 84),
+            .processing(completed: 84, total: 84), .completed(removed: 2, total: 84),
+            .cancelled(completed: 3, total: 84), .partial(completed: 5, total: 84), .failed("SECRET_DO_NOT_DISPLAY")]
+        var stops = 0
+        for status in states {
+            for locale in ["en_US", "zh_CN"] {
+                for scheme in [ColorScheme.light, .dark] {
+                    let root = LiveBackgroundActivityDetails(sourceName: "联通 / A long source name for layout verification",
+                        epg: epg, validation: .init(status: status, runID: UUID()),
+                        catalogLoading: false, catalogFailed: true, hasCatalog: true, nativeEPGEnabled: true, stop: { _ in stops += 1 })
+                        .environment(\.locale, Locale(identifier: locale)).environment(\.colorScheme, scheme)
+                        .labelStyle(.iconOnly)
+                    let host = NSHostingView(rootView: root)
+                    XCTAssertEqual(host.fittingSize.width, 320, accuracy: 0.5)
+                    XCTAssertGreaterThan(host.fittingSize.height, 150)
+                    XCTAssertLessThan(host.fittingSize.height, 600)
+                }
+            }
+        }
+        XCTAssertEqual(stops, 0)
+    }
+}
+
+final class LiveBackgroundPresentationTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 10000)
+    private let source = LiveSourceID.imported(UUID())
+    private var key: EPGRequestKey { EPGRequestKey(source: source, revision: "A", resource: "xmltv") }
+    private func status(availability: EPGAvailability = .fresh, end: TimeInterval = 20000,
+                        empty: Bool = false, revision: String = "A",
+                        retry: TimeInterval = 30000) -> EPGRepositoryStatus {
+        let statusKey = EPGRequestKey(source: source, revision: revision, resource: "xmltv")
+        let summary: EPGResourceSummary? = availability == .failed ? nil : EPGResourceSummary(
+            key: statusKey, resourceIdentity: "fixture", sourceEpoch: revision,
+            dataVersion: "v1", programmeCount: empty ? 0 : 1, publishedAt: now,
+            coverageStart: empty ? nil : Date(timeIntervalSince1970: end - 100),
+            coverageEnd: empty ? nil : Date(timeIntervalSince1970: end))
+        return EPGRepositoryStatus(key: statusKey, availability: availability,
+            summary: summary, freshUntil: Date(timeIntervalSince1970: retry),
+            refreshDueAt: Date(timeIntervalSince1970: retry),
+            nextRetryAt: Date(timeIntervalSince1970: retry),
+            consecutiveFailures: availability == .failed ? 1 : 0)
+    }
+    private func project(_ value: EPGRepositoryStatus?, loading: Bool = false,
+                         failed: Bool = false) -> LiveEPGPresentation {
+        LiveEPGPresentation(enabled: true, key: key, status: value, loading: loading,
+                            refreshFailed: failed, now: now)
+    }
+    func testFirstLoadIsUnknownNotEmpty() {
+        let p = project(nil, loading: true)
+        XCTAssertEqual(p.activity, .loading); XCTAssertEqual(p.coverage, .unknown)
+        XCTAssertFalse(p.dataAvailable); XCTAssertFalse(p.usesCachedData)
+    }
+    func testConfiguredWaitingIsNotClaimedToBeRunning() {
+        let p = project(nil)
+        XCTAssertTrue(p.configured); XCTAssertEqual(p.activity, .idle)
+        XCTAssertEqual(p.coverage, .unknown)
+    }
+    func testFreshResultDoesNotMeanUsingOldCache() {
+        let p = project(status())
+        XCTAssertTrue(p.dataAvailable); XCTAssertFalse(p.usesCachedData)
+        XCTAssertEqual(p.freshness, .fresh)
+    }
+    func testRefreshUsesPreviousData() {
+        let p = project(status(), loading: true)
+        XCTAssertEqual(p.activity, .refreshing); XCTAssertTrue(p.usesCachedData)
+    }
+    func testStaleCoverageRemainsIndependent() {
+        let p = project(status(availability: .stale))
+        XCTAssertEqual(p.freshness, .stale); XCTAssertEqual(p.coverage, .hasUnexpiredProgrammes)
+        XCTAssertTrue(p.usesCachedData); XCTAssertFalse(p.refreshFailed)
+    }
+    func testExpiredFreshTableDoesNotBecomeFetchFailure() {
+        let p = project(status(end: 9999))
+        XCTAssertEqual(p.freshness, .fresh); XCTAssertEqual(p.coverage, .expired)
+        XCTAssertFalse(p.refreshFailed)
+    }
+    func testEndEqualsNowIsExpired() { XCTAssertEqual(project(status(end: 10000)).coverage, .expired) }
+    func testFutureOnlyTableDoesNotClaimCurrentProgramme() {
+        XCTAssertEqual(project(status(end: 20000)).coverage, .hasUnexpiredProgrammes)
+    }
+    func testEmptySuccessfulTableIsNotFailure() {
+        let p = project(status(availability: .empty, empty: true))
+        XCTAssertEqual(p.coverage, .empty); XCTAssertFalse(p.dataAvailable); XCTAssertFalse(p.refreshFailed)
+    }
+    func testFailedWithoutCacheIsNotEmpty() {
+        let p = project(status(availability: .failed, empty: true), failed: true)
+        XCTAssertEqual(p.coverage, .unknown); XCTAssertTrue(p.refreshFailed); XCTAssertFalse(p.usesCachedData)
+    }
+    func testFailedRefreshWithCacheRetainsExpiredCoverage() {
+        let p = project(status(availability: .stale, end: 9999), failed: true)
+        XCTAssertTrue(p.refreshFailed); XCTAssertTrue(p.usesCachedData); XCTAssertEqual(p.coverage, .expired)
+    }
+    func testSuccessfulRefreshClearsWarning() {
+        XCTAssertTrue(project(status(availability: .stale), failed: true).refreshFailed)
+        XCTAssertFalse(project(status()).refreshFailed)
+    }
+    func testDisabledSuppressesAllOldFacts() {
+        let p = LiveEPGPresentation(enabled: false, key: key, status: status(availability: .stale),
+                                    loading: true, refreshFailed: true, now: now)
+        XCTAssertEqual(p.activity, .idle); XCTAssertFalse(p.refreshFailed); XCTAssertFalse(p.dataAvailable)
+    }
+    func testRemovedConfigurationSuppressesOldFacts() {
+        let p = LiveEPGPresentation(enabled: true, key: nil, status: status(),
+                                    loading: true, refreshFailed: true, now: now)
+        XCTAssertFalse(p.configured); XCTAssertFalse(p.refreshFailed); XCTAssertEqual(p.coverage, .unknown)
+    }
+    func testRevisionMismatchCannotSupplyDataOrError() {
+        let p = project(status(availability: .stale, revision: "B"), failed: true)
+        XCTAssertFalse(p.dataAvailable); XCTAssertFalse(p.refreshFailed); XCTAssertEqual(p.coverage, .unknown)
+    }
+    func testSourceMismatchCannotSupplyData() {
+        let other = EPGRequestKey(source: .imported(UUID()), revision: "A", resource: "xmltv")
+        let p = LiveEPGPresentation(enabled: true, key: other, status: status(),
+                                    loading: false, refreshFailed: true, now: now)
+        XCTAssertFalse(p.dataAvailable); XCTAssertFalse(p.refreshFailed)
+    }
+    func testTTLBoundaryDoesNotImplyFetchError() {
+        let p = project(status(retry: 10000))
+        XCTAssertEqual(p.freshness, .stale); XCTAssertFalse(p.refreshFailed)
+    }
+    func testProjectionIsDeterministic() {
+        let s = status(availability: .stale, end: 9999)
+        XCTAssertEqual(project(s, loading: true), project(s, loading: true))
+    }
+    func testCheckingAtTotalIsStillRunning() {
+        let p = LiveValidationPresentation(status: .checking(completed: 84, total: 84), runID: UUID())
+        XCTAssertTrue(p.isRunning); XCTAssertTrue(p.canStop); XCTAssertEqual(p.progress, 1)
+    }
+    func testProcessingIsRunningButCannotStop() {
+        let p = LiveValidationPresentation(status: .processing(completed: 84, total: 84), runID: UUID())
+        XCTAssertTrue(p.isRunning); XCTAssertFalse(p.canStop); XCTAssertNil(p.runID)
+    }
+    func testCancellationAndPartialAreNotFailuresOrAppliedHiddenResults() {
+        for status: LiveSourceValidationStatus in [.cancelled(completed: 3, total: 84), .partial(completed: 3, total: 84)] {
+            let p = LiveValidationPresentation(status: status, runID: UUID())
+            XCTAssertFalse(p.isRunning); XCTAssertFalse(p.canStop); XCTAssertEqual(p.hiddenCandidates, 0)
+            XCTAssertEqual(LiveBackgroundIndicator(catalogLoading: false, catalogFailed: false, epg: nil, validation: p), .idle)
+        }
+    }
+    func testZeroAndInvalidCountsHaveNoNaNProgress() {
+        XCTAssertNil(LiveValidationPresentation(status: .checking(completed: 0, total: 0), runID: nil).progress)
+        XCTAssertEqual(LiveValidationPresentation(status: .checking(completed: 200, total: 84), runID: nil).progress, 1)
+    }
+    func testRunningWinsOverFailureAcrossIndependentTasks() {
+        let checking = LiveValidationPresentation(status: .checking(completed: 32, total: 84), runID: UUID())
+        let failedEPG = project(status(availability: .failed, empty: true), failed: true)
+        XCTAssertEqual(LiveBackgroundIndicator(catalogLoading: false, catalogFailed: false, epg: failedEPG, validation: checking), .active)
+        let failedValidation = LiveValidationPresentation(status: .failed("secret must not be copied"), runID: nil)
+        XCTAssertEqual(LiveBackgroundIndicator(catalogLoading: false, catalogFailed: false,
+            epg: project(status(), loading: true), validation: failedValidation), .active)
+    }
+    func testWarningOnlyWithoutCurrentWork() {
+        let failed = LiveValidationPresentation(status: .failed("failure"), runID: nil)
+        XCTAssertEqual(LiveBackgroundIndicator(catalogLoading: false, catalogFailed: false, epg: nil, validation: failed), .warning)
+        XCTAssertEqual(LiveBackgroundIndicator(catalogLoading: true, catalogFailed: true, epg: nil, validation: failed), .active)
+        XCTAssertEqual(LiveBackgroundIndicator(catalogLoading: false, catalogFailed: false,
+                                                epg: project(status(end: 9999)), validation: nil), .idle)
+    }
+}
+
+@MainActor
+final class PlaybackDisplaySleepTests: XCTestCase {
+    private final class Counter {
+        var acquired = 0
+        var released = 0
+        func acquire() -> PlaybackDisplaySleepLease {
+            acquired += 1
+            return PlaybackDisplaySleepLease { self.released += 1 }
+        }
+    }
+
+    private func video(_ status: PlayerStatus = .playing, seeking: Bool = false) -> PlayerSnapshot {
+        PlayerSnapshot(status: status, isSeeking: seeking, videoWidth: 1920, videoHeight: 1080)
+    }
+
+    func testVideoAcquiresOnceAcrossRepeatedSnapshots() {
+        let count = Counter(), id = UUID()
+        let controller = PlaybackDisplaySleepController(acquire: count.acquire)
+        controller.beginSession(id)
+        for _ in 0..<100 { controller.update(video(), requestID: id) }
+        XCTAssertTrue(controller.isPreventingDisplaySleep)
+        XCTAssertEqual(count.acquired, 1)
+        XCTAssertEqual(count.released, 0)
+    }
+
+    func testLoadingAndAudioDoNotAcquire() {
+        let count = Counter(), id = UUID()
+        let controller = PlaybackDisplaySleepController(acquire: count.acquire)
+        controller.beginSession(id)
+        controller.update(video(.loading), requestID: id)
+        controller.update(video(.buffering), requestID: id)
+        controller.update(PlayerSnapshot(status: .playing), requestID: id)
+        XCTAssertEqual(count.acquired, 0)
+    }
+
+    func testSelectedVideoTrackCanEstablishVideoBeforeDimensions() {
+        let count = Counter(), id = UUID()
+        let controller = PlaybackDisplaySleepController(acquire: count.acquire)
+        controller.beginSession(id)
+        controller.update(PlayerSnapshot(status: .playing, tracks: [
+            MediaTrack(id: 1, type: .video, title: "", isSelected: true)
+        ]), requestID: id)
+        XCTAssertEqual(count.acquired, 1)
+    }
+
+    func testPauseReleasesAndResumeReacquires() {
+        let count = Counter(), id = UUID()
+        let controller = PlaybackDisplaySleepController(acquire: count.acquire)
+        controller.beginSession(id)
+        controller.update(video(), requestID: id)
+        controller.update(video(.paused), requestID: id)
+        XCTAssertEqual(count.released, 1)
+        controller.update(video(), requestID: id)
+        XCTAssertEqual(count.acquired, 2)
+    }
+
+    func testSeekAndBufferingRetainButPausedSeekDoesNot() {
+        let count = Counter(), id = UUID()
+        let controller = PlaybackDisplaySleepController(acquire: count.acquire)
+        controller.beginSession(id)
+        controller.update(video(), requestID: id)
+        controller.update(video(seeking: true), requestID: id)
+        controller.update(video(.buffering, seeking: true), requestID: id)
+        XCTAssertEqual(count.acquired, 1)
+        XCTAssertEqual(count.released, 0)
+        controller.update(video(.paused, seeking: true), requestID: id)
+        controller.update(video(.buffering), requestID: id)
+        XCTAssertFalse(controller.isPreventingDisplaySleep)
+    }
+
+    func testUnloadedOrFailedStatusesReleaseAndRejectLatePlaying() {
+        for status: PlayerStatus in [.stopped, .failed("failure")] {
+            let count = Counter(), id = UUID()
+            let controller = PlaybackDisplaySleepController(acquire: count.acquire)
+            controller.beginSession(id)
+            controller.update(video(), requestID: id)
+            controller.update(video(status), requestID: id)
+            controller.update(video(), requestID: id)
+            XCTAssertEqual(count.acquired, 1)
+            XCTAssertEqual(count.released, 1)
+        }
+    }
+
+    func testKeepOpenEndReleasesButSeekBackCanResumeSameMedia() {
+        let count = Counter(), id = UUID()
+        let controller = PlaybackDisplaySleepController(acquire: count.acquire)
+        controller.beginSession(id)
+        controller.update(video(), requestID: id)
+        controller.update(video(.ended), requestID: id)
+        controller.playbackEnded(id)
+        XCTAssertFalse(controller.isPreventingDisplaySleep)
+        XCTAssertEqual(count.released, 1)
+        controller.update(video(seeking: true), requestID: id)
+        XCTAssertTrue(controller.isPreventingDisplaySleep)
+        XCTAssertEqual(count.acquired, 2)
+    }
+
+    func testReplacementRejectsOldSnapshotEndAndFileLoaded() {
+        let count = Counter(), old = UUID(), current = UUID()
+        let controller = PlaybackDisplaySleepController(acquire: count.acquire)
+        controller.beginSession(old)
+        controller.update(video(), requestID: old)
+        controller.beginSession(current)
+        controller.update(video(), requestID: current)
+        controller.update(video(.paused), requestID: old)
+        controller.finishSession(old)
+        controller.mediaLoaded(old)
+        controller.update(video(), requestID: old)
+        XCTAssertTrue(controller.isPreventingDisplaySleep)
+        XCTAssertEqual(count.acquired, 2)
+        XCTAssertEqual(count.released, 1)
+    }
+
+    func testRepeatedBeginDoesNotResetOrLeakAssertion() {
+        let count = Counter(), id = UUID()
+        let controller = PlaybackDisplaySleepController(acquire: count.acquire)
+        controller.beginSession(id)
+        controller.update(video(), requestID: id)
+        controller.beginSession(id)
+        XCTAssertEqual(count.acquired, 1)
+        XCTAssertEqual(count.released, 0)
+    }
+
+    func testSameRequestRetryRequiresFileLoadedBoundary() {
+        let count = Counter(), id = UUID()
+        let controller = PlaybackDisplaySleepController(acquire: count.acquire)
+        controller.beginSession(id)
+        controller.update(video(), requestID: id)
+        controller.finishSession(id)
+        controller.update(video(), requestID: id)
+        XCTAssertFalse(controller.isPreventingDisplaySleep)
+        controller.mediaLoaded(id)
+        controller.update(video(), requestID: id)
+        XCTAssertEqual(count.acquired, 2)
+    }
+
+    func testSleepReleasesAndWakeRequiresPlayingObservation() {
+        let count = Counter(), id = UUID()
+        let controller = PlaybackDisplaySleepController(acquire: count.acquire)
+        controller.beginSession(id)
+        controller.update(video(), requestID: id)
+        controller.setSuspended(true)
+        controller.update(video(), requestID: id)
+        controller.setSuspended(false)
+        XCTAssertFalse(controller.isPreventingDisplaySleep)
+        controller.update(video(.paused), requestID: id)
+        XCTAssertFalse(controller.isPreventingDisplaySleep)
+        controller.update(video(), requestID: id)
+        XCTAssertEqual(count.acquired, 2)
+    }
+
+    func testAcquisitionFailureDoesNotRetryOnEverySnapshot() {
+        var attempts = 0
+        let id = UUID()
+        let controller = PlaybackDisplaySleepController(acquire: { attempts += 1; return nil })
+        controller.beginSession(id)
+        for _ in 0..<100 { controller.update(video(), requestID: id) }
+        XCTAssertFalse(controller.isPreventingDisplaySleep)
+        XCTAssertEqual(attempts, 1)
+        controller.update(video(.paused), requestID: id)
+        controller.update(video(), requestID: id)
+        XCTAssertEqual(attempts, 2)
+    }
+
+    func testOwnerDeinitializationReleasesAssertion() {
+        let count = Counter(), id = UUID()
+        var controller: PlaybackDisplaySleepController? = PlaybackDisplaySleepController(acquire: count.acquire)
+        controller?.beginSession(id)
+        controller?.update(video(), requestID: id)
+        controller = nil
+        XCTAssertEqual(count.released, 1)
+    }
+
+    func testAppWindowDismissalReleasesAssertion() {
+        let count = Counter()
+        let controller = PlaybackDisplaySleepController(acquire: count.acquire)
+        let app = AppState(environment: nil, playbackDisplaySleep: controller)
+        app.isPlayerPresented = true
+        controller.update(video(), requestID: controller.requestID!)
+        app.isPlayerPresented = false
+        XCTAssertFalse(controller.isPreventingDisplaySleep)
+        XCTAssertEqual(count.released, 1)
+    }
+
+    func testAppSleepWakeAndShutdownDoNotReacquireFromLateEvents() async {
+        let count = Counter()
+        let controller = PlaybackDisplaySleepController(acquire: count.acquire)
+        let app = AppState(environment: nil, playbackDisplaySleep: controller)
+        app.isPlayerPresented = true
+        let id = controller.requestID!
+        controller.update(video(), requestID: id)
+        await app.handleSystemSleep()
+        XCTAssertFalse(controller.isPreventingDisplaySleep)
+        await app.handleSystemWake()
+        XCTAssertFalse(controller.isPreventingDisplaySleep)
+        controller.update(video(), requestID: id)
+        await app.shutdown()
+        controller.beginSession(UUID())
+        controller.update(video(), requestID: controller.requestID!)
+        XCTAssertFalse(controller.isPreventingDisplaySleep)
+        XCTAssertEqual(count.released, 2)
+    }
+
+    func testAppCloseReleasesBeforeAwaitedPlayerTeardown() async {
+        let count = Counter()
+        let controller = PlaybackDisplaySleepController(acquire: count.acquire)
+        let app = AppState(environment: nil, playbackDisplaySleep: controller)
+        app.isPlayerPresented = true
+        let old = controller.requestID!
+        controller.update(video(), requestID: old)
+        await app.closePlayer()
+        controller.update(video(), requestID: old)
+        XCTAssertFalse(controller.isPreventingDisplaySleep)
+        XCTAssertEqual(count.released, 1)
+    }
+
+    func testSystemAssertionCanBeAcquiredAndReleased() throws {
+        func count() throws -> Int {
+            var raw: Unmanaged<CFDictionary>?
+            XCTAssertEqual(IOPMCopyAssertionsByProcess(&raw), kIOReturnSuccess)
+            let dictionary = try XCTUnwrap(raw).takeRetainedValue() as NSDictionary
+            let assertions = dictionary[NSNumber(value: ProcessInfo.processInfo.processIdentifier)]
+                as? [[String: Any]] ?? []
+            return assertions.filter {
+                ($0[kIOPMAssertionNameKey as String] as? String) == "OKVideoMac video playback"
+            }.count
+        }
+        let before = try count()
+        var lease = PlaybackDisplaySleepLease.acquire()
+        XCTAssertNotNil(lease)
+        XCTAssertEqual(try count(), before + 1)
+        lease = nil
+        XCTAssertEqual(try count(), before)
+    }
+}
+
+private actor LiveValidationAppProbe: LiveStreamProbing {
+    let outcome: LiveStreamProbeResult
+    let delay: UInt64
+    init(_ outcome: LiveStreamProbeResult = .reachable, delay: UInt64 = 1_000_000) {
+        self.outcome = outcome; self.delay = delay
+    }
+    func probe(_ stream: LiveStream) async -> LiveStreamProbeResult {
+        do { try await Task.sleep(nanoseconds: delay) } catch { return .inconclusive }
+        return outcome
+    }
+}
+
+private actor LiveValidationAppGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var open = false
+    func wait() async {
+        guard !open else { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func release() { open = true; continuation?.resume(); continuation = nil }
+}
+
+@MainActor
+final class PlayerSeekBoundaryRegressionTests: XCTestCase {
+    func testAcceptanceAuditNeverCopiesUnknownErrorPayload() {
+        let input = Data(#"{"outcome":"completed","reads":[],"url":"https://user:SECRET_TOKEN_DO_NOT_PERSIST@example.invalid/","Cookie":"SECRET_TOKEN_DO_NOT_PERSIST"}"#.utf8)
+        let output = SeekAcceptanceHarness.sanitizedAudit(input)
+        XCTAssertNotNil(output)
+        XCTAssertFalse(String(decoding: output!, as: UTF8.self).contains("SECRET_TOKEN"))
+        XCTAssertNil(SeekAcceptanceHarness.sanitizedAudit(Data(#"{"error":"SECRET_TOKEN_DO_NOT_PERSIST"}"#.utf8)))
+    }
+    func testFailedSeekTailCannotOverwriteHistoryCheckpoint() {
+        let owner = UUID()
+        var checkpoint = PlayerHistoryProgressCheckpoint()
+        checkpoint.reset(owner: owner)
+        checkpoint.observe(PlayerSnapshot(status: .playing, position: 40, duration: 2773), owner: owner)
+        var failed = PlayerSnapshot(status: .failed("transport"), position: 2773, duration: 2773)
+        failed.historyProgressIsReliable = false
+        checkpoint.observe(failed, owner: owner)
+        XCTAssertEqual(checkpoint.resolve(position: 2773, duration: 2773, reliable: false, owner: owner)?.position, 40)
+    }
+
+    func testHistoryCheckpointRejectsOldRequestAndReplacement() {
+        let old = UUID(), current = UUID()
+        var checkpoint = PlayerHistoryProgressCheckpoint()
+        checkpoint.reset(owner: old)
+        checkpoint.observe(PlayerSnapshot(status: .playing, position: 40, duration: 1000), owner: old)
+        checkpoint.reset(owner: current)
+        checkpoint.observe(PlayerSnapshot(status: .playing, position: 999, duration: 1000), owner: old)
+        XCTAssertNil(checkpoint.resolve(position: 1000, duration: 1000, reliable: false, owner: current))
+        XCTAssertNil(checkpoint.resolve(position: 1000, duration: 1000, reliable: false, owner: old))
+    }
+
+    func testHistoryCheckpointPreservesNormalExplicitProgress() {
+        var checkpoint = PlayerHistoryProgressCheckpoint()
+        let owner = UUID(); checkpoint.reset(owner: owner)
+        XCTAssertEqual(checkpoint.resolve(position: 90, duration: 100, reliable: true, owner: owner)?.position, 90)
+        XCTAssertNil(checkpoint.resolve(position: .nan, duration: 100, reliable: true, owner: owner))
+    }
+
+    func testHistoryReliabilityAlsoProtectsAppSideFailure() {
+        XCTAssertFalse(PlayerHistoryProgressCheckpoint.isReliable(PlayerSnapshot(status: .failed("failure"), position: 100, duration: 100)))
+        XCTAssertFalse(PlayerHistoryProgressCheckpoint.isReliable(PlayerSnapshot(status: .playing, position: 80, duration: 100, isSeeking: true)))
+    }
+
+    func testSeekRestartAloneDoesNotAuthorizeHistoryTail() {
+        var guardState = PlayerPostSeekEndGuard()
+        _ = guardState.begin(requestGeneration: 7, target: 516.846)
+        guardState.markPlaybackRestart(requestGeneration: 7)
+        XCTAssertFalse(guardState.permitsHistory(PlayerSnapshot(status: .playing, position: 2773.995, duration: 2773.995), requestGeneration: 7))
+    }
+
+    func testIntentionalEndAndNaturalProgressRemainEligibleForHistory() {
+        var guardState = PlayerPostSeekEndGuard()
+        let end = PlayerSnapshot(status: .ended, position: 100, duration: 100)
+        XCTAssertTrue(guardState.permitsHistory(end, requestGeneration: 1))
+        _ = guardState.begin(requestGeneration: 1, target: 100)
+        XCTAssertTrue(guardState.permitsHistory(end, requestGeneration: 1))
+        XCTAssertFalse(guardState.permitsHistory(PlayerSnapshot(status: .failed("failure"), position: 100, duration: 100), requestGeneration: 1))
+    }
+    func testReadDiagnosticsClassifyEntryWithoutExposingLocator() {
+        let secret = "SECRET_TOKEN_DO_NOT_PERSIST"
+        XCTAssertEqual(PlayerSeekReadDiagnostics.route(URL(string: "https://user:password@example.invalid/movie?token=\(secret)")), "remote_http")
+        XCTAssertEqual(PlayerSeekReadDiagnostics.route(URL(string: "http://127.0.0.1:19978/proxy/media/\(secret)")), "bridge_session")
+        XCTAssertEqual(PlayerSeekReadDiagnostics.route(URL(string: "http://127.0.0.1:9999/\(secret)")), "loopback_http")
+        XCTAssertEqual(PlayerSeekReadDiagnostics.route(URL(fileURLWithPath: "/tmp/\(secret)")), "file")
+        XCTAssertEqual(PlayerSeekReadDiagnostics.route(nil), "unknown")
+    }
+
+    func testReadDiagnosticsShortReadOffsetsAreNumericOnly() {
+        XCTAssertEqual(PlayerSeekReadDiagnostics.warning(
+            prefix: "ffmpeg/demuxer", level: 20,
+            text: "[http @ 0x123] Stream ends prematurely at 12345, should be 67890\nhttps://user:secret@example.invalid/x?token=SECRET_TOKEN_DO_NOT_PERSIST"
+        ), "component=ffmpeg severity=error issue=short_read stream_end_offset=12345 expected_end_offset=67890")
+    }
+
+    func testReadDiagnosticsHTTPStatusDoesNotCopyResponseMessage() {
+        XCTAssertEqual(PlayerSeekReadDiagnostics.warning(
+            prefix: "ffmpeg", level: 20,
+            text: "HTTP error 403 Authorization: Bearer SECRET_TOKEN_DO_NOT_PERSIST Cookie: secret"
+        ), "component=ffmpeg severity=error issue=http_error http_status=403")
+    }
+
+    func testReadDiagnosticsUnknownWarningNeverEchoesPayloadOrPrefix() {
+        XCTAssertEqual(PlayerSeekReadDiagnostics.warning(
+            prefix: "SECRET_TOKEN_DO_NOT_PERSIST", level: 99,
+            text: "https://user:password@host.invalid/?token=secret\nCookie: secret\nAuthorization: secret"
+        ), "component=other severity=other issue=unclassified")
+    }
+
+    func testReadDiagnosticsRecognizeSeekIndexAndTransportFailures() {
+        for (text, category) in [("Failed to seek", "seek_failed"), ("not seekable", "not_seekable"),
+                                 ("moov atom not found", "missing_index"), ("Connection reset", "connection_reset"),
+                                 ("Connection timed out", "timeout"), ("Invalid data", "invalid_data")] {
+            XCTAssertTrue(PlayerSeekReadDiagnostics.warning(prefix: "demux", level: 30, text: text).hasSuffix("issue=" + category))
+        }
+    }
+
+    func testReadDiagnosticsRejectInvalidAndSecretPropertyValues() {
+        XCTAssertEqual(PlayerSeekReadDiagnostics.property("file-size", value: "12345"), "12345.000")
+        XCTAssertEqual(PlayerSeekReadDiagnostics.property("seekable", value: "yes"), "yes")
+        XCTAssertEqual(PlayerSeekReadDiagnostics.property("file-format", value: "matroska"), "matroska")
+        for value in ["SECRET_TOKEN_DO_NOT_PERSIST", "nan", "inf", String(repeating: "1", count: 300)] {
+            XCTAssertEqual(PlayerSeekReadDiagnostics.property("stream-pos", value: value), "unknown")
+        }
+        XCTAssertEqual(PlayerSeekReadDiagnostics.property("file-format", value: "SECRET_TOKEN_DO_NOT_PERSIST"), "other")
+        XCTAssertEqual(PlayerSeekReadDiagnostics.property("path", value: "123"), "unknown")
+        XCTAssertEqual(PlayerSeekReadDiagnostics.property("seekable", value: "SECRET_TOKEN_DO_NOT_PERSIST"), "unknown")
+    }
+
+    func testReadDiagnosticsNumericOverflowCannotLeakWarningBody() {
+        let result = PlayerSeekReadDiagnostics.warning(prefix: "ffmpeg", level: 30,
+            text: "Stream ends prematurely at 999999999999999999999999999, should be 123 HTTP error 403123 SECRET_TOKEN_DO_NOT_PERSIST")
+        XCTAssertEqual(result, "component=ffmpeg severity=warn issue=short_read")
+    }
+
+    func testReadDiagnosticWindowHasHardEventBudget() {
+        var window = PlayerSeekReadWindow(requestGeneration: 1, seekGeneration: 2, deadline: 20)
+        for _ in 0..<24 { XCTAssertTrue(window.consume(request: 1, seek: 2, now: 1)) }
+        XCTAssertFalse(window.consume(request: 1, seek: 2, now: 1))
+    }
+
+    func testReadDiagnosticWindowRejectsExpiredOrNonfiniteClock() {
+        var window = PlayerSeekReadWindow(requestGeneration: 1, seekGeneration: 2, deadline: 20)
+        XCTAssertFalse(window.consume(request: 1, seek: 2, now: 20))
+        XCTAssertFalse(window.consume(request: 1, seek: 2, now: .nan))
+        XCTAssertEqual(window.remaining, 24)
+    }
+
+    func testReadDiagnosticWindowRejectsReplacementAndOldSeek() {
+        var window = PlayerSeekReadWindow(requestGeneration: 2, seekGeneration: 3, deadline: 20)
+        XCTAssertFalse(window.consume(request: 1, seek: 3, now: 1))
+        XCTAssertFalse(window.consume(request: 2, seek: 2, now: 1))
+        XCTAssertTrue(window.consume(request: 2, seek: 3, now: 1))
+        XCTAssertEqual(window.remaining, 23)
+    }
+
+    func testReadDiagnosticsDoNotChangeSeekCommand() {
+        XCTAssertEqual(MPVPlayerClient.seekCommand(to: 618.624), ["seek", "618.624", "absolute+keyframes"])
+    }
+
+    private func disposition(
+        _ state: PlayerPostSeekEndGuard,
+        position: TimeInterval = 2_773,
+        keepOpen: Bool,
+        generation: UInt64 = 1
+    ) -> MPVPlaybackEndDisposition {
+        let protected = state.isProtecting(requestGeneration: generation)
+        let boundary = state.isBoundarySeek(
+            requestGeneration: generation, position: position, duration: 2_773
+        )
+        if keepOpen {
+            return MPVKeepOpenEOFPolicy.disposition(
+                signalRequestGeneration: generation,
+                currentRequestGeneration: generation,
+                ownsActiveMedia: true, isReplacingMedia: false,
+                hasStartedPlayback: true, isPausedForCache: false,
+                position: position, duration: 2_773,
+                isProtectedByUserSeek: protected,
+                isUserSeekToBoundary: boundary
+            )
+        }
+        return MPVPlaybackEndPolicy.disposition(
+            endFileReason: 0, isReplacingMedia: false,
+            hasStartedPlayback: true, isPausedForCache: false,
+            position: position, duration: 2_773,
+            isProtectedByUserSeek: protected,
+            isUserSeekToBoundary: boundary
+        )
+    }
+
+    func testMidFilePlusTenNativeEndPositionIsNotUserIntent() {
+        var state = PlayerPostSeekEndGuard()
+        _ = state.begin(requestGeneration: 1, target: 35)
+        XCTAssertFalse(state.isBoundarySeek(
+            requestGeneration: 1, position: 2_773, duration: 2_773
+        ))
+    }
+
+    func testMidFileEndFileEOFRemainsPremature() {
+        var state = PlayerPostSeekEndGuard()
+        _ = state.begin(requestGeneration: 1, target: 35)
+        XCTAssertEqual(disposition(state, keepOpen: false), .premature)
+    }
+
+    func testMidFileKeepOpenEOFRemainsPremature() {
+        var state = PlayerPostSeekEndGuard()
+        _ = state.begin(requestGeneration: 1, target: 35)
+        XCTAssertEqual(disposition(state, keepOpen: true), .premature)
+    }
+
+    func testOvershootingNativePositionCannotGrantBoundaryIntent() {
+        var state = PlayerPostSeekEndGuard()
+        _ = state.begin(requestGeneration: 1, target: 35)
+        for keepOpen in [false, true] {
+            XCTAssertEqual(disposition(state, position: 3_000, keepOpen: keepOpen), .premature)
+        }
+    }
+
+    func testExplicitNearEndTargetKeepsExistingTolerance() {
+        for target in [2_770.0, 2_773.0] {
+            var state = PlayerPostSeekEndGuard()
+            _ = state.begin(requestGeneration: 1, target: target)
+            for keepOpen in [false, true] {
+                XCTAssertEqual(disposition(state, keepOpen: keepOpen), .userSeekBoundary)
+            }
+        }
+    }
+
+    func testTargetOutsideToleranceDoesNotBecomeBoundaryAtEOF() {
+        var state = PlayerPostSeekEndGuard()
+        _ = state.begin(requestGeneration: 1, target: 2_769.999)
+        XCTAssertEqual(disposition(state, keepOpen: true), .premature)
+    }
+
+    func testNaturalCompletionWithoutSeekRemainsNatural() {
+        for keepOpen in [false, true] {
+            XCTAssertEqual(disposition(PlayerPostSeekEndGuard(), keepOpen: keepOpen), .natural)
+        }
+    }
+
+    func testRestartAndNativeJumpDoNotRemoveSeekProtection() {
+        var state = PlayerPostSeekEndGuard()
+        _ = state.begin(requestGeneration: 1, target: 35)
+        state.markPlaybackRestart(requestGeneration: 1)
+        state.observePosition(35, requestGeneration: 1, isSeeking: false)
+        state.observePosition(2_773, requestGeneration: 1, isSeeking: false)
+        XCTAssertEqual(disposition(state, keepOpen: true), .premature)
+    }
+
+    func testLatestSeekIntentWinsAndOldCancellationCannotClearIt() {
+        var state = PlayerPostSeekEndGuard()
+        let old = state.begin(requestGeneration: 1, target: 2_773)
+        _ = state.begin(requestGeneration: 1, target: 35)
+        state.cancel(requestGeneration: 1, seekGeneration: old)
+        XCTAssertEqual(state.activeTarget(requestGeneration: 1), 35)
+        XCTAssertEqual(disposition(state, keepOpen: true), .premature)
+    }
+
+    func testDiagnosticsTargetCannotLeakAcrossRequestsOrReset() {
+        var state = PlayerPostSeekEndGuard()
+        _ = state.begin(requestGeneration: 1, target: 35)
+        XCTAssertNil(state.activeTarget(requestGeneration: 2))
+        XCTAssertFalse(state.isBoundarySeek(requestGeneration: 2, position: 100, duration: 100))
+        state.reset()
+        XCTAssertNil(state.activeTarget(requestGeneration: 1))
+    }
+
+    func testInvalidTimelineCannotGrantBoundaryIntent() {
+        for target in [Double.nan, .infinity, -1] {
+            var state = PlayerPostSeekEndGuard()
+            _ = state.begin(requestGeneration: 1, target: target)
+            XCTAssertFalse(state.isBoundarySeek(requestGeneration: 1, position: 100, duration: 100))
+        }
+        var state = PlayerPostSeekEndGuard()
+        _ = state.begin(requestGeneration: 1, target: 100)
+        for duration in [0, -1, Double.nan, .infinity] {
+            XCTAssertFalse(state.isBoundarySeek(requestGeneration: 1, position: 100, duration: duration))
+        }
+    }
+
+    func testDiagnosticsAreFixedNumericFieldsIncludingUnknownValues() {
+        XCTAssertEqual(
+            PlayerSeekDiagnostics.fields(position: 25, duration: 2_773, target: 35, requested: 35, offset: 10),
+            "observed_position=25.000 observed_duration=2773.000 seek_target=35.000 requested_position=35.000 relative_offset=10.000"
+        )
+        XCTAssertEqual(
+            PlayerSeekDiagnostics.fields(position: .nan, duration: .infinity, target: nil),
+            "observed_position=nonfinite observed_duration=nonfinite seek_target=none requested_position=none relative_offset=none"
+        )
+    }
+}
+
+@MainActor
+final class LiveValidationAppTests: XCTestCase {
+    func testProductionProgressCallbackRunsBeforeMainActorCanResume() async throws {
+        let (state, _, source, playlist) = try await fixture()
+        start(state, source, playlist, delay: 50_000_000)
+        let relay = try XCTUnwrap(state.liveValidationRelayForTesting(source.id))
+        try await Task.sleep(nanoseconds: 10_000_000) // Admit the App-owned task.
+        let elapsed = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.2) { elapsed.signal() }
+        XCTAssertEqual(elapsed.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(relay.snapshot().completed, 1)
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .checking(completed: 0, total: 1))
+        try await waitUntil { state.liveValidationRunIDForTesting(source.id) == nil }
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .completed(removed: 0, total: 1))
+    }
+
+    func testCancelUsesLatestUnpublishedCountAndDoesNotBroadcastAppState() async throws {
+        let (state, db, source, playlist) = try await fixture()
+        start(state, source, playlist, delay: 5_000_000_000)
+        let relay = try XCTUnwrap(state.liveValidationRelayForTesting(source.id))
+        var appUpdates = 0
+        let observer = state.objectWillChange.sink { appUpdates += 1 }
+        relay.submit(completed: 1, total: 1)
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .checking(completed: 0, total: 1))
+        state.cancelLiveValidationForTesting(source.id)
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .cancelled(completed: 1, total: 1))
+        try await waitUntil { state.liveValidationRunIDForTesting(source.id) == nil }
+        XCTAssertEqual(appUpdates, 0)
+        let hidden = try await db.setting(forKey: "live.deletedChannels"); XCTAssertNil(hidden)
+        withExtendedLifetime(observer) {}
+    }
+
+    func testPopoverOpenReadsLatestAndDoesNotCancelOrRestartRun() async throws {
+        let (state, _, source, playlist) = try await fixture()
+        start(state, source, playlist, delay: 5_000_000_000)
+        let run = state.liveValidationRunIDForTesting(source.id)
+        let relay = try XCTUnwrap(state.liveValidationRelayForTesting(source.id))
+        relay.submit(completed: 1, total: 1)
+        state.synchronizeLiveValidationPresentation(for: .imported(source.id))
+        XCTAssertEqual(state.liveBackgroundValidationPresentation(for: .imported(source.id))?.completed, 1)
+        XCTAssertEqual(state.liveValidationRunIDForTesting(source.id), run)
+        XCTAssertTrue(state.liveValidationRelayForTesting(source.id) === relay)
+        state.synchronizeLiveValidationPresentation(for: .xtream(source.id))
+        state.cancelLiveValidationForTesting(source.id)
+        state.synchronizeLiveValidationPresentation(for: .imported(source.id))
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .cancelled(completed: 1, total: 1))
+    }
+
+    func testOldRelayAfterReplacementCannotUpdateOrRemoveNewRelay() async throws {
+        let (state, _, source, playlist) = try await fixture()
+        start(state, source, playlist, delay: 5_000_000_000)
+        let old = try XCTUnwrap(state.liveValidationRelayForTesting(source.id))
+        start(state, source, playlist, delay: 5_000_000_000)
+        let current = try XCTUnwrap(state.liveValidationRelayForTesting(source.id))
+        old.submit(completed: 1, total: 1)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertTrue(state.liveValidationRelayForTesting(source.id) === current)
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .checking(completed: 0, total: 1))
+        state.cancelLiveValidationForTesting(source.id)
+    }
+
+    func testPopoverStopIsBoundToDisplayedRunAndNeverStopsReplacement() async throws {
+        let (state, db, source, playlist) = try await fixture()
+        start(state, source, playlist, delay: 5_000_000_000)
+        let old = try XCTUnwrap(state.liveBackgroundValidationPresentation(for: .imported(source.id))?.runID)
+        start(state, source, playlist, delay: 5_000_000_000)
+        let current = try XCTUnwrap(state.liveValidationRunIDForTesting(source.id))
+        state.stopLiveBackgroundValidation(sourceID: .imported(source.id), runID: old)
+        XCTAssertEqual(state.liveValidationRunIDForTesting(source.id), current)
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .checking(completed: 0, total: 1))
+        state.stopLiveBackgroundValidation(sourceID: .imported(source.id), runID: current)
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .cancelled(completed: 0, total: 1))
+        let hidden = try await db.setting(forKey: "live.deletedChannels"); XCTAssertNil(hidden)
+    }
+    func testPopoverOldSourceActionCannotAffectNewSourceEvenIfStillVisible() async throws {
+        let (state, _, source, playlist) = try await fixture()
+        start(state, source, playlist, delay: 5_000_000_000)
+        let old = try XCTUnwrap(state.liveValidationRunIDForTesting(source.id))
+        let other = StoredLiveSource(name: "Other", sourceKind: .remote, rawData: source.rawData)
+        try state.setImportedIdentityCatalogForTesting(other)
+        state.selectImportedIdentitySource(.imported(other.id))
+        start(state, other, playlist, delay: 5_000_000_000)
+        let current = try XCTUnwrap(state.liveValidationRunIDForTesting(other.id))
+        state.stopLiveBackgroundValidation(sourceID: .imported(source.id), runID: old)
+        state.stopLiveBackgroundValidation(sourceID: .imported(other.id), runID: old)
+        state.stopLiveBackgroundValidation(sourceID: .xtream(other.id), runID: current)
+        XCTAssertEqual(state.liveValidationRunIDForTesting(other.id), current)
+        XCTAssertEqual(state.liveSourceValidationStatuses[other.id], .checking(completed: 0, total: 1))
+        state.cancelLiveValidationForTesting(other.id)
+    }
+    func testPopoverDoesNotOfferOrAcceptStopDuringProcessing() async throws {
+        let (state, _, source, playlist) = try await fixture(), gate = LiveValidationAppGate()
+        state.liveValidationBeforeWriteForTesting = { await gate.wait() }
+        start(state, source, playlist)
+        let runID = try XCTUnwrap(state.liveValidationRunIDForTesting(source.id))
+        try await waitUntil { state.liveSourceValidationStatuses[source.id] == .processing(completed: 1, total: 1) }
+        XCTAssertFalse(state.liveBackgroundValidationPresentation(for: .imported(source.id))!.canStop)
+        state.stopLiveBackgroundValidation(sourceID: .imported(source.id), runID: runID)
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .processing(completed: 1, total: 1))
+        await gate.release()
+        try await waitUntil { state.liveValidationRunIDForTesting(source.id) == nil }
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .completed(removed: 0, total: 1))
+    }
+    private func fixture() async throws -> (AppState, SQLiteStore, StoredLiveSource, LivePlaylist) {
+        let root = URL(fileURLWithPath: "/private/tmp/OKVideoMac-Validation-AppTests-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let db = try SQLiteStore(databaseURL: root.appendingPathComponent("fixture.sqlite3"))
+        let source = StoredLiveSource(name: "Test", sourceKind: .remote,
+            rawData: Data("#EXTM3U\n#EXTINF:-1 group-title=\"G\",X\nhttps://fixture.invalid/x\n".utf8))
+        try await db.saveLiveSource(source)
+        let state = AppState(environment: nil, liveReferenceStore: db)
+        try state.setImportedIdentityCatalogForTesting(source)
+        state.selectImportedIdentitySource(.imported(source.id))
+        addTeardownBlock { @MainActor in state.cancelLiveValidationForTesting(source.id) }
+        return (state, db, source, try LiveSourceParser().parse(source.rawData))
+    }
+    private func waitUntil(_ condition: () -> Bool) async throws {
+        for _ in 0..<2000 {
+            if condition() { return }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTFail("expected validation lifecycle transition did not occur")
+    }
+    private func start(_ state: AppState, _ source: StoredLiveSource, _ playlist: LivePlaylist,
+                       outcome: LiveStreamProbeResult = .reachable, delay: UInt64 = 1_000_000, budget: Double = 5) {
+        state.startLiveValidationForTesting(sourceID: source.id, playlist: playlist,
+            service: .init(prober: LiveValidationAppProbe(outcome, delay: delay), roundBudget: budget, confirmationDelay: 0))
+    }
+    func testCompletedRoundClearsItsOwnHandle() async throws {
+        let (state, _, source, playlist) = try await fixture()
+        start(state, source, playlist)
+        try await waitUntil { state.liveValidationRunIDForTesting(source.id) == nil }
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .completed(removed: 0, total: 1))
+    }
+    func testCancelledRoundImmediatelyLeavesCheckingAndDoesNotWriteHidden() async throws {
+        let (state, db, source, playlist) = try await fixture()
+        start(state, source, playlist, outcome: .definitivelyUnavailable, delay: 5_000_000_000)
+        state.cancelLiveValidationForTesting(source.id)
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .cancelled(completed: 0, total: 1))
+        try await waitUntil { state.liveValidationRunIDForTesting(source.id) == nil }
+        let hidden = try await db.setting(forKey: "live.deletedChannels"); XCTAssertNil(hidden)
+    }
+    func testProcessingIsSeparateAndCancellationBeforeWritePreventsHidden() async throws {
+        let (state, db, source, playlist) = try await fixture(), gate = LiveValidationAppGate()
+        state.liveValidationBeforeWriteForTesting = { await gate.wait() }
+        start(state, source, playlist, outcome: .definitivelyUnavailable)
+        try await waitUntil { state.liveSourceValidationStatuses[source.id] == .processing(completed: 1, total: 1) }
+        state.cancelLiveValidationForTesting(source.id)
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .cancelled(completed: 1, total: 1))
+        await gate.release()
+        try await waitUntil { state.liveValidationRunIDForTesting(source.id) == nil }
+        let hidden = try await db.setting(forKey: "live.deletedChannels"); XCTAssertNil(hidden)
+    }
+    func testOldRunFinallyCannotClearReplacementHandleOrPublishCancelled() async throws {
+        let (state, _, source, playlist) = try await fixture(), gate = LiveValidationAppGate()
+        state.liveValidationBeforeWriteForTesting = { await gate.wait() }
+        start(state, source, playlist)
+        try await waitUntil { state.liveSourceValidationStatuses[source.id] == .processing(completed: 1, total: 1) }
+        let oldID = state.liveValidationRunIDForTesting(source.id)
+        state.liveValidationBeforeWriteForTesting = nil
+        start(state, source, playlist, delay: 500_000_000)
+        let newID = state.liveValidationRunIDForTesting(source.id)
+        XCTAssertNotEqual(oldID, newID)
+        await gate.release()
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(state.liveValidationRunIDForTesting(source.id), newID)
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .checking(completed: 0, total: 1))
+        try await waitUntil { state.liveValidationRunIDForTesting(source.id) == nil }
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .completed(removed: 0, total: 1))
+    }
+    func testRoundBudgetAlsoCancelsProcessingPhaseWithoutPartialWrite() async throws {
+        let (state, db, source, playlist) = try await fixture(), gate = LiveValidationAppGate()
+        state.liveValidationBeforeWriteForTesting = { await gate.wait() }
+        start(state, source, playlist, outcome: .definitivelyUnavailable, budget: 0.15)
+        try await waitUntil { state.liveSourceValidationStatuses[source.id] == .processing(completed: 1, total: 1) }
+        try await waitUntil { state.liveSourceValidationStatuses[source.id] == .partial(completed: 1, total: 1) }
+        await gate.release()
+        try await waitUntil { state.liveValidationRunIDForTesting(source.id) == nil }
+        let hidden = try await db.setting(forKey: "live.deletedChannels"); XCTAssertNil(hidden)
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .partial(completed: 1, total: 1))
+    }
+    func testRefreshThatCannotStartDoesNotLeaveOldCheckingStatus() async throws {
+        let (state, _, source, playlist) = try await fixture()
+        start(state, source, playlist, delay: 5_000_000_000)
+        await state.refreshLiveSource(source.id) // no environment: failed admission, no real request
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .cancelled(completed: 0, total: 1))
+        try await waitUntil { state.liveValidationRunIDForTesting(source.id) == nil }
+    }
+    func testSourceSwitchCancelsOldRunWithoutStartingAnyEPGDependency() async throws {
+        let (state, _, source, playlist) = try await fixture()
+        start(state, source, playlist, delay: 5_000_000_000)
+        state.selectImportedIdentitySource(nil)
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .cancelled(completed: 0, total: 1))
+        try await waitUntil { state.liveValidationRunIDForTesting(source.id) == nil }
+    }
+    func testSleepCancelsAndDoesNotStartReplacementWhileSleeping() async throws {
+        let (state, db, source, playlist) = try await fixture()
+        start(state, source, playlist, delay: 5_000_000_000)
+        await state.handleSystemSleep()
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .cancelled(completed: 0, total: 1))
+        try await waitUntil { state.liveValidationRunIDForTesting(source.id) == nil }
+        start(state, source, playlist)
+        XCTAssertNil(state.liveValidationRunIDForTesting(source.id))
+        let hidden = try await db.setting(forKey: "live.deletedChannels"); XCTAssertNil(hidden)
+    }
+    func testResultWriteFailureHasExplicitTerminalStatus() async throws {
+        let (state, db, source, playlist) = try await fixture()
+        state.liveValidationBeforeWriteForTesting = { throw ImportedExecutionError.blocked }
+        start(state, source, playlist, outcome: .definitivelyUnavailable)
+        try await waitUntil { state.liveValidationRunIDForTesting(source.id) == nil }
+        guard case .failed = state.liveSourceValidationStatuses[source.id] else { return XCTFail("missing failure terminal") }
+        let hidden = try await db.setting(forKey: "live.deletedChannels"); XCTAssertNil(hidden)
+    }
+    func testSuccessfulConfirmedBatchAppliesOnceAndFinishes() async throws {
+        let (state, db, source, playlist) = try await fixture()
+        start(state, source, playlist, outcome: .definitivelyUnavailable)
+        try await waitUntil { state.liveValidationRunIDForTesting(source.id) == nil }
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .completed(removed: 1, total: 1))
+        let hidden = try await db.setting(forKey: "live.deletedChannels")
+        XCTAssertEqual(hidden, .array([.string(ImportedChannelMigrationPlanner.hiddenKey(sourceID: source.id, channelID: playlist.groups[0].channels[0].id))]))
+        state.cancelLiveValidationForTesting(source.id)
+        XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .completed(removed: 1, total: 1))
+    }
+}
+
+@MainActor
+final class ImportedIdentityAppTests: XCTestCase {
+    private func fixture() async throws -> (ImportedAcceptanceWorkspace, SQLiteStore, StoredLiveSource, LiveChannel) {
+        let root = URL(fileURLWithPath: "/private/tmp/OKVideoMac-8B3B-AppTest-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let w = try ImportedAcceptanceWorkspace(root: root)
+        let seed = try SQLiteStore(databaseURL: w.databaseURL)
+        let source = StoredLiveSource(name: "Test", sourceKind: .remote,
+            rawData: Data("#EXTM3U\n#EXTINF:-1 group-title=\"G\",X\nhttps://fixture.invalid/x\n".utf8))
+        try await seed.saveLiveSource(source)
+        let channel = try XCTUnwrap(LiveSourceParser().parse(source.rawData).groups.first?.channels.first)
+        try await seed.setSetting(.array([.string(ImportedChannelMigrationPlanner.hiddenKey(sourceID: source.id, channelID: channel.id))]), forKey: "live.deletedChannels")
+        let db = try SQLiteStore(importedAcceptance: w)
+        return (w, db, source, channel)
+    }
+    private func waitMapping(_ state: AppState, _ id: UUID) async throws {
+        for _ in 0..<1000 {
+            if state.importedIdentityMapping?.sourceID == id { return }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTFail("mapping did not publish")
+    }
+    func testAcceptanceBundleRequiresExplicitRootAndNormalBundleCannotOptIn() throws {
+        XCTAssertThrowsError(try AppEnvironment.acceptanceWorkspace(environment: [:], bundleIdentifier: "com.okvideomac.OKVideoMac.acceptance8b3b"))
+        XCTAssertThrowsError(try AppEnvironment.acceptanceWorkspace(environment: ["OKVIDEOMAC_8B3B_ROOT": "/private/tmp/any"], bundleIdentifier: "com.okvideomac.OKVideoMac"))
+        XCTAssertNil(try AppEnvironment.acceptanceWorkspace(environment: [:], bundleIdentifier: "com.okvideomac.OKVideoMac"))
+    }
+    func testDeletingBarrierRevokesMappingAndRejectsNewSelectionUntilCommit() async throws {
+        let (_, db, source, channel) = try await fixture()
+        let state = AppState(environment: nil, liveReferenceStore: db)
+        try state.setImportedIdentityCatalogForTesting(source)
+        state.selectImportedIdentitySource(.imported(source.id)); try await waitMapping(state, source.id)
+        let old = try XCTUnwrap(state.importedIdentityMapping)
+        state.importedRetirementBeforeTransactionForTesting = {
+            XCTAssertFalse(old.generation.isCurrent)
+            XCTAssertNil(state.importedIdentityMapping)
+            state.selectImportedIdentitySource(.imported(source.id))
+            XCTAssertNil(state.importedIdentityMapping)
+            await state.restoreDeletedLiveChannel(sourceID: source.id, channel: channel)
+            XCTAssertNil(state.importedIdentityMapping)
+            await state.refreshLiveSource(source.id)
+        }
+        await state.deleteLiveSource(source.id)
+        XCTAssertFalse(state.liveSources.contains { $0.id == source.id })
+        XCTAssertNil(state.liveCatalog(for: .imported(source.id)))
+        XCTAssertNil(old.value(channel: channel, kind: .hidden))
+        let rows = try await db.liveSources(); XCTAssertTrue(rows.isEmpty)
+        state.selectImportedIdentitySource(.imported(source.id))
+        XCTAssertNil(state.importedIdentityMapping)
+    }
+    func testRetirementCancelsValidationBeforeTransactionAndLateResultCannotReviveIt() async throws {
+        let (_, db, source, _) = try await fixture()
+        let state = AppState(environment: nil, liveReferenceStore: db)
+        try state.setImportedIdentityCatalogForTesting(source)
+        state.selectImportedIdentitySource(.imported(source.id)); try await waitMapping(state, source.id)
+        let old = try XCTUnwrap(state.importedIdentityMapping)
+        state.startLiveValidationForTesting(sourceID: source.id, playlist: try LiveSourceParser().parse(source.rawData),
+            service: .init(prober: LiveValidationAppProbe(.definitivelyUnavailable, delay: 5_000_000_000)))
+        state.importedRetirementBeforeTransactionForTesting = {
+            XCTAssertEqual(state.liveSourceValidationStatuses[source.id], .cancelled(completed: 0, total: 1))
+            XCTAssertFalse(old.generation.isCurrent)
+        }
+        await state.deleteLiveSource(source.id)
+        for _ in 0..<1000 where state.liveValidationRunIDForTesting(source.id) != nil {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertNil(state.liveValidationRunIDForTesting(source.id))
+        XCTAssertNil(state.liveSourceValidationStatuses[source.id])
+        XCTAssertNil(state.importedIdentityMapping)
+        let sources = try await db.liveSources(); XCTAssertTrue(sources.isEmpty)
+        let identities = try await db.importedChannelIdentities(for: .imported(source.id))
+        XCTAssertTrue(identities.allSatisfy { $0.lifecycle == .retired })
+    }
+    func testDeleteFailureKeepsSourceAndBuildsNewCapabilityNotOldOne() async throws {
+        let (_, db, source, channel) = try await fixture()
+        let state = AppState(environment: nil, liveReferenceStore: db)
+        try state.setImportedIdentityCatalogForTesting(source)
+        state.selectImportedIdentitySource(.imported(source.id)); try await waitMapping(state, source.id)
+        let old = try XCTUnwrap(state.importedIdentityMapping)
+        state.importedRetirementBeforeTransactionForTesting = { throw ImportedExecutionError.blocked }
+        await state.deleteLiveSource(source.id)
+        let replacement = try XCTUnwrap(state.importedIdentityMapping)
+        XCTAssertFalse(old.generation.isCurrent)
+        XCTAssertTrue(replacement.generation.isCurrent)
+        XCTAssertFalse(old.generation === replacement.generation)
+        XCTAssertTrue(state.liveSources.contains { $0.id == source.id })
+        XCTAssertTrue(state.isLiveChannelDeleted(sourceID: source.id, channel: channel))
+        state.importedRetirementBeforeTransactionForTesting = nil
+        await state.deleteLiveSource(source.id)
+        XCTAssertFalse(replacement.generation.isCurrent)
+        XCTAssertFalse(state.liveSources.contains { $0.id == source.id })
+    }
+    func testDeleteFailureDoesNotOverwriteConcurrentSwitchToB() async throws {
+        let (_, db, a, _) = try await fixture()
+        let b = StoredLiveSource(name: "B", sourceKind: a.sourceKind, rawData: a.rawData)
+        try await db.createLiveSource(b)
+        let state = AppState(environment: nil, liveReferenceStore: db)
+        try state.setImportedIdentityCatalogForTesting(a); try state.setImportedIdentityCatalogForTesting(b)
+        state.selectImportedIdentitySource(.imported(a.id)); try await waitMapping(state, a.id)
+        let old = try XCTUnwrap(state.importedIdentityMapping)
+        state.importedRetirementBeforeTransactionForTesting = {
+            state.selectImportedIdentitySource(.imported(b.id))
+            try await self.waitMapping(state, b.id)
+            throw ImportedExecutionError.blocked
+        }
+        await state.deleteLiveSource(a.id)
+        XCTAssertFalse(old.generation.isCurrent)
+        XCTAssertEqual(state.importedIdentityMapping?.sourceID, b.id)
+        XCTAssertTrue(state.liveSources.contains { $0.id == a.id })
+    }
+    func testAppDeleteRestartReaddKeepsOldHiddenHistoricalOnly() async throws {
+        let (w, db, source, channel) = try await fixture()
+        let state = AppState(environment: nil, liveReferenceStore: db)
+        try state.setImportedIdentityCatalogForTesting(source)
+        state.selectImportedIdentitySource(.imported(source.id)); try await waitMapping(state, source.id)
+        await state.deleteLiveSource(source.id)
+        let reopened = try SQLiteStore(importedAcceptance: w)
+        let added = StoredLiveSource(name: source.name, sourceKind: source.sourceKind, sourceValue: source.sourceValue, rawData: source.rawData)
+        try await reopened.createLiveSource(added)
+        let restarted = AppState(environment: nil, liveReferenceStore: reopened)
+        try restarted.setImportedIdentityCatalogForTesting(added)
+        restarted.selectImportedIdentitySource(.imported(added.id)); try await waitMapping(restarted, added.id)
+        XCTAssertFalse(restarted.isLiveChannelDeleted(sourceID: added.id, channel: channel))
+        let old = try await reopened.importedChannelIdentities(for: .imported(source.id))
+        XCTAssertEqual(old.count, 1); XCTAssertEqual(old.first?.lifecycle, .retired)
+        let rows = try await reopened.liveSources(); XCTAssertEqual(rows.map(\.id), [added.id])
+    }
+    func testAppUnhideRestartNeverReadsClaimedLegacyAgain() async throws {
+        let (w, db, source, channel) = try await fixture()
+        let state = AppState(environment: nil, liveReferenceStore: db)
+        try state.setImportedIdentityCatalogForTesting(source)
+        state.selectImportedIdentitySource(.imported(source.id)); try await waitMapping(state, source.id)
+        XCTAssertTrue(state.isLiveChannelDeleted(sourceID: source.id, channel: channel))
+        await state.restoreDeletedLiveChannel(sourceID: source.id, channel: channel)
+        XCTAssertFalse(state.isLiveChannelDeleted(sourceID: source.id, channel: channel))
+        let restarted = AppState(environment: nil, liveReferenceStore: try SQLiteStore(importedAcceptance: w))
+        try restarted.setImportedIdentityCatalogForTesting(source)
+        restarted.selectImportedIdentitySource(.imported(source.id)); try await waitMapping(restarted, source.id)
+        XCTAssertFalse(restarted.isLiveChannelDeleted(sourceID: source.id, channel: channel))
+        XCTAssertEqual(state.importedIdentityMapping?.authority(channel: channel, kind: .hidden), restarted.importedIdentityMapping?.authority(channel: channel, kind: .hidden))
+    }
+    func testUnresolvedPresentationIsLoadingNotAllChannelsDeleted() async throws {
+        let (_, db, source, _) = try await fixture()
+        let state = AppState(environment: nil, liveReferenceStore: db)
+        try state.setImportedIdentityCatalogForTesting(source)
+        state.selectImportedIdentitySource(.imported(source.id))
+        XCTAssertNotNil(state.liveCatalog(for: .imported(source.id)))
+        XCTAssertNil(state.presentedLiveCatalog(for: .imported(source.id)))
+        XCTAssertTrue(state.isLiveCatalogLoading(.imported(source.id)))
+        try await waitMapping(state, source.id)
+        XCTAssertNotNil(state.presentedLiveCatalog(for: .imported(source.id)))
+        XCTAssertFalse(state.isLiveCatalogLoading(.imported(source.id)))
+    }
+    func testAppSourceSwitchInvalidatesOldMappingAndAuthority() async throws {
+        let (_, db, source, channel) = try await fixture()
+        let state = AppState(environment: nil, liveReferenceStore: db)
+        try state.setImportedIdentityCatalogForTesting(source)
+        state.selectImportedIdentitySource(.imported(source.id)); try await waitMapping(state, source.id)
+        let old = try XCTUnwrap(state.importedIdentityMapping)
+        state.selectImportedIdentitySource(.xtream(UUID()))
+        XCTAssertNil(state.importedIdentityMapping)
+        XCTAssertEqual(old.authority(channel: channel, kind: .hidden), .blocked)
+        await state.restoreDeletedLiveChannel(sourceID: source.id, channel: channel)
+        state.selectImportedIdentitySource(.imported(source.id)); try await waitMapping(state, source.id)
+        XCTAssertTrue(state.isLiveChannelDeleted(sourceID: source.id, channel: channel))
+    }
+    func testAppBulkRestoreUsesStableAuthorityAndRetainsLegacy() async throws {
+        let (_, db, source, channel) = try await fixture()
+        let state = AppState(environment: nil, liveReferenceStore: db)
+        try state.setImportedIdentityCatalogForTesting(source)
+        state.selectImportedIdentitySource(.imported(source.id)); try await waitMapping(state, source.id)
+        await state.restoreAllDeletedLiveChannels(sourceID: source.id)
+        XCTAssertFalse(state.isLiveChannelDeleted(sourceID: source.id, channel: channel))
+        let legacy = try await db.setting(forKey: "live.deletedChannels")
+        XCTAssertEqual(legacy, .array([.string(ImportedChannelMigrationPlanner.hiddenKey(sourceID: source.id, channelID: channel.id))]))
+    }
+    func testAppHideAndFavoriteWritesHaveSameAuthorityAsReads() async throws {
+        let (_, db, source, channel) = try await fixture()
+        let state = AppState(environment: nil, liveReferenceStore: db)
+        try state.setImportedIdentityCatalogForTesting(source)
+        state.selectImportedIdentitySource(.imported(source.id)); try await waitMapping(state, source.id)
+        await state.restoreDeletedLiveChannel(sourceID: source.id, channel: channel)
+        await state.toggleLiveFavorite(sourceID: .imported(source.id), channel: channel)
+        XCTAssertTrue(state.isLiveFavorite(sourceID: .imported(source.id), channel: channel))
+        await state.deleteLiveChannel(sourceID: source.id, sourceName: source.name, channel: channel)
+        XCTAssertTrue(state.isLiveChannelDeleted(sourceID: source.id, channel: channel))
+        XCTAssertFalse(state.isLiveFavorite(sourceID: .imported(source.id), channel: channel))
+    }
+}
+
+@MainActor
+final class NativeProgressPresentationTests: XCTestCase {
+    func testHistoryUnknownDurationHidesProgress() {
+        XCTAssertNil(HistoryView.displayedProgress(position: 10, duration: 0))
+        XCTAssertNil(HistoryView.displayedProgress(position: 10, duration: -1))
+    }
+
+    func testHistoryZeroProgressRemainsVisible() {
+        XCTAssertEqual(HistoryView.displayedProgress(position: 0, duration: 100), 0)
+    }
+
+    func testHistoryPartialProgressIsPositionOverDuration() {
+        XCTAssertEqual(HistoryView.displayedProgress(position: 25, duration: 100), 0.25)
+    }
+
+    func testHistoryCompletedProgressIsOne() {
+        XCTAssertEqual(HistoryView.displayedProgress(position: 100, duration: 100), 1)
+    }
+
+    func testHistoryOverrunClampsToOne() {
+        XCTAssertEqual(HistoryView.displayedProgress(position: 120, duration: 100), 1)
+    }
+
+    func testHistoryNegativePositionClampsToZero() {
+        XCTAssertEqual(HistoryView.displayedProgress(position: -10, duration: 100), 0)
+    }
+
+    func testLiveNativeProgressFitsNarrowAndWideLocalizedLayouts() {
+        let channel = LiveChannel(groupName: "Fixture", name: "CCTV-1", tvgID: "1", streams: [])
+        let source = LiveSourceID.imported(UUID())
+        let now = Date()
+        for availability in [EPGAvailability.fresh, .stale] {
+            let epg = LiveEPGState()
+            let generation = epg.prepare(source: source, revision: "fixture")
+            let demand = UUID(), incarnation = UUID()
+            let batch = EPGNowNextBatch(
+                token: EPGResultToken(serviceIncarnation: incarnation,
+                    resourceIdentity: "fixture", sourceEpoch: "fixture",
+                    dataVersion: "v1", demandRevision: demand),
+                items: [EPGNowNextItem(match: .init(kind: .exact, channelID: "1"),
+                    current: EPGProgramme(channelID: "1", title: "Programme / 当前节目",
+                        start: now.addingTimeInterval(-600), end: now.addingTimeInterval(600)),
+                    next: EPGProgramme(channelID: "1", title: "Next / 下一节目",
+                        start: now.addingTimeInterval(600), end: now.addingTimeInterval(1200)))],
+                availability: availability)
+            XCTAssertTrue(epg.publish(batch, channels: [channel], source: source,
+                revision: "fixture", generation: generation, demandRevision: demand,
+                serviceIncarnation: incarnation))
+            for width in [CGFloat(238), CGFloat(340)] {
+                for locale in ["zh_CN@hours=h23", "en_US@hours=h12"] {
+                    for scheme in [ColorScheme.light, .dark] {
+                        let view = NSHostingView(rootView: LiveNowNextView(epg: epg, channel: channel, source: source)
+                            .environment(\.locale, Locale(identifier: locale))
+                            .environment(\.colorScheme, scheme)
+                            .frame(width: width))
+                        let size = view.fittingSize
+                        XCTAssertEqual(size.width, width, accuracy: 0.5)
+                        XCTAssertGreaterThan(size.height, 0)
+                        XCTAssertLessThan(size.height, 150)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@MainActor
+final class ImportedEPGCoverageTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1000)
+    private let channel = LiveChannel(groupName: "Fixture", name: "Channel", tvgID: "1", streams: [])
+    private func snapshot(_ programmes: [EPGProgramme], availability: EPGAvailability = .fresh,
+                          fetchedAt: Date? = nil) -> EPGSnapshot {
+        EPGSnapshot(key: EPGRequestKey(source: .imported(UUID()), revision: "fixture", resource: "xmltv"),
+            availability: availability, fetchedAt: fetchedAt ?? now, retryAfter: now.addingTimeInterval(3600),
+            guide: XMLTVGuide(channels: [], programmes: programmes))
+    }
+    private func programme(_ start: TimeInterval, _ end: TimeInterval, title: String = "Fixture") -> EPGProgramme {
+        EPGProgramme(channelID: "1", title: title, start: now.addingTimeInterval(start), end: now.addingTimeInterval(end))
+    }
+    private func status(_ snapshot: EPGSnapshot) -> LiveSourceEPGStatus {
+        let summary = snapshot.availability == .failed ? nil : EPGResourceSummary(
+            key: snapshot.key, resourceIdentity: "fixture", sourceEpoch: "fixture",
+            dataVersion: "v1", programmeCount: snapshot.programmeCount,
+            publishedAt: snapshot.fetchedAt ?? now, coverageStart: nil,
+            coverageEnd: snapshot.xmltvMaxProgrammeEnd)
+        let repositoryStatus = EPGRepositoryStatus(
+            key: snapshot.key, availability: snapshot.availability, summary: summary,
+            freshUntil: snapshot.retryAfter, refreshDueAt: snapshot.retryAfter,
+            nextRetryAt: snapshot.retryAfter,
+            consecutiveFailures: snapshot.availability == .failed ? 1 : 0)
+        return LiveSourceEPGStatus(status: repositoryStatus,
+                                   failureMessage: "Existing refresh failure")
+    }
+
+    func testFreshCurrentTableIsLoaded() {
+        let value = snapshot([programme(-60, 60)])
+        XCTAssertEqual(status(value).presentation(at: now), .loaded)
+        XCTAssertEqual(value.availability, .fresh)
+    }
+
+    func testFreshFetchOfYesterdayTableIsExpiredNotCacheStale() {
+        let value = snapshot([programme(-120, -1)])
+        XCTAssertEqual(status(value).presentation(at: now), .expired)
+        XCTAssertEqual(value.availability, .fresh)
+        XCTAssertNil(value.nowNext(for: channel, at: now).current)
+        XCTAssertNil(value.nowNext(for: channel, at: now).next)
+    }
+
+    func testStaleCacheWithCurrentProgrammeRemainsLoadedWithoutFailure() {
+        let value = snapshot([programme(-60, 60)], availability: .stale)
+        XCTAssertEqual(status(value).presentation(at: now), .loaded)
+        XCTAssertGreaterThan(value.xmltvMaxProgrammeEnd!, now)
+        XCTAssertNotNil(value.nowNext(for: channel, at: now).current)
+        XCTAssertEqual(value.availability, .stale)
+    }
+
+    func testEmptyParsedTableHasNoData() {
+        let value = snapshot([], availability: .empty)
+        XCTAssertEqual(status(value).presentation(at: now), .empty)
+        XCTAssertEqual(value.programmeCount, 0)
+    }
+
+    func testEndEqualsNowIsExpiredAndNotCurrent() {
+        let value = snapshot([programme(-60, 0)])
+        XCTAssertEqual(status(value).presentation(at: now), .expired)
+        XCTAssertNil(value.nowNext(for: channel, at: now).current)
+        XCTAssertNil(value.nowNext(for: channel, at: now).next)
+    }
+
+    func testXMLTVPlus0800MidnightBoundary() throws {
+        let xml = #"<tv><programme channel="1" start="20260910231000 +0800" stop="20260910235900 +0800"><title>Yesterday</title></programme></tv>"#
+        let guide = try XMLTVParser().parse(Data(xml.utf8))
+        let end = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-10T23:59:00+08:00"))
+        let fetched = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-11T00:08:29+08:00"))
+        let value = snapshot(guide.programmes, fetchedAt: fetched)
+        XCTAssertEqual(value.xmltvMaxProgrammeEnd, end)
+        XCTAssertEqual(status(value).presentation(at: end.addingTimeInterval(-1)), .loaded)
+        XCTAssertEqual(status(value).presentation(at: end), .expired)
+        XCTAssertEqual(status(value).presentation(at: fetched), .expired)
+    }
+
+    func testNewDayProgrammeReplacesExpiredPresentation() {
+        XCTAssertEqual(status(snapshot([programme(-120, -60)])).presentation(at: now), .expired)
+        XCTAssertEqual(status(snapshot([programme(-30, 120)])).presentation(at: now), .loaded)
+    }
+
+    func testEmbeddedPlutoFixtureUsesSameLoadedClassification() throws {
+        let playlist = try LiveSourceParser().parse("#EXTM3U url-tvg=\"https://fixture.invalid/pluto.xml\"\n#EXTINF:-1 tvg-id=\"1\",Fixture\nhttps://fixture.invalid/live.m3u8")
+        let resolved = try XCTUnwrap(EPGPreferences(defaultEPGURL: "https://fixture.invalid/global.xml")
+            .resolvedXMLTV(for: .imported(UUID()), embedded: playlist.epgURL))
+        XCTAssertEqual(resolved.origin, .embedded)
+        XCTAssertEqual(status(snapshot([programme(-60, 60)])).presentation(at: now), .loaded)
+    }
+
+    func testPresentationDoesNotChangeNowNextOrRequireChannelMatching() {
+        let value = snapshot([programme(-60, 60, title: "Now"), programme(60, 120, title: "Next")])
+        let before = value.nowNext(for: channel, at: now)
+        _ = status(value).presentation(at: now)
+        _ = status(value).presentation(at: now.addingTimeInterval(300))
+        XCTAssertEqual(value.nowNext(for: channel, at: now), before)
+        XCTAssertEqual(before.current?.title, "Now")
+        XCTAssertEqual(before.next?.title, "Next")
+        let unknown = LiveChannel(groupName: "Fixture", name: "Unknown", tvgID: "missing", streams: [])
+        XCTAssertNil(value.nowNext(for: unknown, at: now).current)
+        XCTAssertEqual(status(value).presentation(at: now), .loaded)
+    }
+
+    func testExistingClockBoundaryAndWakeRecomputeWithoutNewSnapshot() {
+        let loaded = status(snapshot([programme(-60, 17)]))
+        let entries = Array(EPGTimelineSchedule(boundaries: [loaded.programmeBoundary!])
+            .entries(from: now, mode: .normal).prefix(3))
+        XCTAssertEqual(entries, [now, now.addingTimeInterval(15), now.addingTimeInterval(17)])
+        XCTAssertEqual(loaded.presentation(at: entries[1]), .loaded)
+        let clock = LiveEPGState()
+        clock.tick() // Existing activation/wake signal, without requests or new data.
+        XCTAssertEqual(loaded.presentation(at: now.addingTimeInterval(120)), .expired)
+    }
+
+    func testFutureOnlyTableIsLoadedWithoutInventingCurrentProgramme() {
+        let value = snapshot([programme(60, 120)])
+        XCTAssertEqual(status(value).presentation(at: now), .loaded)
+        XCTAssertNil(value.nowNext(for: channel, at: now).current)
+        XCTAssertNotNil(value.nowNext(for: channel, at: now).next)
+    }
+
+    func testDownloadFailureIsNotMisreportedAsEmptyOrExpired() {
+        for programmes in [[], [programme(-60, -1)]] {
+            let value = snapshot(programmes, availability: .failed)
+            XCTAssertEqual(status(value).presentation(at: now), .failed("Existing refresh failure"))
+        }
+    }
+}
+
+@MainActor
+final class EPGIntegrationTests: XCTestCase {
+    private struct Publication {
+        let source: LiveSourceID
+        let revision: String
+        let channel: LiveChannel
+        let batch: EPGNowNextBatch
+        let demandRevision: UUID
+        let serviceIncarnation: UUID
+    }
+
+    private func publication(
+        source: LiveSourceID,
+        revision: String,
+        resource: String = "xmltv",
+        resourceIdentity: String? = nil,
+        sourceEpoch: String? = nil,
+        dataVersion: String = "v1",
+        current: EPGProgramme? = nil,
+        next: EPGProgramme? = nil,
+        availability: EPGAvailability = .empty
+    ) -> Publication {
+        let channel = LiveChannel(
+            groupName: "Fixture",
+            name: "Channel \(resource)",
+            tvgID: resource,
+            streams: []
+        )
+        let demand = UUID()
+        let incarnation = UUID()
+        let token = EPGResultToken(
+            serviceIncarnation: incarnation,
+            resourceIdentity: resourceIdentity ?? "\(source)-\(resource)",
+            sourceEpoch: sourceEpoch ?? revision,
+            dataVersion: dataVersion,
+            demandRevision: demand
+        )
+        return Publication(
+            source: source,
+            revision: revision,
+            channel: channel,
+            batch: EPGNowNextBatch(
+                token: token,
+                items: [EPGNowNextItem(
+                    match: .init(kind: .exact, channelID: resource),
+                    current: current,
+                    next: next
+                )],
+                availability: availability
+            ),
+            demandRevision: demand,
+            serviceIncarnation: incarnation
+        )
+    }
+
+    @discardableResult
+    private func publish(
+        _ value: Publication,
+        to state: LiveEPGState,
+        generation: UUID,
+        demandRevision: UUID? = nil,
+        serviceIncarnation: UUID? = nil
+    ) -> Bool {
+        state.publish(
+            value.batch,
+            channels: [value.channel],
+            source: value.source,
+            revision: value.revision,
+            generation: generation,
+            demandRevision: demandRevision ?? value.demandRevision,
+            serviceIncarnation: serviceIncarnation ?? value.serviceIncarnation
+        )
+    }
+
+    func testRevisionChangeAndProviderRemovalRejectLatePublication() {
+        let source = LiveSourceID.xtream(UUID())
+        let state = LiveEPGState()
+        let oldGeneration = state.prepare(source: source, revision: "old")
+        let old = publication(source: source, revision: "old")
+        let generation = state.prepare(source: source, revision: "new")
+        XCTAssertFalse(publish(old, to: state, generation: oldGeneration))
+        XCTAssertTrue(state.isEmpty)
+
+        let current = publication(source: source, revision: "new")
+        XCTAssertTrue(publish(current, to: state, generation: generation))
+        XCTAssertFalse(state.isEmpty)
+        state.removeNativeSources()
+        XCTAssertFalse(publish(current, to: state, generation: generation))
+        XCTAssertTrue(state.isEmpty)
+    }
+
+    func testImportedAndNativeSameUUIDRemainIsolated() {
+        let id = UUID()
+        let state = LiveEPGState()
+        let imported = publication(source: .imported(id), revision: "r", resource: "imported")
+        let native = publication(source: .xtream(id), revision: "r", resource: "native")
+        let importedGeneration = state.prepare(source: imported.source, revision: "r")
+        let nativeGeneration = state.prepare(source: native.source, revision: "r")
+        XCTAssertTrue(publish(imported, to: state, generation: importedGeneration))
+        XCTAssertTrue(publish(native, to: state, generation: nativeGeneration))
+
+        state.removeNativeSources()
+        XCTAssertTrue(state.containsForTesting(source: imported.source, channel: imported.channel))
+        XCTAssertFalse(state.containsForTesting(source: native.source, channel: native.channel))
+
+        state.remove(imported.source)
+        XCTAssertFalse(publish(imported, to: state, generation: importedGeneration))
+        XCTAssertTrue(state.isEmpty)
+    }
+
+    func testClockIncludesProgrammeBoundaryWithoutOneSecondPolling() {
+        let start = Date(timeIntervalSince1970: 1000)
+        let boundary = start.addingTimeInterval(17)
+        let dates = Array(EPGTimelineSchedule(boundaries: [boundary])
+            .entries(from: start, mode: .normal).prefix(4))
+        XCTAssertEqual(dates, [start, start.addingTimeInterval(15), boundary,
+                               boundary.addingTimeInterval(15)])
+    }
+
+    func testFiniteNowNextPromotesNextAfterWakeAndExposesRequeryBoundary() {
+        let start = Date(timeIntervalSince1970: 1000)
+        let source = LiveSourceID.imported(UUID())
+        let current = EPGProgramme(channelID: "1", title: "Programme 0",
+            start: start, end: start.addingTimeInterval(60))
+        let next = EPGProgramme(channelID: "1", title: "Programme 1",
+            start: start.addingTimeInterval(60), end: start.addingTimeInterval(120))
+        let value = publication(source: source, revision: "r", resource: "1",
+                                current: current, next: next, availability: .fresh)
+        let state = LiveEPGState()
+        let generation = state.prepare(source: source, revision: "r")
+        XCTAssertTrue(publish(value, to: state, generation: generation))
+        XCTAssertEqual(state.nextBoundary(after: start), start.addingTimeInterval(60))
+        XCTAssertEqual(state.nowNext(channel: value.channel, source: source, at: start).current?.title,
+                       "Programme 0")
+        let wake = state.nowNext(channel: value.channel, source: source,
+                                 at: start.addingTimeInterval(90))
+        XCTAssertEqual(wake.current?.title, "Programme 1")
+        XCTAssertNil(wake.next)
+        XCTAssertEqual(wake.progress(at: start.addingTimeInterval(90)), 0.5)
+        XCTAssertNil(state.nowNext(channel: value.channel, source: source,
+                                   at: start.addingTimeInterval(400)).current)
+    }
+
+    func testResultCountIsBoundedToVisibleDemandBudget() {
+        let source = LiveSourceID.xtream(UUID())
+        let state = LiveEPGState()
+        let generation = state.prepare(source: source, revision: "r")
+        var values: [Publication] = []
+        for id in 0..<120 {
+            let value = publication(source: source, revision: "r", resource: String(id))
+            values.append(value)
+            XCTAssertTrue(publish(value, to: state, generation: generation))
+        }
+        XCTAssertEqual(state.storedResultCountForTesting, 100)
+        XCTAssertFalse(state.containsForTesting(source: source, channel: values[0].channel))
+        XCTAssertTrue(state.containsForTesting(source: source, channel: values[119].channel))
+    }
+
+    func testUnifiedTokenRejectsWrongDemandAndServiceIncarnation() {
+        let source = LiveSourceID.imported(UUID())
+        let state = LiveEPGState()
+        let generation = state.prepare(source: source, revision: "r")
+        let value = publication(source: source, revision: "r")
+        XCTAssertFalse(publish(value, to: state, generation: generation,
+                               demandRevision: UUID()))
+        XCTAssertFalse(publish(value, to: state, generation: generation,
+                               serviceIncarnation: UUID()))
+        XCTAssertTrue(state.isEmpty)
+        XCTAssertTrue(publish(value, to: state, generation: generation))
+    }
+
+    func testNewDataVersionAtomicallyReplacesOldResourceResults() {
+        let source = LiveSourceID.imported(UUID())
+        let state = LiveEPGState()
+        let generation = state.prepare(source: source, revision: "r")
+        let old = publication(source: source, revision: "r", resource: "old-channel",
+                              resourceIdentity: "guide", dataVersion: "v1")
+        let new = publication(source: source, revision: "r", resource: "new-channel",
+                              resourceIdentity: "guide", dataVersion: "v2")
+        XCTAssertTrue(publish(old, to: state, generation: generation))
+        XCTAssertTrue(publish(new, to: state, generation: generation))
+        XCTAssertFalse(state.containsForTesting(source: source, channel: old.channel))
+        XCTAssertTrue(state.containsForTesting(source: source, channel: new.channel))
+    }
+
+    func testURLAToBToARejectsOriginalPresentationGeneration() async throws {
+        let app = AppState(environment: nil)
+        let source = StoredLiveSource(name: "Fixture", sourceKind: .pasted, rawData: Data())
+        app.setEPGInputsForTesting(
+            sources: [source],
+            playlists: [source.id: LivePlaylist(format: .m3u, groups: [])]
+        )
+        let a = EPGPreferences(defaultEPGURL: "https://example.invalid/a.xml")
+        let b = EPGPreferences(defaultEPGURL: "https://example.invalid/b.xml")
+        try await app.applyEPGPreferencesForTesting(a)
+        let id = LiveSourceID.imported(source.id)
+        let revision = try XCTUnwrap(a.resolvedXMLTV(for: id, embedded: nil)).revision
+        let first = app.liveEPG.prepare(source: id, revision: revision)
+        let value = publication(source: id, revision: revision)
+        XCTAssertTrue(publish(value, to: app.liveEPG, generation: first))
+        try await app.applyEPGPreferencesForTesting(b)
+        XCTAssertTrue(app.liveEPG.isEmpty)
+        try await app.applyEPGPreferencesForTesting(a)
+        let latest = app.liveEPG.prepare(source: id, revision: revision)
+        XCTAssertNotEqual(first, latest)
+        XCTAssertFalse(publish(value, to: app.liveEPG, generation: first))
+        XCTAssertTrue(publish(value, to: app.liveEPG, generation: latest))
+    }
+
+    func testMasterOffOnClearsImportedAndNativeAndRejectsOldGeneration() async throws {
+        let app = AppState(environment: nil)
+        let id = UUID()
+        let imported = publication(source: .imported(id), revision: "same", resource: "i")
+        let native = publication(source: .xtream(id), revision: "same", resource: "n")
+        let importedGeneration = app.liveEPG.prepare(source: imported.source, revision: "same")
+        let nativeGeneration = app.liveEPG.prepare(source: native.source, revision: "same")
+        XCTAssertTrue(publish(imported, to: app.liveEPG, generation: importedGeneration))
+        XCTAssertTrue(publish(native, to: app.liveEPG, generation: nativeGeneration))
+        try await app.applyEPGPreferencesForTesting(
+            EPGPreferences(automaticEPGEnabled: false)
+        )
+        XCTAssertTrue(app.liveEPG.isEmpty)
+        try await app.applyEPGPreferencesForTesting(EPGPreferences())
+        _ = app.liveEPG.prepare(source: imported.source, revision: "same")
+        _ = app.liveEPG.prepare(source: native.source, revision: "same")
+        XCTAssertFalse(publish(imported, to: app.liveEPG, generation: importedGeneration))
+        XCTAssertFalse(publish(native, to: app.liveEPG, generation: nativeGeneration))
+    }
+
+    func testAutomaticCustomAutomaticSameURLStillChangesGeneration() async throws {
+        let app = AppState(environment: nil)
+        let source = StoredLiveSource(name: "Fixture", sourceKind: .pasted, rawData: Data())
+        let id = LiveSourceID.imported(source.id)
+        let url = "https://example.invalid/same.xml"
+        app.setEPGInputsForTesting(
+            sources: [source],
+            playlists: [source.id: LivePlaylist(
+                format: .m3u, groups: [], epgURL: URL(string: url)
+            )]
+        )
+        let automatic = EPGPreferences()
+        let custom = EPGPreferences(sources: [
+            source.id.uuidString: EPGSourcePreference(
+                mode: .custom, customEPGURL: url
+            )
+        ])
+        let first = app.liveEPG.prepare(source: id, revision: "same")
+        try await app.applyEPGPreferencesForTesting(custom)
+        try await app.applyEPGPreferencesForTesting(automatic)
+        let current = app.liveEPG.prepare(source: id, revision: "same")
+        XCTAssertNotEqual(first, current)
+        let value = publication(source: id, revision: "same")
+        XCTAssertFalse(publish(value, to: app.liveEPG, generation: first))
+    }
+
+    func testDeletingGlobalClearsOnlyDependentSourceAndPreservesPlaybackInput() async throws {
+        let app = AppState(environment: nil)
+        let sources = (0..<3).map {
+            StoredLiveSource(name: "Fixture \($0)", sourceKind: .pasted,
+                             rawData: Data("original stream input".utf8))
+        }
+        let embedded = URL(string: "https://example.invalid/embedded.xml")!
+        app.setEPGInputsForTesting(sources: sources, playlists: [
+            sources[0].id: LivePlaylist(format: .m3u, groups: []),
+            sources[1].id: LivePlaylist(format: .m3u, groups: [], epgURL: embedded),
+            sources[2].id: LivePlaylist(format: .m3u, groups: [])
+        ])
+        var config = EPGPreferences(
+            defaultEPGURL: "https://example.invalid/global.xml",
+            sources: [sources[2].id.uuidString: EPGSourcePreference(
+                mode: .custom,
+                customEPGURL: "https://example.invalid/custom.xml"
+            )]
+        )
+        try await app.applyEPGPreferencesForTesting(config)
+        let ids = sources.map { LiveSourceID.imported($0.id) } + [.xtream(UUID())]
+        let values = ids.enumerated().map {
+            publication(source: $0.element, revision: "r", resource: "c\($0.offset)")
+        }
+        let generations = ids.map { app.liveEPG.prepare(source: $0, revision: "r") }
+        for index in ids.indices {
+            XCTAssertTrue(publish(values[index], to: app.liveEPG,
+                                  generation: generations[index]))
+        }
+
+        config.defaultEPGURL = nil
+        try await app.applyEPGPreferencesForTesting(config)
+        XCTAssertFalse(app.liveEPG.containsForTesting(
+            source: ids[0], channel: values[0].channel
+        ))
+        for index in 1..<ids.count {
+            XCTAssertTrue(app.liveEPG.containsForTesting(
+                source: ids[index], channel: values[index].channel
+            ))
+            XCTAssertTrue(publish(values[index], to: app.liveEPG,
+                                  generation: generations[index]))
+        }
+        XCTAssertEqual(app.liveSources, sources)
+        XCTAssertNil(app.livePlaybackChannel)
+    }
+
+    func testSourceDisabledImmediatelyClearsAndInvalidDraftDoesNotApply() async throws {
+        let app = AppState(environment: nil)
+        let source = StoredLiveSource(name: "Fixture", sourceKind: .pasted, rawData: Data())
+        let id = LiveSourceID.imported(source.id)
+        app.setEPGInputsForTesting(
+            sources: [source],
+            playlists: [source.id: LivePlaylist(format: .m3u, groups: [])]
+        )
+        let config = EPGPreferences(
+            defaultEPGURL: "https://example.invalid/global.xml"
+        )
+        try await app.applyEPGPreferencesForTesting(config)
+        let generation = app.liveEPG.prepare(source: id, revision: "r")
+        let value = publication(source: id, revision: "r")
+        XCTAssertTrue(publish(value, to: app.liveEPG, generation: generation))
+
+        var invalid = config
+        invalid.sources[source.id.uuidString] = EPGSourcePreference(
+            mode: .custom, customEPGURL: "not a URL"
+        )
+        do {
+            try await app.applyEPGPreferencesForTesting(invalid)
+            XCTFail("Invalid draft applied")
+        } catch {}
+        XCTAssertEqual(app.epgPreferences, config)
+        XCTAssertTrue(app.liveEPG.containsForTesting(source: id, channel: value.channel))
+
+        var disabled = config
+        disabled.sources[source.id.uuidString] = EPGSourcePreference(mode: .disabled)
+        try await app.applyEPGPreferencesForTesting(disabled)
+        XCTAssertTrue(app.liveEPG.isEmpty)
+        XCTAssertFalse(publish(value, to: app.liveEPG, generation: generation))
+    }
+}
+
 
 private extension AndroidRuntimeStartupSingleFlight {
     func ensureRuntimeForConcurrentTest(
@@ -774,7 +2958,7 @@ final class OKVideoMacTests: XCTestCase {
 
         XCTAssertEqual(state.liveSourceDescriptors, [LiveSourceDescriptor(
             id: .xtream(first.id), name: first.name,
-            canRefresh: true, canExport: false, supportsEPG: false
+            canRefresh: true, canExport: false, supportsEPG: true
         )])
         XCTAssertNil(state.liveCatalog(for: .xtream(first.id)))
         XCTAssertFalse(state.isLiveCatalogLoading(.xtream(first.id)))
@@ -823,7 +3007,7 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertFalse(state.isLoading)
         XCTAssertTrue(state.liveSources.isEmpty)
         XCTAssertTrue(state.loadedLivePlaylists.isEmpty)
-        XCTAssertTrue(state.loadedEPGGuides.isEmpty)
+        XCTAssertTrue(state.liveEPG.isEmpty)
         XCTAssertTrue(state.liveSourceValidationStatuses.isEmpty)
         XCTAssertTrue(state.favoriteLiveChannelIDs.isEmpty)
         XCTAssertTrue(state.deletedLiveChannelIDs.isEmpty)
@@ -1278,22 +3462,76 @@ final class OKVideoMacTests: XCTestCase {
             duration: 100,
             watchedAt: Date(timeIntervalSince1970: 200)
         )
+        let skipIdentity = PlaybackSkipRuleIdentity(
+            configurationID: configurationID,
+            siteKey: "fixture",
+            contentID: "video-1",
+            lineID: "line-1",
+            episodeID: "episode-2"
+        )
+        let skipRule = PlaybackSkipRule(
+            identity: skipIdentity.seriesLineIdentity,
+            opening: .enabled(92),
+            ending: .enabled(65),
+            updatedAt: Date(timeIntervalSince1970: 250)
+        )
+        let completionMarker = PlaybackCompletionMarker(
+            identity: skipIdentity,
+            historyRecordID: history.id,
+            position: 2_635,
+            duration: 2_700,
+            completedAt: Date(timeIntervalSince1970: 275)
+        )
+        let danmakuBinding = DanmakuBinding(
+            editionIdentity: DanmakuEditionIdentity(
+                episode: DanmakuEpisodeIdentity(
+                    content: DanmakuContentIdentity(
+                        configurationID: configurationID,
+                        siteKey: "fixture",
+                        contentID: "video-1",
+                        title: "Fixture Video"
+                    ),
+                    episodeID: "episode-2",
+                    title: "Episode 2",
+                    seasonNumber: 1,
+                    episodeNumber: 2
+                ),
+                editionID: "line-1"
+            ),
+            locator: StableDanmakuLocator(
+                kind: .providerEpisode,
+                provider: "catpaw",
+                resourceID: "comment-episode-2",
+                displayName: "CatPaw"
+            ),
+            offset: -0.5,
+            updatedAt: Date(timeIntervalSince1970: 280)
+        )
 
         let data = try PortableBackupCodec.encode(
             configuration: configuration,
             history: [history],
+            playbackSkipRules: [skipRule],
+            playbackCompletionMarkers: [completionMarker],
+            danmakuBindings: [danmakuBinding],
             appVersion: "1.2.3",
             appBuild: "456",
             createdAt: Date(timeIntervalSince1970: 300)
         )
         let decoded = try PortableBackupCodec.decode(data)
 
-        XCTAssertEqual(decoded.manifest.schemaVersion, 1)
+        XCTAssertEqual(decoded.manifest.schemaVersion, 3)
         XCTAssertEqual(decoded.manifest.historyCount, 1)
         XCTAssertEqual(decoded.payload.configuration.id, configurationID)
         XCTAssertEqual(decoded.payload.configuration.name, "Fixture")
         XCTAssertEqual(decoded.payload.configuration.rawData, configuration.rawData)
         XCTAssertEqual(decoded.payload.history, [history])
+        XCTAssertEqual(decoded.payload.playbackSkipRules, [skipRule])
+        XCTAssertEqual(
+            decoded.payload.playbackCompletionMarkers,
+            [completionMarker]
+        )
+        XCTAssertEqual(decoded.payload.danmakuBindings, [danmakuBinding])
     }
 
     func testPortableBackupRejectsPayloadChecksumMismatch() throws {
@@ -2787,7 +5025,7 @@ final class OKVideoMacTests: XCTestCase {
             target: .provider(.xtreamLive(locator))
         )
         XCTAssertNil(stream.url)
-        let result = await LiveStreamAvailabilityProber().result(for: stream)
+        let result = await BoundedLiveStreamProber().probe(stream)
         XCTAssertEqual(result, .inconclusive)
     }
 
@@ -2879,10 +5117,12 @@ final class OKVideoMacTests: XCTestCase {
             streamPath: "cctv2"
         )
 
-        let candidates = LivePlaybackRecoveryPolicy.candidates(
-            channels: [current, next],
-            startingChannel: current,
-            startingStream: current.streams[0]
+        let catalog = AcceptedImportedCatalog(sourceID: UUID(), playlist: LivePlaylist(
+            format: .m3u, groups: [LiveGroup(name: "G", channels: [current, next])]
+        ))
+        let candidates = LivePlaybackRecoveryPolicy.importedCandidates(
+            catalog: catalog, channels: [current, next],
+            starting: catalog.selections(for: current)[0], excluding: []
         )
 
         XCTAssertEqual(
@@ -2905,16 +5145,13 @@ final class OKVideoMacTests: XCTestCase {
             name: "CCTV-2",
             streams: [LiveStream(name: "重复", url: sharedURL)]
         )
-        let attempted = LivePlaybackCandidate(
-            channel: current,
-            stream: current.streams[0]
-        ).identifier
-
-        let candidates = LivePlaybackRecoveryPolicy.candidates(
-            channels: [current, duplicate],
-            startingChannel: current,
-            startingStream: current.streams[0],
-            excluding: [attempted]
+        let catalog = AcceptedImportedCatalog(sourceID: UUID(), playlist: LivePlaylist(
+            format: .m3u, groups: [LiveGroup(name: "G", channels: [current, duplicate])]
+        ))
+        let attempted = try XCTUnwrap(ImportedRouteTransport(current.streams[0]))
+        let candidates = LivePlaybackRecoveryPolicy.importedCandidates(
+            catalog: catalog, channels: [current, duplicate],
+            starting: catalog.selections(for: current)[0], excluding: [attempted]
         )
 
         XCTAssertTrue(candidates.isEmpty)
@@ -3039,10 +5276,10 @@ final class OKVideoMacTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["OKVIDEOMAC_XTREAM_NETWORK_GATE"] == "1" else {
             throw XCTSkip("Explicit public-network and renderer gate")
         }
-        try await verifyNativeXtreamRendering(
-            url: try XCTUnwrap(ProcessInfo.processInfo.environment["OKVIDEOMAC_XTREAM_REDIRECT_FIXTURE_URL"].flatMap(URL.init(string:))),
-            selection: nil, expectedWidth: nil
-        )
+        let url = try XCTUnwrap(ProcessInfo.processInfo.environment["OKVIDEOMAC_XTREAM_REDIRECT_FIXTURE_URL"].flatMap(URL.init(string:)))
+        let selection = try await LiveHLSStartupPreparer().prepare(url: url, headers: [:])
+        XCTAssertNotNil(selection, "First .ts route must select its redirected HLS master")
+        try await verifyNativeXtreamRendering(url: url, selection: selection, expectedWidth: 1920)
     }
 
     @MainActor
@@ -3093,6 +5330,17 @@ final class OKVideoMacTests: XCTestCase {
         }
         draw.cancel(); reader.cancel(); view.tearDown(); window.close()
         await player.shutdown()
+    }
+
+    @MainActor
+    func testNativeXtreamOpenHLSFirstAttemptWithAppRendererNetworkGate() async throws {
+        guard ProcessInfo.processInfo.environment["OKVIDEOMAC_XTREAM_NETWORK_GATE"] == "1" else {
+            throw XCTSkip("Explicit public-network and renderer gate")
+        }
+        let url = try XCTUnwrap(ProcessInfo.processInfo.environment["OKVIDEOMAC_XTREAM_OPEN_FIXTURE_URL"].flatMap(URL.init(string:)))
+        let selection = try await LiveHLSStartupPreparer().prepare(url: url, headers: [:])
+        XCTAssertEqual(selection?.variantCount, 6)
+        try await verifyNativeXtreamRendering(url: url, selection: selection, expectedWidth: 640)
     }
 
     @MainActor
@@ -9054,6 +11302,27 @@ final class OKVideoMacTests: XCTestCase {
 
         XCTAssertFalse(didRun)
         XCTAssertNil(controller.requestID)
+    }
+
+    @MainActor
+    func testAutomaticEpisodeAdvanceClaimsEachEpisodeSessionOnce() async {
+        let controller = AutomaticEpisodeAdvanceController()
+        let sessionID = UUID()
+        let started = expectation(description: "advance started once")
+        started.expectedFulfillmentCount = 1
+        var runCount = 0
+
+        controller.schedule(sessionID: sessionID) { _ in
+            runCount += 1
+            started.fulfill()
+        }
+        controller.schedule(sessionID: sessionID) { _ in
+            runCount += 1
+            started.fulfill()
+        }
+
+        await fulfillment(of: [started], timeout: 1)
+        XCTAssertEqual(runCount, 1)
     }
 
     func testMouseMoveRatePolicyDropsRedundantTrackingEvents() {

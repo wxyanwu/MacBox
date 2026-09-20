@@ -954,6 +954,22 @@ enum NodeRuntimeContractFactory {
         if (invocationID) opt.requestID = invocationID;
         return { action: 'authorizationCompleted', opt };
       }
+      if (value.action === 'danmuPush') {
+        // Keep the provider payload opaque, but bound it tightly enough to fit
+        // the request-scoped host-message channel. Playback ownership fields
+        // are appended by publishHostMessage and cannot be supplied by the
+        // page itself.
+        let encoded = '';
+        try { encoded = JSON.stringify(value.opt); }
+        catch (_) { return null; }
+        if (!encoded || Buffer.byteLength(encoded, 'utf8') > 3500) return null;
+        const usefulKeys = ['url', 'href', 'xml', 'danmaku', 'danmu', 'data',
+          'sources', 'list', 'episodeId', 'episode_id', 'id'];
+        if (!usefulKeys.some((key) => Object.prototype.hasOwnProperty.call(value.opt, key))) {
+          return null;
+        }
+        return { action: 'danmuPush', opt: value.opt };
+      }
       if (value.action !== 'sniff') return null;
       if (typeof value.opt.url !== 'string' || value.opt.url.length === 0 ||
           value.opt.url.length > 8192) return null;
@@ -1070,7 +1086,8 @@ enum NodeRuntimeContractFactory {
       if (message.action === 'toast' ||
           message.action === 'authorizationRequired' ||
           message.action === 'openInternalWebview' ||
-          message.action === 'authorizationCompleted') {
+          message.action === 'authorizationCompleted' ||
+          message.action === 'danmuPush') {
         message = Object.assign({}, message, {
           opt: optionsWithPlaybackContext(
             context,

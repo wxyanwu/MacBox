@@ -85,9 +85,13 @@ def safe_id(value: str) -> str:
 
 
 def timestamp(repo: Path) -> str:
-    value = subprocess.check_output(
-        ["git", "show", "-s", "--format=%cI", "HEAD"], cwd=repo, text=True
-    ).strip()
+    if (repo / "LOCAL_ACCEPTANCE_SNAPSHOT.json").is_file():
+        from local_acceptance import validate
+        value = validate(repo)["created_at"]
+    else:
+        value = subprocess.check_output(
+            ["git", "show", "-s", "--format=%cI", "HEAD"], cwd=repo, text=True
+        ).strip()
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 

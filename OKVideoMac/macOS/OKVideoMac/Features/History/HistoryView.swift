@@ -172,11 +172,12 @@ struct HistoryView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .lineLimit(1)
-                if item.duration > 0 {
-                    HistoryProgressBar(
-                        progress: item.position / item.duration
-                    )
-                    .frame(width: 260, height: 5)
+                if let progress = Self.displayedProgress(position: item.position, duration: item.duration) {
+                    ProgressView(value: progress)
+                        .progressViewStyle(.linear)
+                        .frame(maxWidth: 200, alignment: .leading)
+                        .accessibilityLabel(L10n.string("history.playback-progress", fallback: "Watch Progress"))
+                        .accessibilityValue("\(Int(progress * 100))%")
                 }
             }
             Spacer()
@@ -192,6 +193,12 @@ struct HistoryView: View {
             .font(.caption)
             .foregroundColor(.secondary)
         }
+    }
+
+    // Presentation-only: retain the previous visibility guard and clamp.
+    static func displayedProgress(position: TimeInterval, duration: TimeInterval) -> Double? {
+        guard duration > 0 else { return nil }
+        return min(max(position / duration, 0), 1)
     }
 
     @ViewBuilder
@@ -420,24 +427,4 @@ struct HistoryView: View {
 private enum HistoryDeletion {
     case items(Set<HistoryRecord.ID>)
     case all
-}
-
-private struct HistoryProgressBar: View {
-    let progress: Double
-
-    var body: some View {
-        GeometryReader { proxy in
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color.secondary.opacity(0.16))
-                Capsule()
-                    .fill(Color.accentColor)
-                    .frame(
-                        width: proxy.size.width * min(max(progress, 0), 1)
-                    )
-            }
-        }
-        .accessibilityLabel(L10n.string("history.playback-progress", fallback: "Playback Progress"))
-        .accessibilityValue("\(Int(min(max(progress, 0), 1) * 100))%")
-    }
 }
