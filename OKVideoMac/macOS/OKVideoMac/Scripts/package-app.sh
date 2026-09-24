@@ -392,6 +392,12 @@ if [[ ! -f "$QUICKJS_PATH" ]]; then
 fi
 cp "$QUICKJS_PATH" "$FRAMEWORKS/libOKQuickJS.dylib"
 install_name_tool -id '@rpath/libOKQuickJS.dylib' "$FRAMEWORKS/libOKQuickJS.dylib"
+if [[ "${OKVIDEOMAC_USE_STAGED_NATIVE:-0}" == "1" ]]; then
+  # Xcode's optional embedding phases may discover a host SQLite. Replace it
+  # and the complete native closure with the explicit, matching staged input.
+  # libOKMPVBridge in this directory was rebuilt above from current source.
+  cp "$LIBMPV_ROOT/lib/"*.dylib "$FRAMEWORKS/"
+fi
 mkdir -p "$APP_DESTINATION/Contents/Resources/Licenses"
 cp "$QUICKJS_ROOT/LICENSE" \
   "$APP_DESTINATION/Contents/Resources/Licenses/QuickJS-MIT.txt"
