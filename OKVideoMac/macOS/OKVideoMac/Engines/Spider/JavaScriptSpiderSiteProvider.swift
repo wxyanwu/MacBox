@@ -10461,7 +10461,12 @@ actor AndroidDexBridgeRuntime {
         let continuity = runtimeDirectory.appendingPathComponent(
             "runtime-continuity.json"
         )
-        let movable = [avd, companion, avdManifest, continuity].filter {
+        // The fingerprint describes the old AVD and SDK. Keeping it in place
+        // rejects the replacement immediately after an explicit SDK switch.
+        let compatibility = avdHome.appendingPathComponent(
+            "runtime-compatibility.json"
+        )
+        let movable = [avd, companion, avdManifest, continuity, compatibility].filter {
             fileManager.fileExists(atPath: $0.path)
         }
         let allowedMetadataNames = Set([

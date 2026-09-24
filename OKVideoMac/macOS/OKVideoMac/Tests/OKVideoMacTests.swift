@@ -11882,6 +11882,9 @@ final class OKVideoMacTests: XCTestCase {
             "avd-manifest.json"
         )
         try Data("avd-manifest".utf8).write(to: avdManifest)
+        let compatibility = avdHome.appendingPathComponent("runtime-compatibility.json")
+        let oldIdentity = Data("old-sdk-identity".utf8)
+        try oldIdentity.write(to: compatibility)
         try Data("continuity".utf8).write(
             to: runtime.appendingPathComponent("runtime-continuity.json")
         )
@@ -11911,6 +11914,11 @@ final class OKVideoMacTests: XCTestCase {
             )
         )
         XCTAssertFalse(FileManager.default.fileExists(atPath: avdManifest.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: compatibility.path))
+        XCTAssertEqual(
+            try Data(contentsOf: result.directory.appendingPathComponent("runtime-compatibility.json")),
+            oldIdentity
+        )
         XCTAssertTrue(FileManager.default.fileExists(atPath: studioAVD.path))
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: unrelatedADBMarker.path)

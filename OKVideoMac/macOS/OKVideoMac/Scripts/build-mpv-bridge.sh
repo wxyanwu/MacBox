@@ -15,15 +15,28 @@ if [[ -z "$LIBMPV_PATH" ]] || [[ ! -d "$LIBMPV_ROOT/include" ]]; then
   echo "Existing libmpv headers/library are required; run build-libmpv.sh first." >&2
   exit 1
 fi
-for package in libavformat libavcodec libavutil; do
-  if ! "$PKG_CONFIG" --exists "$package"; then
-    echo "Required pkg-config package is missing: $package" >&2
-    exit 1
-  fi
-done
-
-FFMPEG_CFLAGS=( $("$PKG_CONFIG" --cflags libavformat libavcodec libavutil) )
-FFMPEG_LIBS=( $("$PKG_CONFIG" --libs libavformat libavcodec libavutil) )
+if [[ "${OKVIDEOMAC_USE_STAGED_NATIVE:-0}" == "1" ]]; then
+  # Explicit opt-in for verified release libraries and matching 7.1.x headers.
+  # Do not discover or mix Homebrew libraries with the release ABI.
+  FFMPEG_CFLAGS=( -I"$LIBMPV_ROOT/include" )
+  FFMPEG_LIBS=()
+  for library in libavformat.61.dylib libavcodec.61.dylib libavutil.59.dylib; do
+    if [[ ! -f "$LIBMPV_ROOT/lib/$library" ]]; then
+      echo "Staged FFmpeg 7.1 library missing: $library" >&2
+      exit 1
+    fi
+    FFMPEG_LIBS+=( "$LIBMPV_ROOT/lib/$library" )
+  done
+else
+  for package in libavformat libavcodec libavutil; do
+    if ! "$PKG_CONFIG" --exists "$package"; then
+      echo "Required pkg-config package is missing: $package" >&2
+      exit 1
+    fi
+  done
+  FFMPEG_CFLAGS=( $("$PKG_CONFIG" --cflags libavformat libavcodec libavutil) )
+  FFMPEG_LIBS=( $("$PKG_CONFIG" --libs libavformat libavcodec libavutil) )
+fi
 mkdir -p "$(dirname "$BRIDGE_OUTPUT")" "$(dirname "$BRIDGE_SMOKE")"
 
 MACOSX_DEPLOYMENT_TARGET=12.0 clang \
