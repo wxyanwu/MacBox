@@ -2,6 +2,37 @@ import XCTest
 @testable import OKVideoCore
 
 final class ConfigurationParserTests: XCTestCase {
+    func testLegacyProxyPatternsRoundTripWithoutBecomingServerURLs() throws {
+        let parser = ConfigurationParser()
+        let value = try parser.parse(#"{"sites":[],"proxy":["*.example.invalid",{"name":"local","urls":["http://127.0.0.1:7890"]}]}"#)
+        XCTAssertEqual(value.proxy[0].legacyPattern, "*.example.invalid")
+        XCTAssertTrue(value.proxy[0].urls.isEmpty)
+        XCTAssertNil(value.proxy[1].legacyPattern)
+        XCTAssertEqual(try parser.parse(parser.encode(value)), value)
+        XCTAssertThrowsError(try parser.parse(#"{"sites":[],"proxy":[123]}"#))
+    }
+
+    func testGsonUnquotedKeysPreserveLiteralQuoteAndStringControls() throws {
+        let text = """
+        {sites: [{key: "fixture", name: "Line\nTwo", type: 3,
+        api: "csp_Fixture", ext": {value: "kept\tvalue"}}],
+        // Comments must not change the parser's key state: { misleading:
+        future: [ {name: "https://example.invalid/a//b"}, ],}
+        """
+        let value = try ConfigurationParser().parse(text)
+        XCTAssertEqual(value.sites.count, 1)
+        XCTAssertEqual(value.sites[0].name, "Line\nTwo")
+        XCTAssertEqual(value.sites[0].extra["ext\""], .object(["value": .string("kept\tvalue")]))
+        XCTAssertEqual(value.extra["future"], .array([.object(["name": .string("https://example.invalid/a//b")])]))
+        XCTAssertEqual(try ConfigurationParser().parse(ConfigurationParser().encode(value)), value)
+    }
+
+    func testGsonUnquotedNamesStillRejectDuplicateKeysAndBrokenSyntax() {
+        XCTAssertThrowsError(try ConfigurationParser().parse(#"{sites: [], "sites": []}"#))
+        XCTAssertThrowsError(try ConfigurationParser().parse(#"{sites []}"#))
+        XCTAssertThrowsError(try ConfigurationParser().parse(#"{sites: [], /* unclosed}"#))
+    }
+
     func testMinimalConfiguration() throws {
         let data = try fixture("config-minimal", extension: "json")
         let value = try ConfigurationParser().parse(data)
@@ -132,13 +163,11 @@ final class ConfigurationParserTests: XCTestCase {
         }
     }
 
-    func testJSON5FeaturesRemainRejected() {
+    func testUnsupportedJSON5FeaturesRemainRejected() {
         let singleQuoted = Data("{'sites': []}".utf8)
-        let unquotedKey = Data("{sites: []}".utf8)
         let nonFinite = Data(#"{"sites":[],"value":NaN}"#.utf8)
 
         XCTAssertThrowsError(try ConfigurationParser().parse(singleQuoted))
-        XCTAssertThrowsError(try ConfigurationParser().parse(unquotedKey))
         XCTAssertThrowsError(try ConfigurationParser().parse(nonFinite))
     }
 

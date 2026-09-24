@@ -492,6 +492,9 @@ public struct DohConfiguration: Codable, Equatable, Sendable {
 }
 
 public struct ProxyConfiguration: Codable, Equatable, Sendable {
+    /// Older Android configurations store match patterns as string entries.
+    /// Retain the wire representation; a pattern is not a proxy server URL.
+    public var legacyPattern: String? = nil
     public var name: String
     public var urls: [String]
     public var hosts: [String]
@@ -510,6 +513,14 @@ public struct ProxyConfiguration: Codable, Equatable, Sendable {
     }
 
     public init(from decoder: Decoder) throws {
+        if let pattern = try? decoder.singleValueContainer().decode(String.self) {
+            legacyPattern = pattern
+            name = ""
+            urls = []
+            hosts = []
+            extra = [:]
+            return
+        }
         var object = try decodeJSONObject(from: decoder)
         name = object.removeString("name") ?? ""
         urls = object.removeStringArray("urls")
@@ -524,6 +535,11 @@ public struct ProxyConfiguration: Codable, Equatable, Sendable {
     }
 
     public func encode(to encoder: Encoder) throws {
+        if let legacyPattern {
+            var container = encoder.singleValueContainer()
+            try container.encode(legacyPattern)
+            return
+        }
         var object = extra
         object["name"] = .string(name)
         object.set("urls", urls)
