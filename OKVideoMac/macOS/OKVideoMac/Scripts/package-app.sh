@@ -435,6 +435,21 @@ while [[ "${#pending[@]}" -gt 0 ]]; do
 
   while IFS= read -r dependency; do
     case "$dependency" in
+      @rpath/*)
+        if [[ "${OKVIDEOMAC_USE_STAGED_NATIVE:-0}" == "1" ]]; then
+          base="$(basename "$dependency")"
+          destination="$FRAMEWORKS/$base"
+          if [[ ! -f "$destination" ]]; then
+            if [[ ! -f "$LIBMPV_ROOT/lib/$base" ]]; then
+              echo "Staged native dependency is missing: $base" >&2
+              exit 1
+            fi
+            cp "$LIBMPV_ROOT/lib/$base" "$destination"
+            chmod u+w "$destination"
+          fi
+          pending+=("$destination")
+        fi
+        ;;
       /opt/homebrew/*|/opt/local/*|/usr/local/*)
         base="$(basename "$dependency")"
         destination="$FRAMEWORKS/$base"
