@@ -156,6 +156,7 @@ private struct StubHTTPClient: HTTPClient {
     let response: HTTPResponse
 
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
-        response
+        XCTAssertEqual(request.headers["User-Agent"], "okhttp/3.15")
+        return response
     }
 }

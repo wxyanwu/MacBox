@@ -29,6 +29,8 @@ public struct ConfigurationLoader {
             }
             let request = HTTPRequest(
                 url: url,
+                // Android TVBox subscriptions may return a web page to desktop agents.
+                headers: ["User-Agent": "okhttp/3.15"],
                 timeout: 20,
                 maximumResponseBytes: ConfigurationParser.maximumConfigurationSize,
                 maximumRedirects: 10,
