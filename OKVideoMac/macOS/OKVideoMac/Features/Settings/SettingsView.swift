@@ -53,9 +53,9 @@ struct SettingsView: View {
 
             HSplitView {
                 settingsSidebar
-                    .frame(minWidth: 260, idealWidth: 280, maxWidth: 300)
+                    .frame(minWidth: 200, idealWidth: 240, maxWidth: 280)
                 detailContent
-                    .frame(minWidth: 590)
+                    .frame(minWidth: 380)
             }
         }
         .navigationTitle("")
@@ -1596,9 +1596,7 @@ private struct PlayerWindowSettingsControl: View {
                 }
             }
 
-            HStack(spacing: 10) {
-                Spacer(minLength: 45)
-
+            VStack(alignment: .trailing, spacing: 10) {
                 Picker(
                     SettingsL10n.string("settings.player-window.mode.label", "Player Window Mode"),
                     selection: Binding(
@@ -1612,7 +1610,7 @@ private struct PlayerWindowSettingsControl: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                .frame(width: 330)
+                .frame(maxWidth: 330)
 
                 Button(SettingsL10n.string("settings.common.restore-default", "Restore Default"), action: restoreDefault)
                     .help(SettingsL10n.string("settings.player-window.restore.help", "Clear the saved player window size, position, and mode"))
@@ -1723,26 +1721,28 @@ private struct SettingsPage<Content: View>: View {
     }
 
     var body: some View {
-        ScrollView {
-            BrowserToolbarScrollMarker(
-                coordinateSpaceName: scrollCoordinateSpace
-            )
-            VStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.largeTitle.bold())
-                    Text(subtitle)
-                        .foregroundColor(.secondary)
+        GeometryReader { geometry in
+            ScrollView {
+                BrowserToolbarScrollMarker(
+                    coordinateSpaceName: scrollCoordinateSpace
+                )
+                VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(title)
+                            .font(.largeTitle.bold())
+                        Text(subtitle)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.bottom, 4)
+    
+                    content
                 }
-                .padding(.bottom, 4)
-
-                content
+                .padding(24)
+                .frame(width: min(840, geometry.size.width), alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .top)
             }
-            .padding(24)
-            .frame(maxWidth: 840, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .top)
+            .browserToolbarScrollSurface(named: scrollCoordinateSpace)
         }
-        .browserToolbarScrollSurface(named: scrollCoordinateSpace)
         .background(.thinMaterial)
     }
 }
@@ -1804,6 +1804,18 @@ struct SettingsControlRow<Control: View>: View {
     }
 
     var body: some View {
+        if #available(macOS 13.0, *) {
+            ViewThatFits(in: .horizontal) {
+                horizontalRow
+                stackedRow
+            }
+            .padding(16)
+        } else {
+            stackedRow.padding(16)
+        }
+    }
+
+    private var label: some View {
         HStack(spacing: 13) {
             SettingsRowIcon(systemImage: icon, color: color)
             VStack(alignment: .leading, spacing: 2) {
@@ -1813,10 +1825,22 @@ struct SettingsControlRow<Control: View>: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            Spacer()
+        }
+    }
+
+    private var horizontalRow: some View {
+        HStack(spacing: 13) {
+            label
+            Spacer(minLength: 8)
             control
         }
-        .padding(16)
+    }
+
+    private var stackedRow: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            label
+            control.frame(maxWidth: .infinity, alignment: .trailing)
+        }
     }
 }
 
