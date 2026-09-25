@@ -1,0 +1,85 @@
+--- a/audio/out/ao_coreaudio.c
++++ b/audio/out/ao_coreaudio.c
+@@ -16,6 +16,7 @@
+  */
+ 
+ #include <CoreAudio/HostTime.h>
++#include <Block.h>
+ #include <libavutil/mathematics.h>
+ 
+ #include "ao.h"
+@@ -53,6 +54,9 @@
+     dispatch_queue_t queue;
+ 
+     int hotplug_cb_registration_times;
++    dispatch_queue_t hotplug_queue;
++    AudioObjectPropertyListenerBlock hotplug_listener;
++    dispatch_block_t hotplug_cancel;
+ };
+ 
+ static int64_t ca_get_hardware_latency(struct ao *ao) {
+@@ -497,6 +501,17 @@
+     if (p->hotplug_cb_registration_times++)
+         return true;
+ 
++    // CoreAudio may already have queued a listener when it is removed.
++    // Both blocks share an owner slot retained by the copied listener block.
++    // Revoke it on the serial delivery queue before ao can be destroyed.
++    __block struct ao *owner = ao;
++    p->hotplug_queue = dispatch_queue_create("io.mpv.coreaudio.hotplug", DISPATCH_QUEUE_SERIAL);
++    p->hotplug_listener = Block_copy(^(UInt32 count, const AudioObjectPropertyAddress *addresses) {
++        if (owner)
++            hotplug_cb(kAudioObjectSystemObject, count, addresses, owner);
++    });
++    p->hotplug_cancel = Block_copy(^{ owner = NULL; });
++
+     OSStatus err = noErr;
+     for (int i = 0; i < MP_ARRAY_SIZE(hotplug_properties); i++) {
+         AudioObjectPropertyAddress addr = {
+@@ -504,8 +519,8 @@
+             kAudioObjectPropertyScopeGlobal,
+             kAudioObjectPropertyElementMain
+         };
+-        err = AudioObjectAddPropertyListener(
+-            kAudioObjectSystemObject, &addr, hotplug_cb, (void *)ao);
++        err = AudioObjectAddPropertyListenerBlock(
++            kAudioObjectSystemObject, &addr, p->hotplug_queue, p->hotplug_listener);
+         if (err != noErr) {
+             char *c1 = mp_tag_str(hotplug_properties[i]);
+             char *c2 = mp_tag_str(err);
+@@ -524,9 +539,11 @@
+ {
+     struct priv *p = ao->priv;
+ 
+-    if (--p->hotplug_cb_registration_times)
++    if (p->hotplug_cb_registration_times <= 0 || --p->hotplug_cb_registration_times)
+         return;
+ 
++    // Drain in-flight callbacks and make even late queued deliveries inert.
++    dispatch_sync(p->hotplug_queue, p->hotplug_cancel);
+     OSStatus err = noErr;
+     for (int i = 0; i < MP_ARRAY_SIZE(hotplug_properties); i++) {
+         AudioObjectPropertyAddress addr = {
+@@ -534,14 +551,20 @@
+             kAudioObjectPropertyScopeGlobal,
+             kAudioObjectPropertyElementMain
+         };
+-        err = AudioObjectRemovePropertyListener(
+-            kAudioObjectSystemObject, &addr, hotplug_cb, (void *)ao);
++        err = AudioObjectRemovePropertyListenerBlock(
++            kAudioObjectSystemObject, &addr, p->hotplug_queue, p->hotplug_listener);
+         if (err != noErr) {
+             char *c1 = mp_tag_str(hotplug_properties[i]);
+             char *c2 = mp_tag_str(err);
+             MP_ERR(ao, "failed to set device listener %s (%s)", c1, c2);
+         }
+     }
++    Block_release(p->hotplug_listener);
++    Block_release(p->hotplug_cancel);
++    dispatch_release(p->hotplug_queue);
++    p->hotplug_listener = NULL;
++    p->hotplug_cancel = NULL;
++    p->hotplug_queue = NULL;
+ }
+ 
+ #define OPT_BASE_STRUCT struct priv

@@ -4840,9 +4840,14 @@ final class AppState: ObservableObject {
     @Published private(set) var deletedLiveChannelIDs: Set<String> = []
     let playerWindowPreferences = PlayerWindowPreferenceStore()
     let playerSnapshotState = PlayerSnapshotState()
+    private let displaySleepAssertion = PlaybackDisplaySleepAssertion()
+    private var isSystemSleeping = false
     private(set) var playerSnapshot: PlayerSnapshot {
         get { playerSnapshotState.snapshot }
-        set { playerSnapshotState.update(newValue) }
+        set {
+            playerSnapshotState.update(newValue)
+            updateDisplaySleepAssertion()
+        }
     }
     @Published private(set) var playerEpisodePresentations: [EpisodePresentation] = []
     @Published private(set) var isPlayerEpisodeListPreparing = false
@@ -13897,6 +13902,7 @@ final class AppState: ObservableObject {
         }
 
         isShutdownRequested = true
+        displaySleepAssertion.update(playing: false)
         invalidateXtreamLiveCatalog()
         playerRenderSurfaceGate.reset()
         automaticEpisodeAdvanceController.cancel()
@@ -14000,7 +14006,15 @@ final class AppState: ObservableObject {
         )
     }
 
+    private func updateDisplaySleepAssertion() {
+        displaySleepAssertion.update(playing: !isSystemSleeping && !isShutdownRequested
+            && (playerSnapshot.status == .playing || playerSnapshot.status == .buffering))
+    }
+
     func handleSystemSleep() async {
+        guard !isSystemSleeping else { return }
+        isSystemSleeping = true
+        displaySleepAssertion.update(playing: false)
         switch playerSnapshot.status {
         case .playing, .buffering:
             shouldResumeAfterWake = true
@@ -14012,6 +14026,7 @@ final class AppState: ObservableObject {
     }
 
     func handleSystemWake() async {
+        isSystemSleeping = false
         guard shouldResumeAfterWake else { return }
         shouldResumeAfterWake = false
         do {

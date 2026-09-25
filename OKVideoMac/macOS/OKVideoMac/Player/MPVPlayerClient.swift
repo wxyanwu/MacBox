@@ -1,5 +1,32 @@
 import Foundation
+import IOKit.pwr_mgt
 import OKVideoCore
+
+/// Owned by AppState on the main actor. Prevents idle display sleep only;
+/// explicit sleep and closing the lid remain under macOS control.
+final class PlaybackDisplaySleepAssertion {
+    private var assertionID: IOPMAssertionID = 0
+
+    func update(playing: Bool) {
+        if playing, assertionID == 0 {
+            var created: IOPMAssertionID = 0
+            let result = IOPMAssertionCreateWithName(
+                kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
+                IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                "OKVideoMac video playback" as CFString,
+                &created
+            )
+            if result == kIOReturnSuccess { assertionID = created }
+        } else if !playing, assertionID != 0 {
+            IOPMAssertionRelease(assertionID)
+            assertionID = 0
+        }
+    }
+
+    deinit {
+        if assertionID != 0 { IOPMAssertionRelease(assertionID) }
+    }
+}
 
 enum PlayerTeardownMode: String, CaseIterable, Sendable {
     case warmStop

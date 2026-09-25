@@ -15,6 +15,7 @@ SOURCE_DIR="$SOURCE_ROOT/mpv-0.41.0"
 MESON_BUILD_DIR="$SOURCE_ROOT/mpv-0.41.0-build"
 PATCH_FILE="$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-without-cocoa.patch"
 VIDEOTOOLBOX_GL_PATCH_FILE="$PROJECT_DIR/Patches/mpv-0.41.0-libmpv-videotoolbox-gl.patch"
+HOTPLUG_PATCH_FILE="$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-hotplug-lifetime.patch"
 URL="https://github.com/mpv-player/mpv/archive/refs/tags/v0.41.0.tar.gz"
 EXPECTED_SHA256="ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209"
 
@@ -77,6 +78,9 @@ if ! grep -q "sources += files('osdep/utils-mac.c')" "$SOURCE_DIR/meson.build"; 
 fi
 if ! grep -q '#if HAVE_COCOA && HAVE_SWIFT' "$SOURCE_DIR/player/clipboard/clipboard.c"; then
   /usr/bin/patch -d "$SOURCE_DIR" -p1 -i "$VIDEOTOOLBOX_GL_PATCH_FILE"
+fi
+if ! grep -q 'hotplug_cancel' "$SOURCE_DIR/audio/out/ao_coreaudio.c"; then
+  /usr/bin/patch -d "$SOURCE_DIR" -p1 -i "$HOTPLUG_PATCH_FILE"
 fi
 
 rm -rf "$MESON_BUILD_DIR" "$INSTALL_STAGE"

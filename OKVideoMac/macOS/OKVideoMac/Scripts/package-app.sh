@@ -124,6 +124,8 @@ legal_source_files=(
   "$SOURCE_ROOT/Helpers/AndroidDexBridge/FONGMI_CATVOD_CHANGES.md"
   "$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-without-cocoa.patch"
   "$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-without-cocoa.NOTICE.md"
+  "$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-hotplug-lifetime.patch"
+  "$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-hotplug-lifetime.NOTICE.md"
   "$REPOSITORY_ROOT/Docs/THIRD_PARTY_LICENSE_AUDIT.md"
   "$REPOSITORY_ROOT/Docs/SOURCE_PROVENANCE_MANIFEST.md"
   "$REPOSITORY_ROOT/Docs/BINARY_SOURCE_MAPPING.md"
@@ -296,6 +298,9 @@ cp "$SOURCE_ROOT/Helpers/AndroidDexBridge/FONGMI_CATVOD_CHANGES.md" \
 cp "$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-without-cocoa.patch" \
   "$LEGAL_ROOT/ModifiedSources/"
 cp "$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-without-cocoa.NOTICE.md" \
+  "$LEGAL_ROOT/ModifiedSources/"
+cp "$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-hotplug-lifetime.patch" \
+  "$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-hotplug-lifetime.NOTICE.md" \
   "$LEGAL_ROOT/ModifiedSources/"
 cp "$REPOSITORY_ROOT/Docs/THIRD_PARTY_LICENSE_AUDIT.md" \
   "$LEGAL_ROOT/Compliance/"
