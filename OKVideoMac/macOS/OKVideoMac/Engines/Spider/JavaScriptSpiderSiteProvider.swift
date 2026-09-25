@@ -1410,12 +1410,15 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     func player(
         flag: String,
         episodeURL: String,
-        interactionID: UUID
+        interactionID: UUID,
+        refreshPlayback: Bool = false
     ) async throws -> SitePlaybackResult {
         try await requestPlayer(
             flag: flag,
             episodeURL: episodeURL,
-            refreshPlayback: false,
+            // Ordinary playback retries must bypass the Bridge's cached URL,
+            // just as history refresh does, while retaining the selected episode.
+            refreshPlayback: refreshPlayback,
             interactionID: interactionID
         )
     }

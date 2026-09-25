@@ -11633,6 +11633,7 @@ final class AppState: ObservableObject {
                             flag: candidateSource.name,
                             episodeURL: candidateEpisode.url,
                             sessionID: sessionID,
+                            refreshPlayback: isRefreshAttempt,
                             transferContext: nodeTransferContext
                         )
                     }
@@ -11985,6 +11986,7 @@ final class AppState: ObservableObject {
         flag: String,
         episodeURL: String,
         sessionID: UUID,
+        refreshPlayback: Bool,
         transferContext: NodeTransferPlaybackContext
     ) async throws -> SitePlaybackResult {
         try Task.checkCancellation()
@@ -11995,7 +11997,8 @@ final class AppState: ObservableObject {
             return try await androidProvider.player(
                 flag: flag,
                 episodeURL: episodeURL,
-                interactionID: sessionID
+                interactionID: sessionID,
+                refreshPlayback: refreshPlayback
             )
         }
         if let nodeProvider = provider as? NodeHTTPSpiderSiteProvider {
