@@ -322,7 +322,7 @@ enum UpstreamResponseDecoder {
             playURL: string(object["playUrl"]),
             flag: string(object["flag"]) ?? "",
             headers: headers,
-            format: string(object["format"]),
+            format: string(object["format"]) ?? playbackFormatAlias(object["type"]),
             subtitles: subtitles,
             qualities: qualities,
             key: string(object["key"]),
@@ -336,6 +336,17 @@ enum UpstreamResponseDecoder {
             position: number(object["position"]),
             lyrics: string(object["lrc"] ?? object["lyrics"])
         )
+    }
+
+    private static func playbackFormatAlias(_ value: JSONValue?) -> String? {
+        // Android spiders also declare the container in `type`. Only accept
+        // media formats here: numeric parser/site type values are unrelated.
+        guard let value = string(value)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              ["hls", "m3u8", "application/vnd.apple.mpegurl", "application/x-mpegurl",
+               "dash", "mpd", "application/dash+xml", "mpegts", "ts", "video/mp2t"]
+                .contains(value) else { return nil }
+        return value
     }
 
     /// Matches FongMi's `UrlAdapter`: player responses may return either one

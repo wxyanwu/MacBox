@@ -11997,7 +11997,10 @@ final class AppState: ObservableObject {
             return try await androidProvider.player(
                 flag: flag,
                 episodeURL: episodeURL,
-                interactionID: sessionID,
+                // Each provider retry is a new invocation. A completed Bridge
+                // interaction ID cannot be reused; the playback session stays
+                // unchanged for cancellation and stale-result checks above.
+                interactionID: refreshPlayback ? UUID() : sessionID,
                 refreshPlayback: refreshPlayback
             )
         }

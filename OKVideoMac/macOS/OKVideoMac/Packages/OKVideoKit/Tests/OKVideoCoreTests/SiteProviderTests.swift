@@ -2,6 +2,25 @@ import XCTest
 @testable import OKVideoCore
 
 final class SiteProviderTests: XCTestCase {
+    func testPlayerUsesAndroidContainerTypeForExtensionlessHLS() throws {
+        let site = SiteConfiguration(key: "fixture", name: "Fixture", type: 3, api: "csp_Fixture")
+        for (fields, expected) in [
+            (#""type":"hls""#, "hls"),
+            (#""type":" HLS ""#, "hls"),
+            (#""type":"hls","format":"dash""#, "dash"),
+            (#""type":1"#, nil),
+            (#""type":"unrelated""#, nil)
+        ] as [(String, String?)] {
+            let response = try UpstreamResponseDecoder.decodeJSON(
+                Data((#"{"url":"https://example.invalid/getM3u8","parse":0,"# + fields + "}").utf8),
+                site: site, baseURL: nil
+            )
+            let player = try XCTUnwrap(response.player)
+            XCTAssertEqual(player.format, expected)
+            XCTAssertFalse(player.needsParsing)
+        }
+    }
+
     func testPlayerDecoderPreservesExtendedCatPawFields() throws {
         let configuration = try ConfigurationParser().parse(
             Data(#"{"sites":[{"key":"fixture","name":"Fixture","type":0,"api":"https://example.invalid/api.php"}]}"#.utf8)
