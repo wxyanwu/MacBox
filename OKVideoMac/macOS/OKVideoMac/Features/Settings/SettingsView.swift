@@ -1490,9 +1490,10 @@ private struct LiveSourceSettingsPane: View {
                 ))
                     .font(.caption2)
                     .foregroundColor(.secondary)
-                if let status = state.liveSourceValidationStatuses[source.id] {
-                    liveSourceValidationStatus(status)
-                }
+                LiveSourceValidationStatusView(
+                    progress: state.liveSourceValidationState,
+                    sourceID: source.id
+                )
             }
             Spacer()
             if source.sourceKind == .remote {
@@ -1514,6 +1515,44 @@ private struct LiveSourceSettingsPane: View {
             .help(SettingsL10n.string("settings.live.delete.help", "Delete Live TV Source"))
         }
         .padding(16)
+    }
+
+    private func sourceDescription(_ source: StoredLiveSource) -> String {
+        switch source.sourceKind {
+        case .remote:
+            guard let value = source.sourceValue,
+                  let url = URL(string: value) else {
+                return SettingsL10n.string("settings.live.source.remote-url", "Remote URL")
+            }
+            return LogRedactor.url(url)
+        case .localFile:
+            return source.sourceValue
+                ?? SettingsL10n.string("settings.live.source.local-file", "Local File")
+        case .pasted:
+            return SettingsL10n.string("settings.live.source.pasted", "Pasted Content")
+        }
+    }
+
+    private var liveFileTypes: [UTType] {
+        var types: [UTType] = [.plainText, .json]
+        if let m3u = UTType(filenameExtension: "m3u") {
+            types.append(m3u)
+        }
+        if let m3u8 = UTType(filenameExtension: "m3u8") {
+            types.append(m3u8)
+        }
+        return types
+    }
+}
+
+private struct LiveSourceValidationStatusView: View {
+    @ObservedObject var progress: LiveSourceValidationState
+    let sourceID: UUID
+
+    var body: some View {
+        if let status = progress.statuses[sourceID] {
+            liveSourceValidationStatus(status)
+        }
     }
 
     @ViewBuilder
@@ -1547,32 +1586,6 @@ private struct LiveSourceSettingsPane: View {
         }
     }
 
-    private func sourceDescription(_ source: StoredLiveSource) -> String {
-        switch source.sourceKind {
-        case .remote:
-            guard let value = source.sourceValue,
-                  let url = URL(string: value) else {
-                return SettingsL10n.string("settings.live.source.remote-url", "Remote URL")
-            }
-            return LogRedactor.url(url)
-        case .localFile:
-            return source.sourceValue
-                ?? SettingsL10n.string("settings.live.source.local-file", "Local File")
-        case .pasted:
-            return SettingsL10n.string("settings.live.source.pasted", "Pasted Content")
-        }
-    }
-
-    private var liveFileTypes: [UTType] {
-        var types: [UTType] = [.plainText, .json]
-        if let m3u = UTType(filenameExtension: "m3u") {
-            types.append(m3u)
-        }
-        if let m3u8 = UTType(filenameExtension: "m3u8") {
-            types.append(m3u8)
-        }
-        return types
-    }
 }
 
 private struct PlayerWindowSettingsControl: View {

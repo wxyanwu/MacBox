@@ -2980,6 +2980,32 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testLiveValidationProgressDoesNotInvalidateWindowState() {
+        let state = AppState(environment: nil)
+        let sourceID = UUID()
+        var windowInvalidations = 0
+        let observation = state.objectWillChange.sink { windowInvalidations += 1 }
+        var rowInvalidations = 0
+        let rowObservation = state.liveSourceValidationState.objectWillChange.sink { rowInvalidations += 1 }
+        for completed in stride(from: 0, through: 120, by: 4) {
+            state.updateLiveSourceValidationStatus(.checking(completed: completed, total: 120), for: sourceID)
+        }
+        state.updateLiveSourceValidationStatus(.completed(removed: 0, total: 120), for: sourceID)
+        XCTAssertEqual(state.liveSourceValidationStatuses[sourceID], .completed(removed: 0, total: 120))
+        XCTAssertEqual(windowInvalidations, 0, "Background progress must not rebuild the window toolbar")
+        XCTAssertEqual(rowInvalidations, 32, "The source row must still receive every progress update")
+        state.updateLiveSourceValidationStatus(.completed(removed: 0, total: 120), for: sourceID)
+        XCTAssertEqual(rowInvalidations, 32, "Identical status must not cause another redraw")
+        state.updateLiveSourceValidationStatus(.failed("fixture failure"), for: sourceID)
+        XCTAssertEqual(state.liveSourceValidationStatuses[sourceID], .failed("fixture failure"))
+        state.updateLiveSourceValidationStatus(nil, for: sourceID)
+        XCTAssertNil(state.liveSourceValidationStatuses[sourceID])
+        XCTAssertEqual(rowInvalidations, 34)
+        XCTAssertEqual(windowInvalidations, 0)
+        withExtendedLifetime((observation, rowObservation)) {}
+    }
+
     func testLiveSourceValidationRequiresEveryLineToBeDefinitivelyUnavailable() {
         XCTAssertTrue(
             LiveSourceValidationPolicy.shouldRemoveChannel(

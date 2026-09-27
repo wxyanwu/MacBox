@@ -4282,6 +4282,13 @@ enum LiveSourceValidationStatus: Equatable {
     case failed(String)
 }
 
+/// Frequent probe progress belongs to the source row, not the window's
+/// navigation/toolbar state. Publishing it on AppState redraws the chrome.
+@MainActor
+final class LiveSourceValidationState: ObservableObject {
+    @Published fileprivate(set) var statuses: [UUID: LiveSourceValidationStatus] = [:]
+}
+
 enum ConfigurationImportPhase: Equatable {
     case downloadingAndParsing
     case parsing
@@ -4825,8 +4832,10 @@ final class AppState: ObservableObject {
     @Published private(set) var isRecoveringLivePlayback = false
     @Published private(set) var hasExhaustedLivePlayback = false
     @Published private(set) var livePlaybackNotice: String?
-    @Published private(set) var liveSourceValidationStatuses:
-        [UUID: LiveSourceValidationStatus] = [:]
+    let liveSourceValidationState = LiveSourceValidationState()
+    var liveSourceValidationStatuses: [UUID: LiveSourceValidationStatus] {
+        liveSourceValidationState.statuses
+    }
     @Published private(set) var selectedDetail: VideoDetail?
     @Published private(set) var pendingDetailSummary: VideoSummary?
 
@@ -12593,7 +12602,7 @@ final class AppState: ObservableObject {
         liveSourceValidationTasks[id] = nil
         liveSourceEPGTasks[id]?.cancel()
         liveSourceEPGTasks[id] = nil
-        liveSourceValidationStatuses[id] = nil
+        updateLiveSourceValidationStatus(nil, for: id)
         liveSourceEPGStatuses[id] = nil
         do {
             try await environment.database.deleteLiveSource(id: id)
@@ -12645,6 +12654,11 @@ final class AppState: ObservableObject {
         )
     }
 
+    func updateLiveSourceValidationStatus(_ status: LiveSourceValidationStatus?, for sourceID: UUID) {
+        guard liveSourceValidationState.statuses[sourceID] != status else { return }
+        liveSourceValidationState.statuses[sourceID] = status
+    }
+
     private func startInitialLiveSourceValidation(
         sourceID: UUID,
         playlist: LivePlaylist
@@ -12652,16 +12666,10 @@ final class AppState: ObservableObject {
         liveSourceValidationTasks[sourceID]?.cancel()
         let channels = playlist.groups.flatMap(\.channels)
         guard !channels.isEmpty else {
-            liveSourceValidationStatuses[sourceID] = .completed(
-                removed: 0,
-                total: 0
-            )
+            updateLiveSourceValidationStatus(.completed(removed: 0, total: 0), for: sourceID)
             return
         }
-        liveSourceValidationStatuses[sourceID] = .checking(
-            completed: 0,
-            total: channels.count
-        )
+        updateLiveSourceValidationStatus(.checking(completed: 0, total: channels.count), for: sourceID)
         let prober = LiveStreamAvailabilityProber()
         liveSourceValidationTasks[sourceID] = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -12714,9 +12722,8 @@ final class AppState: ObservableObject {
                     unavailableChannelIDs.insert(channelID)
                 }
                 completed += batch.count
-                self.liveSourceValidationStatuses[sourceID] = .checking(
-                    completed: completed,
-                    total: channels.count
+                self.updateLiveSourceValidationStatus(
+                    .checking(completed: completed, total: channels.count), for: sourceID
                 )
             }
 
@@ -12730,13 +12737,12 @@ final class AppState: ObservableObject {
                     sourceID: sourceID,
                     channels: channels
                 )
-                self.liveSourceValidationStatuses[sourceID] = .completed(
-                    removed: unavailableChannelIDs.count,
-                    total: channels.count
+                self.updateLiveSourceValidationStatus(
+                    .completed(removed: unavailableChannelIDs.count, total: channels.count), for: sourceID
                 )
             } catch {
-                self.liveSourceValidationStatuses[sourceID] = .failed(
-                    self.localizedRuntimeErrorMessage(error)
+                self.updateLiveSourceValidationStatus(
+                    .failed(self.localizedRuntimeErrorMessage(error)), for: sourceID
                 )
             }
             self.liveSourceValidationTasks[sourceID] = nil
