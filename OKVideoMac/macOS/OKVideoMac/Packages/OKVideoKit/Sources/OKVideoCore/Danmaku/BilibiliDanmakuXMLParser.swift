@@ -46,6 +46,9 @@ public struct BilibiliDanmakuXMLParser: Sendable {
             let message = parser.parserError?.localizedDescription ?? "无法解析"
             throw DanmakuXMLParserError.invalidXML(message)
         }
+        guard delegate.isDanmakuDocument else {
+            throw DanmakuXMLParserError.invalidXML("文件不是支持的弹幕格式")
+        }
         return DanmakuTimeline(comments: delegate.comments)
     }
 }
@@ -54,6 +57,8 @@ private final class Delegate: NSObject, XMLParserDelegate {
     let maximumComments: Int
     let maximumTextCharacters: Int
     var comments: [DanmakuComment] = []
+    var isDanmakuDocument = false
+    private var sawRoot = false
     private var fields: [Substring] = []
     private var text = ""
     private var commentOrdinal = 0
@@ -71,6 +76,10 @@ private final class Delegate: NSObject, XMLParserDelegate {
         qualifiedName qName: String?,
         attributes attributeDict: [String: String] = [:]
     ) {
+        if !sawRoot {
+            sawRoot = true
+            isDanmakuDocument = elementName == "i"
+        }
         guard elementName == "d", comments.count < maximumComments else { return }
         fields = (attributeDict["p"] ?? "").split(separator: ",", omittingEmptySubsequences: false)
         text = ""

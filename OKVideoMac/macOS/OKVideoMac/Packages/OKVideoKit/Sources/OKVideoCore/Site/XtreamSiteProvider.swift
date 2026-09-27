@@ -334,7 +334,8 @@ public final class XtreamSiteProvider: SiteProvider, @unchecked Sendable {
             name: title,
             url: locator.encoded,
             referenceIdentity: locator.episodeIdentity,
-            providerResourceReference: resourceReference
+            providerResourceReference: resourceReference,
+            metadata: .init(form: .movie)
         )
         return VideoDetail(
             summary: summary,
@@ -452,7 +453,8 @@ public final class XtreamSiteProvider: SiteProvider, @unchecked Sendable {
             name: name,
             url: locator.encoded,
             referenceIdentity: locator.episodeIdentity,
-            providerResourceReference: playbackReference(for: locator)
+            providerResourceReference: playbackReference(for: locator),
+            metadata: .init(form: .series, season: seasonNumber, episode: dto.episodeNumber)
         )
     }
 
@@ -515,6 +517,7 @@ public final class XtreamSiteProvider: SiteProvider, @unchecked Sendable {
             headers: HTTPHeaders(["User-Agent": userAgent]),
             format: locator.containerExtension,
             validationPolicy: .playerAuthoritative,
+            networkPolicy: .systemHTTPProxy,
             resourceReference: playbackReference(for: locator)
         )
     }

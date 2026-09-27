@@ -1,10 +1,10 @@
 # Compatibility
 
-- 对照版本：0.7.0（Build 102）
-- 最近更新：2026-09-19
-- 当前源码版本：0.7.0（Build 102），Apple Silicon / arm64 / macOS 12.0+
+- 对照版本：0.7.3（Build 129）
+- 最近更新：2026-09-27
+- 当前发布候选：0.7.3（Build 129），Apple Silicon / arm64 / macOS 12.0+
 - 最新公开公证 DMG：0.6.1（Build 101）；Developer ID、Apple Accepted、Staple、Gatekeeper 与安装 smoke 均通过
-- 0.7.0 的目标 tag `v0.7.0` 仅用于后续正式发布；当前交付是本地 ad-hoc 验收包。
+- 0.7.3 的目标 tag `v0.7.3` 仅在 exact release commit 的正式门禁完成后创建。
 
 ## 概述
 
@@ -73,7 +73,8 @@ Native Provider 处理 type 0、1、4，不依赖 QuickJS、Node 或 Android。�
 | Series | Supported | 分类、列表、详情、Season/Episode 与连续播放 |
 | Search | Supported | Movie + Series 本地索引和聚合搜索接入 |
 | Basic Live | Supported | 分类、频道、搜索、收藏/隐藏、刷新及同频道 TS/HLS 有限回退 |
-| Xtream EPG / catch-up / timeshift / direct_source | Unsupported | 不从导入 M3U/XMLTV 的能力推导 Native Xtream 支持 |
+| Short EPG | Supported | 频道短节目单和 Full Guide 由 Xtream EPG API 按频道、日期及有限时间窗加载 |
+| catch-up / timeshift / direct_source | Unsupported | 这些能力没有完整执行链，不能从 EPG 或导入直播能力推导 |
 
 Native Live 单独使用静态 HTTP 代理和 HTTPS CONNECT 决策，进入/离开该策略时
 销毁旧播放器实例，避免网络参数残留。普通 VOD 为 30 秒、导入 Live 为 8 秒，
@@ -182,9 +183,11 @@ Native Xtream Basic Live 使用独立的 Provider 目录和引用；不导出带
 ## EPG
 
 XMLTV EPG 可由 M3U 的 `tvg-url` / `url-tvg` 指定，支持远程 HTTP/HTTPS、gzip、
-缓存和按 `tvg-id`、`tvg-name`、频道名匹配。当前主要消费频道名称和节目开始、结束、
-标题；这不等同于通用 XML 配置支持。TXT/JSON 直播列表当前没有对应的 playlist-level
-EPG URL 执行链。
+缓存和按 `tvg-id`、`tvg-name`、频道名匹配。Native Xtream 通过短 EPG API 按频道
+加载节目；Full Guide 只查询可见频道附近的有限日期/时间窗，限制请求数、并发和缓存。
+两条路径都消费频道、开始/结束时间和标题，并支持日期导航、回到当前时刻和节目详情。
+这不等同于通用 XML 配置支持；TXT/JSON 直播列表当前没有 playlist-level EPG URL
+执行链。
 
 ## 播放解析
 
@@ -253,19 +256,19 @@ OKVideoMac 实现了 CatVod/CatPaw 风格 Node 视频接口的兼容子集，包
 | 顶层 `flags` | 可解析；不作为通用解析器选择器。解析器匹配使用 `parse.ext.flag` |
 | `proxy` / `doh` / `rules` / `hosts` / `ads` | 可解析或保留；没有确认到完整功能执行链 |
 | `ijk` | 作为未知字段保留，不表示支持上游 IJK 配置语义 |
-| `danmaku` | 可保留或由 Node 配置归一化；尚未接入播放层 |
+| `danmaku` | 已接入播放层；只接受实现支持的源声明、XML/JSON payload 或显式配置的服务，不代表任意上游弹幕协议都兼容 |
 | 未知字段 | 可以 round-trip；不得据此推导功能支持 |
 
 ## 搜索、详情与状态恢复
 
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
-| 多站聚合搜索 | Supported | 每次搜索拥有独立 session；取消后保留结果，迟到回调不能覆盖新搜索 |
+| 多站聚合搜索 | Supported | 每次搜索拥有独立 session；取消后保留结果，支持有界续页，迟到回调不能覆盖新搜索 |
 | 搜索逐层返回 | Supported | Back、Esc、Command-[ 一致：执行中先停止，再返回搜索前页面 |
 | 详情请求隔离 | Supported | 配置、站点、影片和请求代际共同决定结果所有权 |
 | 长剧集分页 | Supported | 大集数按范围分段，已覆盖 120 集与多线路 |
-| 历史 / 收藏恢复 | Supported | 保留原配置和站点身份；源已删除或变化时仍可能无法恢复播放 |
-| 配置 / 历史备份恢复 | Supported | 校验格式并隔离活动状态；不包含明文账号凭据 |
+| 历史 / 收藏恢复 | Supported | 保留配置、站点和稳定媒体身份；旧记录迁移，无法核验来源时要求显式修复 |
+| 便携备份恢复 | Supported | schema v4 包含配置、历史、收藏和稳定弹幕绑定；不包含明文账号凭据、运行时 URL、Header/Cookie 或代理 lease |
 
 ## 网盘授权与转存
 
@@ -290,7 +293,9 @@ OKVideoMac 实现了 CatVod/CatPaw 风格 Node 视频接口的兼容子集，包
 - Android Bridge 仅为受支持的 `csp_` Java/Dex 源所需；Managed API 35 Runtime
   在 macOS 12、13、15 尚未获得真实机器 Emulator E2E；
 - XML CMS 自动化覆盖窄于 JSON CMS；
-- 不支持 catchup/timeshift 或 DRM；
+- Xtream EPG 受服务端数据质量和请求窗口限制；不支持 catchup/timeshift、
+  `direct_source` 或 DRM；
+- 弹幕服务只覆盖已实现的 XML/JSON 和 CatPaw 兼容子集；第三方服务必须由用户配置；
 - 实际播放仍取决于 libmpv、codec、服务器和媒体行为。
 
 ## 测试覆盖
@@ -304,7 +309,8 @@ OKVideoMac 实现了 CatVod/CatPaw 风格 Node 视频接口的兼容子集，包
 - Node `video.sites` 归一化、`indexs` 首页路由、聚合搜索限流和播放 Range 选择；
 - Android Bridge 方法/代理映射；
 - M3U/TXT/JSON 直播解析；
-- XMLTV/gzip/缓存；
+- XMLTV/gzip/缓存、Native Xtream short EPG 和有限 Full Guide demand；
+- 弹幕 XML/JSON 解析、来源优先级、剧集匹配、绑定隔离和播放器时钟；
 - direct、JSON parser、Web sniff 和 fallback 播放解析。
 
 项目没有声称已经测试完整公开 TVBox、FongMi、MiraPlay 或 CatPawOpen 源 corpus。
@@ -325,6 +331,7 @@ OKVideoMac 实现了 CatVod/CatPaw 风格 Node 视频接口的兼容子集，包
 | --- | --- | --- |
 | libmpv Client / Render API | Supported | arm64/macOS 12 Release 构建、动态依赖闭包、实机播放和生命周期实验通过 |
 | 点播、直播和基本控制 | Supported | 播放/暂停、Seek、音量、静音、倍速、切集和全屏已接入 |
+| 原生弹幕 | Supported | 源/导入/服务来源、匹配和校准已接入；渲染由显示刷新同步，服务端可用性不作保证 |
 | 媒体 Header | Supported | 使用结构化 mpv node array 传递，不拼接命令字符串 |
 | 音轨和字幕轨 | Supported | 轨道列表、偏好匹配和切换策略有单元测试 |
 | 外挂字幕 | Partial | `sub-add` 路径已接入；仍需扩大字符集、容器和远程字幕样本覆盖 |
@@ -357,6 +364,7 @@ App 支持范围和 Managed Android Runtime 实机验证是两个不同结论：
 | Notarization / Staple / Gatekeeper | Supported | 0.6.1（Build 101）已取得 Apple notarization `Accepted`，并通过 staple、`stapler validate` 与 Gatekeeper |
 | 0.6.0（Build 100）正式发布 | Supported | DMG、内部 ZIP、源码、四份 SBOM、Notices 和 APK 由外层 manifest/SHA256SUMS 绑定到 tag `v0.6.0` 指向的 exact commit |
 | 0.6.1（Build 101）正式发布 | Supported | 1060 项自动测试通过，9 项条件测试跳过；tag `v0.6.1` 固定提交 `25155f52fb8c416f3245c9a829a93175dec9857b`；正式 DMG 独立完成公证、Gatekeeper 与安装 smoke |
+| 0.7.3（Build 129）发布候选 | Pending formal distribution | 本地自动测试、静态检查和 Release 包结果见发布就绪记录；尚未创建 tag、签名、公证或上传 |
 | App Sandbox | Not Applicable | 当前为 Developer ID 外部分发目标；Sandbox 与 Hardened Runtime 是不同边界 |
 
 ## 明确不提供

@@ -9,23 +9,22 @@ struct PlayerView: View {
     @ObservedObject private var playerSnapshotState: PlayerSnapshotState
     @State private var scrubPosition: Double?
     @State private var controlsVisible = true
+    @StateObject private var controlTooltip = PlayerControlTooltipState()
     @State private var controlsHovering = false
     @State private var hideControlsTask: Task<Void, Never>?
-    @State private var displayedVolume: Double?
-    @State private var pendingVolume: Double?
     @State private var isVolumeEditing = false
     @State private var isCompactVolumePresented = false
     @State private var isLiveVolumeControlPresented = false
     @State private var isLiveVolumeHovering = false
-    @State private var volumeCommandTask: Task<Void, Never>?
     @State private var activeUtilityPanel: PlayerUtilityPanel?
     @State private var inspectedPlayerEpisode: EpisodePresentation?
+    @State private var playerEpisodeLocateRevision = 0
     @State private var playerEpisodePageIndex = 0
     @State private var isWindowFullScreen = false
     @State private var isProgressHovering = false
     @State private var progressHoverFraction: Double?
-    @State private var lastLiveChannelID: String?
-    @State private var holdsPreviousLiveFrame = false
+    @State private var liveLoadingVisible = false
+    @State private var liveLoadingSlow = false
     @State private var playbackActivityOverlayVisible = false
     @State private var playbackActivityOverlayShownAt: Date?
     @State private var playbackActivityOverlayTask: Task<Void, Never>?
@@ -84,10 +83,7 @@ struct PlayerView: View {
             }
 
             playbackStatusOverlay
-                .allowsHitTesting(
-                    state.hasHistoryPlaybackChoices
-                        || (isFailed && state.canRetryHistoryPlayback)
-                )
+                .allowsHitTesting(isFailed || liveLoadingSlow || state.hasHistoryPlaybackChoices)
 
             if state.isLivePlayback,
                let notice = state.livePlaybackNotice {
@@ -98,7 +94,7 @@ struct PlayerView: View {
                         .foregroundStyle(.white)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
-                        .background(.black.opacity(0.72), in: Capsule())
+                        .shadow(color: .black.opacity(0.65), radius: 2, y: 1)
                         .padding(.bottom, controlsVisible ? 92 : 28)
                 }
                 .transition(.opacity)
@@ -142,9 +138,7 @@ struct PlayerView: View {
                 }
                 .padding(.trailing, 18)
                 .padding(.bottom, 82)
-                .transition(
-                    .opacity.combined(with: .move(edge: .bottom))
-                )
+                .transition(.identity)
                 .zIndex(50)
                 .environment(\.colorScheme, .dark)
             }
@@ -166,18 +160,18 @@ struct PlayerView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.clear)
+        .modifier(PlayerControlTooltipOverlay(model: controlTooltip))
+        .onChange(of: controlsVisible) { if !$0 { controlTooltip.dismiss() } }
+        .onChange(of: scrubPosition != nil) { if $0 { controlTooltip.dismiss() } }
         .onAppear {
-            lastLiveChannelID = state.livePlaybackChannel?.id
             revealControls()
             updatePlaybackActivityOverlay(
                 isActive: hasTransientPlaybackActivity
             )
         }
         .onDisappear {
+            controlTooltip.dismiss()
             hideControlsTask?.cancel()
-            volumeCommandTask?.cancel()
-            volumeCommandTask = nil
-            pendingVolume = nil
             isLiveVolumeControlPresented = false
             isCompactVolumePresented = false
             isLiveVolumeHovering = false
@@ -188,16 +182,29 @@ struct PlayerView: View {
             playbackActivityOverlayVisible = false
             playbackActivityOverlayShownAt = nil
         }
+        .task(id: liveLoadingTaskID) {
+            liveLoadingVisible = false
+            liveLoadingSlow = false
+            guard isLiveWaiting else { return }
+            do {
+                try await Task.sleep(nanoseconds: LiveLoadingPresentationPolicy.delayNanoseconds)
+                try Task.checkCancellation()
+                guard isLiveWaiting else { return }
+                liveLoadingVisible = true
+                try await Task.sleep(nanoseconds: LiveLoadingPresentationPolicy.slowDelayNanoseconds - LiveLoadingPresentationPolicy.delayNanoseconds)
+                try Task.checkCancellation()
+                guard isLiveWaiting else { return }
+                liveLoadingSlow = true
+            } catch { return }
+        }
         .onChange(of: state.playerSnapshot.status) { _ in
             revealControls()
         }
         .onChange(of: hasTransientPlaybackActivity) { isActive in
             updatePlaybackActivityOverlay(isActive: isActive)
         }
-        .onChange(of: state.livePlaybackChannel?.id) { channelID in
-            handleLiveChannelChange(channelID)
-        }
         .onChange(of: activeUtilityPanel) { panel in
+            controlTooltip.dismiss()
             if panel != .episodes {
                 inspectedPlayerEpisode = nil
             }
@@ -212,7 +219,7 @@ struct PlayerView: View {
                 alignPlayerEpisodePageWithCurrentEpisode()
             }
         }
-        .onChange(of: state.playerEpisodePresentations.count) { _ in
+        .onChange(of: state.playerEpisodePresentations) { _ in
             if activeUtilityPanel == .episodes {
                 alignPlayerEpisodePageWithCurrentEpisode()
             }
@@ -384,7 +391,7 @@ struct PlayerView: View {
                     ? L10n.string("common.play", fallback: "Play")
                     : L10n.string("common.pause", fallback: "Pause")
             )
-            .help(
+            .playerControlHelp(
                 isPaused
                     ? L10n.string("common.play", fallback: "Play")
                     : L10n.string("common.pause", fallback: "Pause")
@@ -425,7 +432,7 @@ struct PlayerView: View {
         .contentShape(Circle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(L10n.string("player.live", fallback: "Live"))
-        .help(L10n.string("player.live", fallback: "Live"))
+        .playerControlHelp(L10n.string("player.live", fallback: "Live"))
     }
 
     private func liveVolumeControl(
@@ -436,18 +443,18 @@ struct PlayerView: View {
                 Slider(
                     value: Binding(
                         get: {
-                            displayedVolume ?? state.playerSnapshot.volume
+                            state.playerAudioPreference.volume
                         },
                         set: enqueueLivePlayerVolume
                     ),
-                    in: 0...100,
+                    in: 0...130,
                     onEditingChanged: { editing in
                         isVolumeEditing = editing
                         if editing {
                             keepControlsVisible()
                         } else {
                             enqueueLivePlayerVolume(
-                                displayedVolume ?? state.playerSnapshot.volume
+                                state.playerAudioPreference.volume
                             )
                             if !isLiveVolumeHovering {
                                 isLiveVolumeControlPresented = false
@@ -478,7 +485,7 @@ struct PlayerView: View {
                 Task { await state.togglePlayerMute() }
             } label: {
                 Image(
-                    systemName: state.playerSnapshot.isMuted
+                    systemName: state.playerAudioPreference.muted
                         ? "speaker.slash.fill"
                         : "speaker.wave.2.fill"
                 )
@@ -496,12 +503,12 @@ struct PlayerView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(
-                state.playerSnapshot.isMuted
+                state.playerAudioPreference.muted
                     ? L10n.string("player.unmute", fallback: "Unmute")
                     : L10n.string("player.mute-volume", fallback: "Mute and Volume")
             )
-            .help(
-                state.playerSnapshot.isMuted
+            .playerControlHelp(
+                state.playerAudioPreference.muted
                     ? L10n.string("player.unmute", fallback: "Unmute")
                     : L10n.string("player.mute-volume", fallback: "Mute and Volume")
             )
@@ -554,7 +561,7 @@ struct PlayerView: View {
                 : L10n.string("player.enter-full-screen", fallback: "Enter Full Screen")
         )
         .foregroundColor(.white.opacity(0.96))
-        .help(
+        .playerControlHelp(
             isWindowFullScreen
                 ? L10n.string("player.exit-full-screen", fallback: "Exit Full Screen")
                 : L10n.string("player.enter-full-screen", fallback: "Enter Full Screen")
@@ -567,14 +574,7 @@ struct PlayerView: View {
     }
 
     private func enqueueLivePlayerVolume(_ volume: Double) {
-        if state.playerSnapshot.isMuted {
-            Task { @MainActor in
-                if state.playerSnapshot.isMuted {
-                    await state.togglePlayerMute()
-                }
-            }
-        }
-        enqueuePlayerVolume(volume)
+        state.requestPlayerVolume(volume)
     }
 
     private var playbackDisplayTitle: String {
@@ -591,12 +591,7 @@ struct PlayerView: View {
         guard let contentTitle, !contentTitle.isEmpty else {
             return presentation.displayName
         }
-        if presentation.seasonNumber != nil
-            || presentation.episodeNumber != nil
-            || presentation.isSpecial {
-            return "\(contentTitle) · \(presentation.displayName)"
-        }
-        return contentTitle
+        return PlayerEpisodeTitlePolicy.title(content: contentTitle, resource: presentation.displayName)
     }
 
     private var liveStreamSummary: String {
@@ -618,15 +613,21 @@ struct PlayerView: View {
     private func episodePanelDisplayName(
         _ presentation: EpisodePresentation
     ) -> String {
-        if let number = presentation.episodeNumber {
-            return L10n.string("episode.number", fallback: "Episode %d", number)
-        }
-        return presentation.displayName
+        presentation.displayName
     }
 
     private var floatingHeader: some View {
         ZStack {
-            Text(playbackDisplayTitle)
+            HStack(spacing: 5) {
+                Text(state.currentPlaybackContentTitle ?? state.currentPlaybackTitle)
+                    .lineLimit(1).truncationMode(.tail)
+                if let current = state.currentPlayerEpisodePresentation,
+                   current.displayName != state.currentPlaybackContentTitle {
+                    Text("· " + current.displayName)
+                        .lineLimit(1).truncationMode(.middle).layoutPriority(1)
+                }
+            }
+                .help(playbackDisplayTitle)
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(.white.opacity(0.92))
                 .lineLimit(1)
@@ -667,31 +668,26 @@ struct PlayerView: View {
         .foregroundColor(.white.opacity(0.88))
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(.ultraThinMaterial, in: Capsule())
-        .background(Color.black.opacity(0.20), in: Capsule())
-        .overlay {
-            Capsule().stroke(Color.white.opacity(0.06), lineWidth: 1)
-        }
-        .clipShape(Capsule())
+        .shadow(color: .black.opacity(0.65), radius: 2, y: 1)
     }
 
     @ViewBuilder
     private var playbackStatusOverlay: some View {
         if shouldShowStatusOverlay {
-            VStack(spacing: 8) {
-                Text(state.playbackStageDescription)
+            VStack(spacing: 10) {
+                if !isFailed && !state.hasHistoryPlaybackChoices {
+                    AppActivityIndicator(size: .small, tint: .white)
+                }
+                Text(isFailed ? L10n.string("player.stage.failed", fallback: "Playback Failed")
+                    : state.isLivePlayback
+                        ? (liveLoadingSlow ? L10n.string("live.loading-slow", fallback: "Connection is taking longer than usual")
+                           : L10n.string("live.loading-channel", fallback: "Loading %@…", state.livePlaybackChannel?.name ?? ""))
+                        : state.playbackStageDescription)
                     .font(.headline)
-                Text(state.playerNetworkSpeedDescription)
-                    .font(.body.monospacedDigit())
-
-                if let attempt = state.currentPlaybackAttempt {
-                    Text(
-                        "\(attempt.sourceName) · "
-                            + L10n.string("player.direct-stream", fallback: "Direct Stream") + " · "
-                            + L10n.string("player.attempt-number", fallback: "Attempt %d", attempt.number)
-                    )
-                    .font(.caption)
-                    .foregroundColor(.white.opacity(0.66))
+                if !isFailed {
+                    Text(state.playerNetworkSpeedDescription)
+                        .font(.caption.monospacedDigit())
+                        .foregroundColor(.white.opacity(0.78))
                 }
 
                 if isFailed, let message = state.playbackFailureSummary {
@@ -741,6 +737,22 @@ struct PlayerView: View {
                     .buttonStyle(.bordered)
                 }
 
+                if (isFailed || liveLoadingSlow), state.canRetryCurrentPlayback,
+                   !state.canRetryHistoryPlayback, !state.canOpenNodeConfigurationForPlaybackFailure {
+                    HStack(spacing: 12) {
+                        Button(L10n.string("common.retry", fallback: "Try Again")) {
+                            Task { await state.retryCurrentPlayback() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        if state.isLivePlayback {
+                            Button(L10n.string("live.next-channel", fallback: "Next Channel")) {
+                                Task { await state.switchLiveChannel(by: 1) }
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                }
+
                 if isFailed, state.canRetryHistoryPlayback {
                     HStack(spacing: 10) {
                         Button(L10n.string("common.retry", fallback: "Try Again")) {
@@ -759,6 +771,12 @@ struct PlayerView: View {
 
                 if isFailed,
                    state.canOpenNodeConfigurationForPlaybackFailure {
+                    if !state.canRetryHistoryPlayback {
+                        Button(L10n.string("common.retry", fallback: "Try Again")) {
+                            state.retryNodePlaybackFailure()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
                     Button(L10n.string("player.open-cloud-authorization", fallback: "Open Cloud Authorization Settings")) {
                         state.openNodeConfigurationForPlaybackFailure()
                     }
@@ -768,9 +786,10 @@ struct PlayerView: View {
                 }
             }
             .foregroundColor(.white)
-            .padding(.horizontal, 24)
-            .frame(maxWidth: 600)
-            .shadow(color: .black.opacity(0.95), radius: 4, y: 1)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: state.hasHistoryPlaybackChoices ? 560 : 420)
+            .padding(24)
+            .shadow(color: .black.opacity(0.65), radius: 2, y: 1)
             .transition(.opacity)
         }
     }
@@ -833,7 +852,7 @@ struct PlayerView: View {
             isCompactVolumePresented.toggle()
             keepControlsVisible()
         } label: {
-            utilityMenuIcon(state.playerSnapshot.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+            utilityMenuIcon(state.playerAudioPreference.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
         }
         .buttonStyle(.plain)
         .accessibilityLabel(L10n.string("player.volume", fallback: "Volume"))
@@ -844,7 +863,7 @@ struct PlayerView: View {
 
     private var compactUtilityMenu: some View {
         Menu {
-            compactPanelAction(.episodes, title: L10n.string("player.choose-episode", fallback: "Choose Episode"))
+            compactPanelAction(.episodes, title: state.playerResourcePanelTitle)
             compactPanelAction(.audio, title: L10n.string("player.audio-tracks", fallback: "Audio Tracks"))
             compactPanelAction(.subtitles, title: L10n.string("player.subtitles", fallback: "Subtitles"))
             compactPanelAction(.danmaku, title: "弹幕")
@@ -854,7 +873,7 @@ struct PlayerView: View {
         }
         .playerUtilityMenuStyle()
         .fixedSize()
-        .help(L10n.string("common.more", fallback: "More"))
+        .playerControlHelp(L10n.string("common.more", fallback: "More"))
         .accessibilityLabel(L10n.string("common.more", fallback: "More"))
     }
 
@@ -923,16 +942,7 @@ struct PlayerView: View {
                         .foregroundColor(.white)
                         .padding(.horizontal, 8)
                         .frame(height: 25)
-                        .background(Color.black.opacity(0.68))
-                        .background(.ultraThinMaterial)
-                        .clipShape(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        )
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .stroke(Color.white.opacity(0.10), lineWidth: 1)
-                        }
-                        .shadow(color: .black.opacity(0.32), radius: 6, y: 2)
+                        .shadow(color: .black.opacity(0.65), radius: 2, y: 1)
                         .position(
                             x: PlayerProgressHoverPolicy.tooltipCenterX(
                                 fraction: fraction,
@@ -966,10 +976,10 @@ struct PlayerView: View {
     private var volumeControls: some View {
         HStack(spacing: 7) {
             playerIconButton(
-                systemImage: state.playerSnapshot.isMuted
+                systemImage: state.playerAudioPreference.muted
                     ? "speaker.slash.fill"
                     : "speaker.wave.2.fill",
-                help: state.playerSnapshot.isMuted
+                help: state.playerAudioPreference.muted
                     ? L10n.string("player.unmute", fallback: "Unmute")
                     : L10n.string("player.mute", fallback: "Mute")
             ) {
@@ -978,17 +988,17 @@ struct PlayerView: View {
 
             Slider(
                 value: Binding(
-                    get: { displayedVolume ?? state.playerSnapshot.volume },
+                    get: { state.playerAudioPreference.volume },
                     set: enqueuePlayerVolume
                 ),
-                in: 0...100,
+                in: 0...130,
                 onEditingChanged: { editing in
                     isVolumeEditing = editing
                     if editing {
                         keepControlsVisible()
                     } else {
                         enqueuePlayerVolume(
-                            displayedVolume ?? state.playerSnapshot.volume
+                            state.playerAudioPreference.volume
                         )
                         scheduleControlsHide()
                     }
@@ -1001,43 +1011,14 @@ struct PlayerView: View {
     }
 
     private func enqueuePlayerVolume(_ volume: Double) {
-        let clampedVolume = min(max(volume, 0), 100)
-        displayedVolume = clampedVolume
-        pendingVolume = clampedVolume
-        guard volumeCommandTask == nil else { return }
-        volumeCommandTask = Task { @MainActor in
-            await drainPendingVolumeChanges()
-        }
-    }
-
-    @MainActor
-    private func drainPendingVolumeChanges() async {
-        while !Task.isCancelled, let volume = pendingVolume {
-            pendingVolume = nil
-            await state.setPlayerVolume(volume)
-            do {
-                // About 16 updates per second remains visually continuous and
-                // prevents a drag from flooding libmpv's serial command queue.
-                try await Task.sleep(nanoseconds: 60_000_000)
-            } catch {
-                break
-            }
-        }
-        volumeCommandTask = nil
-        if !Task.isCancelled, pendingVolume != nil {
-            volumeCommandTask = Task { @MainActor in
-                await drainPendingVolumeChanges()
-            }
-        } else if !isVolumeEditing {
-            displayedVolume = nil
-        }
+        state.requestPlayerVolume(volume)
     }
 
     private var transportControls: some View {
         HStack(spacing: 6) {
             playerIconButton(
                 systemImage: "backward.end.fill",
-                help: L10n.string("player.previous-episode", fallback: "Previous Episode"),
+                help: state.previousPlayerResourceTitle,
                 disabled: !state.hasPreviousEpisode
             ) {
                 Task { await state.playAdjacentEpisode(offset: -1) }
@@ -1066,7 +1047,7 @@ struct PlayerView: View {
             }
             .buttonStyle(.plain)
             .foregroundColor(Color.black.opacity(0.86))
-            .help(
+            .playerControlHelp(
                 isPaused
                     ? L10n.string("common.play", fallback: "Play")
                     : L10n.string("common.pause", fallback: "Pause")
@@ -1084,7 +1065,7 @@ struct PlayerView: View {
 
             playerIconButton(
                 systemImage: "forward.end.fill",
-                help: L10n.string("player.next-episode", fallback: "Next Episode"),
+                help: state.nextPlayerResourceTitle,
                 disabled: !state.hasNextEpisode
             ) {
                 Task { await state.playAdjacentEpisode(offset: 1) }
@@ -1097,7 +1078,7 @@ struct PlayerView: View {
             utilityPanelButton(
                 systemImage: "list.bullet",
                 panel: .episodes,
-                help: L10n.string("player.choose-episode", fallback: "Choose Episode")
+                help: state.playerResourcePanelTitle
             )
             utilityPanelButton(
                 systemImage: "waveform",
@@ -1152,12 +1133,12 @@ struct PlayerView: View {
             if panel == .episodes, !isActive {
                 alignPlayerEpisodePageWithCurrentEpisode()
             }
-            withAnimation(.easeInOut(duration: 0.16)) {
-                activeUtilityPanel = isActive ? nil : panel
-            }
+            // This is a direct manipulation control. Publish the panel in the
+            // same event turn so its first button can be hit immediately.
+            activeUtilityPanel = isActive ? nil : panel
             keepControlsVisible()
         } label: {
-            Image(systemName: systemImage)
+            utilityPanelGlyph(systemImage: systemImage, panel: panel)
                 .symbolRenderingMode(.monochrome)
                 .font(.system(size: utilityIconSize, weight: .semibold))
                 .foregroundStyle(Color.white.opacity(isActive ? 1 : 0.96))
@@ -1166,7 +1147,45 @@ struct PlayerView: View {
                 .modifier(PlayerControlHoverEffect())
         }
         .buttonStyle(.plain)
-        .help(help)
+        .playerControlHelp(help)
+        .accessibilityLabel(help)
+        .accessibilityValue(
+            isActive
+                ? L10n.string("player.panel.open", fallback: "Panel Open")
+                : L10n.string("player.panel.closed", fallback: "Panel Closed")
+        )
+    }
+
+    @ViewBuilder
+    private func utilityPanelGlyph(
+        systemImage: String,
+        panel: PlayerUtilityPanel
+    ) -> some View {
+        switch panel {
+        case .subtitles:
+            ZStack {
+                RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                    .stroke(lineWidth: 1.5)
+                    .frame(width: 19, height: 14)
+                Text("CC")
+                    .font(.system(size: 7.5, weight: .heavy, design: .rounded))
+            }
+            .accessibilityHidden(true)
+        case .danmaku:
+            HStack(spacing: 1.5) {
+                VStack(alignment: .leading, spacing: 2.5) {
+                    Capsule().frame(width: 11, height: 1.5)
+                    Capsule().frame(width: 8, height: 1.5)
+                    Capsule().frame(width: 12, height: 1.5)
+                }
+                Image(systemName: "chevron.right.2")
+                    .font(.system(size: 6.5, weight: .bold))
+            }
+            .frame(width: 21, height: 15)
+            .accessibilityHidden(true)
+        default:
+            Image(systemName: systemImage)
+        }
     }
 
     @ViewBuilder
@@ -1196,24 +1215,52 @@ struct PlayerView: View {
 
     private func episodePanel(maximumSize: CGSize) -> some View {
         let presentations = state.playerEpisodePresentations
-        let pageCount = PlayerEpisodePagePolicy.pageCount(
-            episodeCount: presentations.count
-        )
-        let safePageIndex = PlayerEpisodePagePolicy.clampedPageIndex(
-            playerEpisodePageIndex,
-            episodeCount: presentations.count
-        )
+        let pageCount = PlayerEpisodePagePolicy.pages(presentations).count
+        let selectionSessionID = state.playerEpisodeSelectionSessionID
+        let safePageIndex = min(max(0, playerEpisodePageIndex), max(0, pageCount - 1))
         let pagePresentations = PlayerEpisodePagePolicy.page(
             presentations,
             pageIndex: safePageIndex
         )
-        return playerPanel(width: 500, maximumSize: maximumSize) {
+        return playerPanel(width: 500, maximumSize: maximumSize, scrollContent: false) {
             VStack(alignment: .leading, spacing: 12) {
                 panelHeader(
-                    title: L10n.string("player.episodes", fallback: "Episodes"),
-                    detail: L10n.string("player.episode-count", fallback: "%d episodes", state.playerEpisodes.count)
+                    title: state.playerResourcePanelTitle,
+                    detail: state.playerResourceCountText
                 )
 
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(L10n.string(state.hasLoadedPlayerEpisode ? "player.episode.now" : "player.episode.pending", fallback: "Current Resource: %@", state.currentPlayerEpisodePresentation?.displayName ?? state.currentPlaybackTitle))
+                        .font(.callout.weight(.semibold)).lineLimit(2)
+                    HStack {
+                        Text([state.currentPlayerSourceName, state.currentPlayerVersionText].filter { !$0.isEmpty }.joined(separator: " · ")).lineLimit(1).font(.caption).foregroundColor(.secondary)
+                        Spacer()
+                        Button(L10n.string("player.episode.locate", fallback: "Locate Current")) {
+                            alignPlayerEpisodePageWithCurrentEpisode()
+                            playerEpisodeLocateRevision += 1
+                        }.buttonStyle(.bordered).controlSize(.small)
+                    }
+                    if state.isRestoringPlayerEpisodeList {
+                        Text(L10n.string("player.episode.restoring", fallback: "Restoring episode list…")).font(.caption)
+                    } else if state.isPlayerEpisodeListIncomplete {
+                        HStack {
+                            Text(L10n.string("player.episode.partial", fallback: "Only the current resource was restored")).font(.caption)
+                            Button(L10n.string("common.retry", fallback: "Retry")) { state.retryPlayerEpisodeList() }
+                                .buttonStyle(.bordered).controlSize(.small)
+                        }
+                    }
+                    if !state.canSelectPlayerEpisode {
+                        Text(L10n.string("player.episode.switching", fallback: "Preparing playback; selection will be available shortly")).font(.caption)
+                    } else if state.canRetryPlayerEpisode {
+                        Button(L10n.string("player.episode.retry", fallback: "Retry Playback")) {
+                            Task {
+                                if let episode = state.currentPlaybackEpisode {
+                                    await state.playPlayerEpisode(episode, expectedSessionID: selectionSessionID)
+                                }
+                            }
+                        }.buttonStyle(.bordered).controlSize(.small)
+                    }
+                }
                 if state.isPlayerEpisodeListPreparing {
                     HStack(spacing: 9) {
                         AppActivityIndicator(size: .small, tint: .white)
@@ -1240,23 +1287,27 @@ struct PlayerView: View {
                         displayName: episodePanelDisplayName,
                         onPlay: { presentation in
                             inspectedPlayerEpisode = nil
-                            activeUtilityPanel = nil
                             Task {
-                                await state.playPlayerEpisode(
-                                    presentation.episode
-                                )
+                                await state.playPlayerEpisode(presentation.episode, expectedSessionID: selectionSessionID)
                             }
                         },
                         onInspect: { presentation in
                             inspectedPlayerEpisode = presentation
-                        }
+                        },
+                        selectionEnabled: state.canSelectPlayerEpisode,
+                        canRetrySelected: state.canRetryPlayerEpisode,
+                        locateRevision: playerEpisodeLocateRevision,
+                        selectionSessionID: selectionSessionID
                     )
                     .equatable()
                     .frame(
-                        height: PlayerEpisodePanelLayoutPolicy.gridHeight(
-                            episodeCount: pagePresentations.count,
-                            showsInspector: inspectedPlayerEpisode != nil
-                        )
+                        height: min(max(44, maximumSize.height - (inspectedPlayerEpisode == nil ? 235 : 375)),
+                            PlayerEpisodePanelLayoutPolicy.gridHeight(
+                                episodeCount: pagePresentations.count,
+                                showsInspector: inspectedPlayerEpisode != nil,
+                                width: min(500, maximumSize.width) - 28,
+                                minimumCellWidth: pagePresentations.contains { $0.episodeNumber == nil } ? 150 : 110
+                            ))
                     )
 
                     if let inspectedPlayerEpisode {
@@ -1777,7 +1828,7 @@ struct PlayerView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
             .foregroundStyle(.white)
-            .background(.black.opacity(0.76), in: Capsule())
+            .shadow(color: .black.opacity(0.65), radius: 2, y: 1)
             .environment(\.colorScheme, .dark)
             .padding(.bottom, controlsVisible ? 100 : 28)
         }
@@ -1787,6 +1838,7 @@ struct PlayerView: View {
     private func playerPanel<Content: View>(
         width: CGFloat,
         maximumSize: CGSize,
+        scrollContent: Bool = true,
         @ViewBuilder content: @escaping () -> Content
     ) -> some View {
         VStack(spacing: 8) {
@@ -1801,10 +1853,12 @@ struct PlayerView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help(L10n.string("common.close", fallback: "Close"))
+                .playerControlHelp(L10n.string("common.close", fallback: "Close"))
                 .accessibilityLabel(L10n.string("common.close", fallback: "Close"))
             }
-            PlayerUtilityPanelContent(maximumHeight: max(1, maximumSize.height - 64)) {
+            if scrollContent {
+                PlayerUtilityPanelContent(maximumHeight: max(1, maximumSize.height - 64)) { content() }
+            } else {
                 content()
             }
         }
@@ -1973,34 +2027,6 @@ struct PlayerView: View {
         }
     }
 
-    private var episodeMenu: some View {
-        Menu {
-            if state.playerEpisodes.isEmpty {
-                Text(L10n.string("player.no-episodes", fallback: "No Episodes"))
-            } else {
-                ForEach(state.playerEpisodes) { episode in
-                    Button {
-                        Task { await state.playPlayerEpisode(episode) }
-                    } label: {
-                        if episode.id == state.currentPlayerEpisodeID {
-                            Label(episode.name, systemImage: "checkmark")
-                        } else {
-                            Text(episode.name)
-                        }
-                    }
-                    .disabled(episode.id == state.currentPlayerEpisodeID)
-                }
-            }
-        } label: {
-            utilityMenuIcon("list.bullet")
-        }
-        .playerUtilityMenuStyle()
-        .fixedSize()
-        .tint(.white)
-        .environment(\.colorScheme, .dark)
-        .help(L10n.string("player.choose-episode", fallback: "Choose Episode"))
-    }
-
     private func playerIconButton(
         systemImage: String,
         help: String,
@@ -2019,7 +2045,7 @@ struct PlayerView: View {
         .buttonStyle(.plain)
         .opacity(disabled ? 0.30 : 1)
         .disabled(disabled)
-        .help(help)
+        .playerControlHelp(help)
     }
 
     private func utilityMenuIcon(_ systemImage: String) -> some View {
@@ -2033,9 +2059,9 @@ struct PlayerView: View {
     }
 
     private var isFailed: Bool {
-        if state.isLivePlayback,
-           state.isRecoveringLivePlayback || state.hasExhaustedLivePlayback {
-            return false
+        if state.isLivePlayback {
+            if state.hasExhaustedLivePlayback { return true }
+            if state.isRecoveringLivePlayback { return false }
         }
         if case .failed = state.playerSnapshot.status {
             return true
@@ -2048,13 +2074,7 @@ struct PlayerView: View {
         if isFailed {
             return true
         }
-        if LiveSwitchLoadingIndicatorPolicy.shouldKeepPreviousFrameClean(
-            isLivePlayback: state.isLivePlayback,
-            holdsPreviousFrame: holdsPreviousLiveFrame,
-            status: state.playerSnapshot.status
-        ) {
-            return false
-        }
+        if state.isLivePlayback { return liveLoadingVisible && isLiveWaiting }
         switch state.playbackResolutionState {
         case .restoringHistory, .resolving, .validating, .loading, .retrying:
             return true
@@ -2067,6 +2087,16 @@ struct PlayerView: View {
         default:
             return playbackActivityOverlayVisible
         }
+    }
+
+    private var isLiveWaiting: Bool {
+        state.isLivePlayback && !isFailed && LiveLoadingPresentationPolicy.isWaiting(
+            snapshot: state.playerSnapshot, recovering: state.isRecoveringLivePlayback,
+            exhausted: state.hasExhaustedLivePlayback, hasStarted: state.hasCurrentPlaybackStarted)
+    }
+
+    private var liveLoadingTaskID: String {
+        "\(state.playbackPresentationID)-\(isLiveWaiting)"
     }
 
     private var hasTransientPlaybackActivity: Bool {
@@ -2124,22 +2154,6 @@ struct PlayerView: View {
                 return
             }
         }
-    }
-
-    private func handleLiveChannelChange(_ channelID: String?) {
-        defer { lastLiveChannelID = channelID }
-        guard state.isLivePlayback,
-              let previousChannelID = lastLiveChannelID,
-              let channelID,
-              previousChannelID != channelID else {
-            return
-        }
-        // libmpv keeps the previous frame while replacing a live stream. Do
-        // not cover that useful frame with a loading spinner. This remains in
-        // effect for later buffering in the same live session as well, so the
-        // picture behaves like a television freeze-frame until rendering
-        // resumes. Failures are still surfaced by `isFailed` above.
-        holdsPreviousLiveFrame = true
     }
 
     private var displayedPosition: Double {
@@ -2271,7 +2285,7 @@ struct PlayerView: View {
         .fixedSize()
         .tint(.white)
         .environment(\.colorScheme, .dark)
-        .help(title)
+        .playerControlHelp(title)
     }
 
     private var subtitleMenu: some View {
@@ -2312,7 +2326,7 @@ struct PlayerView: View {
                             }
                         )
                     )
-                    .help(
+                    .playerControlHelp(
                         state.selectedPlayerSubtitleTrackID == track.id
                             ? L10n.string("player.subtitle.current", fallback: "Current Subtitle")
                             : L10n.string("player.subtitle.choose", fallback: "Choose This Subtitle")
@@ -2369,7 +2383,7 @@ struct PlayerView: View {
         .fixedSize()
         .tint(.white)
         .environment(\.colorScheme, .dark)
-        .help(
+        .playerControlHelp(
             state.playerSubtitlesEnabled
                 ? L10n.string("player.subtitles.on", fallback: "Subtitles On")
                 : L10n.string("player.subtitles.off", fallback: "Subtitles Off")
@@ -2466,7 +2480,7 @@ struct PlayerView: View {
         .fixedSize()
         .tint(.white)
         .environment(\.colorScheme, .dark)
-        .help(L10n.string("player.settings", fallback: "Playback Settings"))
+        .playerControlHelp(L10n.string("player.settings", fallback: "Playback Settings"))
     }
 
     private var playerAccentColor: Color {
@@ -2571,18 +2585,27 @@ struct PlayerEpisodeGrid: View, Equatable {
     let displayName: (EpisodePresentation) -> String
     let onPlay: (EpisodePresentation) -> Void
     let onInspect: (EpisodePresentation) -> Void
+    var selectionEnabled = true
+    var canRetrySelected = false
+    var locateRevision = 0
+    var selectionSessionID: UUID? = nil
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.presentations == rhs.presentations
             && lhs.selectedEpisodeID == rhs.selectedEpisodeID
+            && lhs.selectionEnabled == rhs.selectionEnabled
+            && lhs.canRetrySelected == rhs.canRetrySelected
+            && lhs.locateRevision == rhs.locateRevision
+            && lhs.selectionSessionID == rhs.selectionSessionID
     }
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView(.vertical, showsIndicators: true) {
             LazyVGrid(
                 columns: [
                     GridItem(
-                        .adaptive(minimum: 82, maximum: 118),
+                        .adaptive(minimum: presentations.contains { $0.episodeNumber == nil } ? 150 : 110),
                         spacing: 8
                     )
                 ],
@@ -2597,13 +2620,22 @@ struct PlayerEpisodeGrid: View, Equatable {
                         selected: selected,
                         accentColor: accentColor,
                         onPlay: {
-                            guard !selected else { return }
+                            guard !selected || canRetrySelected else { return }
                             onPlay(presentation)
                         },
                         onInspect: { onInspect(presentation) }
                     )
+                    .id(presentation.id)
+                    .disabled(!selectionEnabled)
                 }
             }
+        }
+        .task(id: "\(selectedEpisodeID ?? "")/\(locateRevision)/\(presentations.first?.id ?? "")") {
+            await Task.yield()
+            guard !Task.isCancelled, let selectedEpisodeID,
+                  presentations.contains(where: { $0.id == selectedEpisodeID }) else { return }
+            proxy.scrollTo(selectedEpisodeID, anchor: .center)
+        }
         }
     }
 }
@@ -2620,9 +2652,13 @@ struct PlayerEpisodeButton: View {
     var body: some View {
         Button(action: onPlay) {
             VStack(spacing: 4) {
-                Text(displayName)
+                Text(presentation.episodeNumber.map { L10n.string("episode.number", fallback: "Episode %d", $0) } ?? displayName)
                     .font(.system(size: 13, weight: .semibold))
-                    .lineLimit(1)
+                    .lineLimit(2)
+                let labels = PlaybackResourceAnalyzer.analyze(presentation.episode).versionLabels
+                if !labels.isEmpty {
+                    Text(labels.joined(separator: " · ")).font(.system(size: 10)).lineLimit(1)
+                }
 
                 if selected {
                     Image(systemName: "checkmark")
@@ -2630,7 +2666,7 @@ struct PlayerEpisodeButton: View {
                 }
             }
             .foregroundColor(.white.opacity(selected ? 1 : 0.92))
-            .frame(maxWidth: .infinity, minHeight: 46)
+            .frame(maxWidth: .infinity, minHeight: 62)
             .background(
                 selected
                     ? accentColor.opacity(0.58)
@@ -2657,6 +2693,9 @@ struct PlayerEpisodeButton: View {
                 )
             }
         }
+        .help(presentation.originalName)
+        .accessibilityLabel(displayName + (selected ? " · " + L10n.string("player.episode.current", fallback: "Currently Playing") : ""))
+        .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityHint(L10n.string("detail.original-name.hint", fallback: "Right-click to view or copy the original name"))
     }
 }
@@ -2693,7 +2732,7 @@ struct PlayerEpisodeOriginalNameInspector: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(.white.opacity(0.62))
-                .help(L10n.string("detail.file-info.close", fallback: "Close File Information"))
+                .playerControlHelp(L10n.string("detail.file-info.close", fallback: "Close File Information"))
             }
 
             Text(L10n.string("detail.original-name", fallback: "Original Name"))
@@ -2755,10 +2794,13 @@ struct PlayerEpisodeOriginalNameInspector: View {
 enum PlayerEpisodePanelLayoutPolicy {
     static func gridHeight(
         episodeCount: Int,
-        showsInspector: Bool
+        showsInspector: Bool,
+        width: CGFloat = 472,
+        minimumCellWidth: CGFloat = 110
     ) -> CGFloat {
-        let rowCount = Int(ceil(Double(max(episodeCount, 1)) / 5.0))
-        let regularHeight = min(286, max(54, CGFloat(rowCount) * 54))
+        let columns = max(1, Int((width + 8) / (minimumCellWidth + 8)))
+        let rowCount = Int(ceil(Double(max(episodeCount, 1)) / Double(columns)))
+        let regularHeight = min(286, max(62, CGFloat(rowCount) * 70 - 8))
         return showsInspector ? min(regularHeight, 196) : regularHeight
     }
 }
@@ -2780,31 +2822,23 @@ enum PlayerEpisodePagePolicy {
         return min(max(pageIndex, 0), count - 1)
     }
 
-    static func page(
-        _ presentations: [EpisodePresentation],
-        pageIndex: Int
-    ) -> [EpisodePresentation] {
-        guard !presentations.isEmpty else { return [] }
-        let safeIndex = clampedPageIndex(
-            pageIndex,
-            episodeCount: presentations.count
-        )
-        let start = safeIndex * pageSize
-        let end = min(start + pageSize, presentations.count)
-        return Array(presentations[start..<end])
-    }
-
-    static func pageIndex(
-        presentations: [EpisodePresentation],
-        selectedEpisodeID: String?
-    ) -> Int {
-        guard let selectedEpisodeID,
-              let index = presentations.firstIndex(where: {
-                  $0.id == selectedEpisodeID
-              }) else {
-            return 0
+    static func pages(_ presentations: [EpisodePresentation]) -> [[EpisodePresentation]] {
+        var pages: [[EpisodePresentation]] = []
+        for value in presentations {
+            if let last = pages.last, let first = last.first,
+               last.count < pageSize, first.seasonNumber == value.seasonNumber,
+               (first.episodeNumber == nil) == (value.episodeNumber == nil) {
+                pages[pages.count - 1].append(value)
+            } else { pages.append([value]) }
         }
-        return index / pageSize
+        return pages
+    }
+    static func page(_ presentations: [EpisodePresentation], pageIndex: Int) -> [EpisodePresentation] {
+        let values = pages(presentations)
+        return values.isEmpty ? [] : values[min(max(0, pageIndex), values.count - 1)]
+    }
+    static func pageIndex(presentations: [EpisodePresentation], selectedEpisodeID: String?) -> Int {
+        pages(presentations).firstIndex { $0.contains { $0.id == selectedEpisodeID } } ?? 0
     }
 
     static func title(
@@ -2817,13 +2851,16 @@ enum PlayerEpisodePagePolicy {
         }
         if let firstNumber = first.episodeNumber,
            let lastNumber = last.episodeNumber {
+            if let season = first.seasonNumber {
+                return L10n.string("episode.range.season", fallback: "Season %d · Episodes %d–%d", season, firstNumber, lastNumber)
+            }
             return L10n.string("episode.range", fallback: "Episodes %d–%d", firstNumber, lastNumber)
         }
         let safeIndex = clampedPageIndex(
             pageIndex,
             episodeCount: presentations.count
         )
-        let start = safeIndex * pageSize + 1
+        let start = (presentations.firstIndex { $0.id == first.id } ?? safeIndex * pageSize) + 1
         let end = start + values.count - 1
         return L10n.string("player.item-range", fallback: "Items %d–%d", start, end)
     }
@@ -2935,13 +2972,28 @@ enum PlayerActivityOverlayPolicy {
     }
 }
 
+enum LiveLoadingPresentationPolicy {
+    static let delayNanoseconds: UInt64 = 600_000_000
+    static let slowDelayNanoseconds: UInt64 = 5_000_000_000
+    static func isWaiting(snapshot: PlayerSnapshot, recovering: Bool, exhausted: Bool, hasStarted: Bool = true) -> Bool {
+        if exhausted { return false }
+        if recovering { return true }
+        switch snapshot.status {
+        case .loading, .buffering: return true
+        case .paused, .failed, .ended, .stopped: return false
+        default: return !hasStarted || snapshot.isPausedForCache
+        }
+    }
+}
+
 enum LiveSwitchLoadingIndicatorPolicy {
     static func shouldKeepPreviousFrameClean(
         isLivePlayback: Bool,
         holdsPreviousFrame: Bool,
-        status: PlayerStatus
+        status: PlayerStatus,
+        elapsed: TimeInterval = 0
     ) -> Bool {
-        guard isLivePlayback, holdsPreviousFrame else { return false }
+        guard isLivePlayback, holdsPreviousFrame, elapsed < 0.6 else { return false }
         switch status {
         case .loading, .buffering:
             return true
@@ -3143,6 +3195,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
         @MainActor
         private final class WindowLifetime {
             var isClosing = false
+            let id = UUID()
         }
 
         private struct AppliedConfiguration: Equatable {
@@ -3168,7 +3221,8 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
         private var zoomButtonWasHidden = false
         private var desiredConfiguration: AppliedConfiguration?
         private var appliedConfiguration: AppliedConfiguration?
-        private var pendingWindowRefresh: DispatchWorkItem?
+        private let configurationKey = UUID()
+        private var hasAppliedStaticChrome = false
         private var fullScreenObservers: [NSObjectProtocol] = []
         private var liveResizeObserver: NSObjectProtocol?
         private var windowWillCloseObserver: NSObjectProtocol?
@@ -3194,6 +3248,8 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             window = newWindow
             let lifetime = WindowLifetime()
             windowLifetime = lifetime
+            WindowTransitionCoordinator.state(for: newWindow).chromeOwner = lifetime.id
+            hasAppliedStaticChrome = false
             observeFullScreenChanges(for: newWindow)
             observeLiveResizeEnd(for: newWindow)
             observeWindowWillClose(for: newWindow, lifetime: lifetime)
@@ -3264,43 +3320,35 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                   desiredConfiguration == configuration else {
                 return
             }
-            // AppKit owns the window frame throughout a live resize. Mutating
-            // titlebar style or display state from a SwiftUI update while that
-            // transaction is active can re-enter NSWindow's private resize
-            // path and terminate with SIGTRAP.
-            // Keep the desired configuration and apply it once AppKit posts
-            // didEndLiveResize instead.
-            guard PlayerWindowMutationPolicy.canApply(
-                isInLiveResize: window.inLiveResize
-            ) else { return }
+            let transition = WindowTransitionCoordinator.state(for: window)
+            guard transition.canApplyChrome,
+                  transition.chromeOwner == windowLifetime?.id else { return }
 
-            Self.withPreservedOuterFrame(of: window) {
-                // Live and on-demand playback share one chrome mode. The
-                // browsing toolbar remains structurally owned by RootView but
-                // is hidden while the player is presented, and full-size
-                // content lets the native video surface extend beneath the
-                // transparent titlebar.
-                window.styleMask.insert(.fullSizeContentView)
-                window.titlebarAppearsTransparent = true
-                window.titleVisibility = .hidden
-                window.toolbar?.isVisible = false
-                window.backgroundColor = .black
-                window.acceptsMouseMovedEvents = true
-                if #available(macOS 11.0, *) {
-                    window.titlebarSeparatorStyle = .none
+            // Static chrome belongs to the window lifetime, not the control
+            // overlay's visibility. Configure it only in stable windowed mode.
+            if !hasAppliedStaticChrome && transition.canChangeGeometry {
+                Self.withPreservedOuterFrame(of: window) {
+                    if !window.styleMask.contains(.fullSizeContentView) {
+                        window.styleMask.insert(.fullSizeContentView)
+                    }
+                    if !window.titlebarAppearsTransparent { window.titlebarAppearsTransparent = true }
+                    if window.titleVisibility != .hidden { window.titleVisibility = .hidden }
+                    if window.toolbar?.isVisible == true { window.toolbar?.isVisible = false }
+                    if window.backgroundColor != .black { window.backgroundColor = .black }
+                    if !window.acceptsMouseMovedEvents { window.acceptsMouseMovedEvents = true }
+                    if window.titlebarSeparatorStyle != .none { window.titlebarSeparatorStyle = .none }
                 }
-
-                if window.title != configuration.title {
-                    window.title = configuration.title
-                }
-
-                if configuration.controlsVisible {
-                    window.isMovableByWindowBackground = false
-                    restoreStandardWindowButtonVisibility(on: window)
-                } else {
-                    window.isMovableByWindowBackground = true
-                    setStandardWindowButtonsHidden(true, on: window)
-                }
+                hasAppliedStaticChrome = true
+            }
+            if window.title != configuration.title { window.title = configuration.title }
+            let movable = !configuration.controlsVisible
+            if window.isMovableByWindowBackground != movable {
+                window.isMovableByWindowBackground = movable
+            }
+            if configuration.controlsVisible {
+                restoreStandardWindowButtonVisibility(on: window)
+            } else {
+                setStandardWindowButtonsHidden(true, on: window)
             }
 
             if let ratio = configuration.videoAspectRatio,
@@ -3322,8 +3370,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
 
         func restore() {
             guard let window else { return }
-            pendingWindowRefresh?.cancel()
-            pendingWindowRefresh = nil
+            WindowTransitionCoordinator.state(for: window).cancel(configurationKey)
             removeFullScreenObservers()
             removeLiveResizeObserver()
             let savedHadFullSizeContentView = hadFullSizeContentView
@@ -3352,8 +3399,8 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             // here re-enters that transaction and has produced repeatable
             // swift_beginAccess crashes. Mark the window dirty on the next run
             // loop instead and let AppKit own the display cycle.
-            DispatchQueue.main.async { [weak window, onRestore] in
-                Self.restoreWhenWindowIsStable(
+            let onRestore = self.onRestore
+            Self.restoreWhenWindowIsStable(
                     window,
                     lifetime: lifetime
                 ) { window in
@@ -3364,15 +3411,19 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                             )
                         }
                     }
-                    guard let window else {
+                    guard let window,
+                          WindowTransitionCoordinator.state(for: window).chromeOwner == lifetime?.id else {
                         onRestore()
                         return
                     }
+                    WindowTransitionCoordinator.state(for: window).chromeOwner = nil
                     Self.withPreservedOuterFrame(of: window) {
-                        if savedHadFullSizeContentView {
-                            window.styleMask.insert(.fullSizeContentView)
-                        } else {
-                            window.styleMask.remove(.fullSizeContentView)
+                        if savedHadFullSizeContentView != window.styleMask.contains(.fullSizeContentView) {
+                            if savedHadFullSizeContentView {
+                                window.styleMask.insert(.fullSizeContentView)
+                            } else {
+                                window.styleMask.remove(.fullSizeContentView)
+                            }
                         }
                         window.titlebarAppearsTransparent =
                             savedTitlebarAppearsTransparent
@@ -3402,13 +3453,13 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                     Self.markWindowForRefresh(window, lifetime: lifetime)
                     onRestore()
                 }
-            }
         }
 
         private static func withPreservedOuterFrame(
             of window: NSWindow,
             mutations: () -> Void
         ) {
+            guard WindowTransitionCoordinator.state(for: window).canChangeGeometry else { return }
             let outerFrame = window.frame
             mutations()
             guard !window.styleMask.contains(.fullScreen),
@@ -3446,8 +3497,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
         ) {
             guard aspectRatio.isFinite,
                   aspectRatio > 0,
-                  !window.styleMask.contains(.fullScreen),
-                  !window.inLiveResize else { return }
+                  WindowTransitionCoordinator.state(for: window).canChangeGeometry else { return }
             // An episode or route can publish dimensions after playback has
             // already started. Only update the constraint used for future
             // manual resizes; never move or resize the current outer frame.
@@ -3468,46 +3518,42 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                 completion(nil)
                 return
             }
-            guard !window.inLiveResize else {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.016) {
-                    [weak window] in
-                    restoreWhenWindowIsStable(
-                        window,
-                        lifetime: lifetime,
-                        completion: completion
-                    )
-                }
-                return
+            WindowTransitionCoordinator.state(for: window).whenStable(
+                key: UUID(), windowedOnly: true
+            ) { stableWindow in
+                completion(lifetime?.isClosing == true ? nil : stableWindow)
             }
-            completion(window)
         }
 
         private func scheduleWindowConfiguration(
             _ configuration: AppliedConfiguration,
             for window: NSWindow
         ) {
-            pendingWindowRefresh?.cancel()
-            let workItem = DispatchWorkItem { [weak self, weak window] in
-                guard let self, let window else { return }
-                self.apply(configuration, to: window)
+            WindowTransitionCoordinator.state(for: window).whenStable(key: configurationKey) {
+                [weak self] stableWindow in
+                guard let self, let stableWindow else { return }
+                self.apply(configuration, to: stableWindow)
             }
-            pendingWindowRefresh = workItem
-            DispatchQueue.main.async(execute: workItem)
         }
 
-        private func setStandardWindowButtonsHidden(
-            _ hidden: Bool,
-            on window: NSWindow
-        ) {
-            window.standardWindowButton(.closeButton)?.isHidden = hidden
-            window.standardWindowButton(.miniaturizeButton)?.isHidden = hidden
-            window.standardWindowButton(.zoomButton)?.isHidden = hidden
+        private func setStandardWindowButtonsHidden(_ hidden: Bool, on window: NSWindow) {
+            for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+                if let button = window.standardWindowButton(kind), button.isHidden != hidden {
+                    button.isHidden = hidden
+                }
+            }
         }
 
         private func restoreStandardWindowButtonVisibility(on window: NSWindow) {
-            window.standardWindowButton(.closeButton)?.isHidden = closeButtonWasHidden
-            window.standardWindowButton(.miniaturizeButton)?.isHidden = miniaturizeButtonWasHidden
-            window.standardWindowButton(.zoomButton)?.isHidden = zoomButtonWasHidden
+            let states: [(NSWindow.ButtonType, Bool)] = [
+                (.closeButton, closeButtonWasHidden), (.miniaturizeButton, miniaturizeButtonWasHidden),
+                (.zoomButton, zoomButtonWasHidden)
+            ]
+            for (kind, hidden) in states {
+                if let button = window.standardWindowButton(kind), button.isHidden != hidden {
+                    button.isHidden = hidden
+                }
+            }
         }
 
         private func observeFullScreenChanges(for window: NSWindow) {
@@ -3515,7 +3561,8 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
             let center = NotificationCenter.default
             for name in [
                 NSWindow.didEnterFullScreenNotification,
-                NSWindow.didExitFullScreenNotification
+                NSWindow.didExitFullScreenNotification,
+                WindowTransitionCoordinator.didFailFullScreen
             ] {
                 fullScreenObservers.append(
                     center.addObserver(
@@ -3530,8 +3577,7 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
                             self.onFullScreenChange(
                                 window.styleMask.contains(.fullScreen)
                             )
-                            if !window.styleMask.contains(.fullScreen),
-                               let configuration = self.desiredConfiguration {
+                            if let configuration = self.desiredConfiguration {
                                 self.scheduleWindowConfiguration(
                                     configuration,
                                     for: window
@@ -3601,41 +3647,14 @@ struct PlayerWindowConfigurator: NSViewRepresentable {
         ) {
             guard let window,
                   lifetime?.isClosing != true,
-                  !window.inLiveResize,
+                  WindowTransitionCoordinator.state(for: window).canApplyChrome,
                   let contentView = window.contentView else { return }
-            contentView.needsLayout = true
+            // AppKit performs layout and invokes reshape on the actual surface.
+            // Never synchronously lay out the SwiftUI tree from a chrome update.
             contentView.needsDisplay = true
-            contentView.superview?.needsLayout = true
-            contentView.superview?.needsDisplay = true
             window.invalidateCursorRects(for: contentView)
-            // Titlebar mutations are committed by AppKit after this callback
-            // returns. Refresh on the next main-loop turn, then
-            // explicitly update the OpenGL drawable. Without this pass the old
-            // framebuffer size can survive until the next manual window resize.
-            DispatchQueue.main.async { [weak window] in
-                guard let window,
-                      lifetime?.isClosing != true,
-                      !window.inLiveResize,
-                      let contentView = window.contentView else { return }
-                contentView.needsLayout = true
-                contentView.layoutSubtreeIfNeeded()
-                synchronizePlayerSurfaces(in: contentView)
-                contentView.needsDisplay = true
-            }
         }
 
-        private static func synchronizePlayerSurfaces(in view: NSView) {
-            if let renderView = view as? MPVOpenGLView {
-                renderView.synchronizeDrawableAfterWindowLayout()
-            }
-            view.subviews.forEach(synchronizePlayerSurfaces(in:))
-        }
-    }
-}
-
-enum PlayerWindowMutationPolicy {
-    static func canApply(isInLiveResize: Bool) -> Bool {
-        !isInLiveResize
     }
 }
 
@@ -3950,6 +3969,100 @@ private final class ProgressHoverTrackingNSView: NSView {
     }
 }
 
+final class PlayerControlTooltipState: ObservableObject {
+    @Published private(set) var activeID: UUID?
+
+    func hover(_ id: UUID, inside: Bool) {
+        if inside { activeID = id }
+        else if activeID == id { activeID = nil }
+    }
+    func dismiss() { activeID = nil }
+}
+
+private struct PlayerControlTooltipEnvironmentKey: EnvironmentKey {
+    static let defaultValue: PlayerControlTooltipState? = nil
+}
+
+private extension EnvironmentValues {
+    var playerControlTooltip: PlayerControlTooltipState? {
+        get { self[PlayerControlTooltipEnvironmentKey.self] }
+        set { self[PlayerControlTooltipEnvironmentKey.self] = newValue }
+    }
+}
+
+private struct PlayerControlTooltipAnchor {
+    let title: String
+    let bounds: Anchor<CGRect>
+}
+
+private struct PlayerControlTooltipPreference: PreferenceKey {
+    static let defaultValue: [UUID: PlayerControlTooltipAnchor] = [:]
+    static func reduce(value: inout [UUID: PlayerControlTooltipAnchor], nextValue: () -> [UUID: PlayerControlTooltipAnchor]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+struct PlayerControlTooltip: ViewModifier {
+    @Environment(\.playerControlTooltip) private var model
+    @State private var id: UUID
+    let title: String
+
+    init(title: String, id: UUID = UUID()) {
+        self.title = title
+        _id = State(initialValue: id)
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .accessibilityLabel(title)
+            .anchorPreference(key: PlayerControlTooltipPreference.self, value: .bounds) {
+                [id: PlayerControlTooltipAnchor(title: title, bounds: $0)]
+            }
+            .onHover { model?.hover(id, inside: $0) }
+            .simultaneousGesture(TapGesture().onEnded { model?.dismiss() })
+            .onDisappear { model?.hover(id, inside: false) }
+    }
+}
+
+private extension View {
+    func playerControlHelp(_ title: String) -> some View {
+        modifier(PlayerControlTooltip(title: title))
+    }
+}
+
+struct PlayerControlTooltipOverlay: ViewModifier {
+    @ObservedObject var model: PlayerControlTooltipState
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.playerControlTooltip, model)
+            .overlayPreferenceValue(PlayerControlTooltipPreference.self) { anchors in
+                GeometryReader { geometry in
+                    if let id = model.activeID, let item = anchors[id] {
+                        let rect = geometry[item.bounds]
+                        let textWidth = (item.title as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11, weight: .medium)]).width + 4
+                        let width = max(0, min(textWidth, 260, geometry.size.width - 16))
+                        Text(item.title)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.white)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.center)
+                            .frame(width: width)
+                            .shadow(color: .black.opacity(0.75), radius: 2, y: 1)
+                            .position(
+                                x: min(max(rect.midX, width / 2 + 8), geometry.size.width - width / 2 - 8),
+                                y: rect.minY >= 36 ? rect.minY - 20 : rect.maxY + 20
+                            )
+                            .accessibilityHidden(true)
+                            .transaction { $0.disablesAnimations = true }
+                    }
+                }
+                .allowsHitTesting(false)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in model.dismiss() }
+    }
+}
+
 private struct PlayerControlHoverEffect: ViewModifier {
     @State private var isHovering = false
     let enabled: Bool
@@ -3993,5 +4106,13 @@ final class WindowConfigurationView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         onWindowChange?(window)
+    }
+}
+
+
+enum PlayerEpisodeTitlePolicy {
+    static func title(content: String, resource: String) -> String {
+        let name = resource.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty || name == content ? content : content + " · " + name
     }
 }

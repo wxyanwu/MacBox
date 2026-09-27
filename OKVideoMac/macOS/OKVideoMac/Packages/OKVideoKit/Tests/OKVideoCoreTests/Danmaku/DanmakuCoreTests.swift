@@ -48,6 +48,27 @@ final class DanmakuCoreTests: XCTestCase {
         XCTAssertEqual(timeline.comments.map(\.text), ["一"])
     }
 
+    func testCommentJSONParsesServiceFormatWhenXMLIsUnavailable() throws {
+        let data = Data(#"{"count":2,"comments":[{"cid":42,"p":"2.5,5,16711680,[qq]","m":"顶部弹幕"},{"cid":43,"p":"1.0,1,25,255,0,0,hash,source","m":"滚动弹幕"}]}"#.utf8)
+        let timeline = try DanmakuPayloadParser().parse(data)
+
+        XCTAssertEqual(timeline.comments.map(\.text), ["滚动弹幕", "顶部弹幕"])
+        XCTAssertEqual(timeline.comments.map(\.mode), [.scrolling, .top])
+        XCTAssertEqual(timeline.comments.map(\.color), [255, 16_711_680])
+        XCTAssertEqual(timeline.comments.map(\.fontSize), [25, 25])
+    }
+
+    func testCommentJSONReportsServiceErrorInsteadOfEmptyTimeline() {
+        let data = Data(#"{"success":false,"errorCode":403,"errorMessage":"弹幕源暂不可用"}"#.utf8)
+
+        XCTAssertThrowsError(try DanmakuPayloadParser().parse(data)) { error in
+            XCTAssertEqual(
+                error as? DanmakuJSONParserError,
+                .serviceFailure("弹幕源暂不可用")
+            )
+        }
+    }
+
     func testSourceNormalizerHandlesNestedCatPawAndJSONStringShapes() throws {
         let generation: UInt64 = 9
         let value: JSONValue = .object([
@@ -219,5 +240,67 @@ final class DanmakuCoreTests: XCTestCase {
                 runtimeGeneration: generation
             )
         )
+    }
+}
+
+final class DanmakuSmoothClockTests: XCTestCase {
+    @discardableResult
+    private func observe(_ clock: inout DanmakuClock, position: Double, sample: Double? = nil, now: Double,
+                         rate: Double = 1, playing: Bool = true, buffering: Bool = false,
+                         seeking: Bool = false, generation: UInt64 = 1) -> Bool {
+        clock.synchronize(mediaTime: position, sampleUptime: sample, monotonicTime: now, rate: rate,
+            isPlaying: playing, isBuffering: buffering, isSeeking: seeking, generation: generation)
+    }
+    func testRepeatedSnapshotDoesNotPullClockBack() {
+        for sample in [nil, Optional(10.0)] {
+            var clock = DanmakuClock()
+            observe(&clock, position: 100, sample: sample, now: 10)
+            for frame in 1...120 {
+                let now = 10 + Double(frame) / 120
+                XCTAssertFalse(observe(&clock, position: 100, sample: sample, now: now))
+                XCTAssertEqual(clock.currentTime(at: now), 100 + now - 10, accuracy: 0.000001)
+            }
+        }
+    }
+    func testDelayedObservationUsesItsSampleTimeAndIgnoresOlderSamples() {
+        var clock = DanmakuClock()
+        observe(&clock, position: 100, sample: 10, now: 10.2)
+        XCTAssertEqual(clock.currentTime(at: 10.2), 100.2, accuracy: 0.000001)
+        observe(&clock, position: 100.1, sample: 10.1, now: 10.3)
+        XCTAssertEqual(clock.currentTime(at: 10.3), 100.3, accuracy: 0.000001)
+        observe(&clock, position: 98, sample: 9, now: 10.4)
+        XCTAssertEqual(clock.currentTime(at: 10.4), 100.4, accuracy: 0.000001)
+    }
+    func testJitterCorrectionIsContinuousAndMonotonicAtSlowAndFastSpeeds() {
+        for rate in [0.25, 1, 2] {
+            var clock = DanmakuClock()
+            observe(&clock, position: 100, sample: 10, now: 10, rate: rate)
+            let before = clock.currentTime(at: 10.1)
+            XCTAssertFalse(observe(&clock, position: 100 + 0.1 * rate - 0.05, sample: 10.1, now: 10.1, rate: rate))
+            XCTAssertEqual(clock.currentTime(at: 10.1), before, accuracy: 0.000001)
+            var previous = before
+            for frame in 1...240 {
+                let value = clock.currentTime(at: 10.1 + Double(frame) / 120)
+                XCTAssertGreaterThan(value, previous)
+                previous = value
+            }
+            XCTAssertEqual(previous, 100 + 2.1 * rate - 0.05, accuracy: 0.000001)
+        }
+    }
+    func testPauseBufferResumeSpeedAndSeekRemainAuthoritative() {
+        var clock = DanmakuClock()
+        observe(&clock, position: 20, sample: 10, now: 10)
+        observe(&clock, position: 20.2, sample: 10.2, now: 10.2, playing: false)
+        XCTAssertEqual(clock.currentTime(at: 30), 20.2, accuracy: 0.000001)
+        observe(&clock, position: 20.2, sample: 30, now: 30, buffering: true)
+        XCTAssertEqual(clock.currentTime(at: 40), 20.2, accuracy: 0.000001)
+        observe(&clock, position: 20.2, sample: 40, now: 40, rate: 2)
+        XCTAssertEqual(clock.currentTime(at: 41), 22.2, accuracy: 0.000001)
+        XCTAssertTrue(observe(&clock, position: 300, sample: 41, now: 41, seeking: true))
+        XCTAssertEqual(clock.currentTime(at: 50), 300, accuracy: 0.000001)
+        observe(&clock, position: 300, sample: 50, now: 50)
+        XCTAssertEqual(clock.currentTime(at: 51), 301, accuracy: 0.000001)
+        XCTAssertTrue(observe(&clock, position: 0, sample: 51, now: 51, generation: 2))
+        XCTAssertEqual(clock.currentTime(at: 51), 0)
     }
 }

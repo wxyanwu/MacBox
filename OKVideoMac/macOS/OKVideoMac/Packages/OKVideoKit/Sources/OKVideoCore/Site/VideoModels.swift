@@ -282,6 +282,7 @@ public struct PlayEpisode: Codable, Equatable, Hashable, Identifiable, Sendable 
         )
     }
 
+    public var metadata: PlaybackEpisodeMetadata?
     public var referenceIdentity: String?
 
     /// A secret-free, provider-bound locator captured while detail data is
@@ -293,20 +294,23 @@ public struct PlayEpisode: Codable, Equatable, Hashable, Identifiable, Sendable 
         name: String,
         url: String,
         referenceIdentity: String? = nil,
-        providerResourceReference: PlaybackResourceReference? = nil
+        providerResourceReference: PlaybackResourceReference? = nil,
+        metadata: PlaybackEpisodeMetadata? = nil
     ) {
         self.name = name
         self.url = url
         self.referenceIdentity = referenceIdentity
         self.providerResourceReference = providerResourceReference
+        self.metadata = metadata
     }
 
     private enum CodingKeys: String, CodingKey {
-        case name, url, referenceIdentity, providerResourceReference
+        case name, url, referenceIdentity, providerResourceReference, metadata
     }
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        metadata = try values.decodeIfPresent(PlaybackEpisodeMetadata.self, forKey: .metadata)
         name = try values.decode(String.self, forKey: .name)
         url = try values.decode(String.self, forKey: .url)
         referenceIdentity = try values.decodeIfPresent(String.self, forKey: .referenceIdentity)
@@ -329,6 +333,7 @@ public struct PlayEpisode: Codable, Equatable, Hashable, Identifiable, Sendable 
             ))
         }
         var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encodeIfPresent(metadata, forKey: .metadata)
         try values.encode(name, forKey: .name)
         try values.encode(url, forKey: .url)
         try values.encodeIfPresent(referenceIdentity, forKey: .referenceIdentity)
@@ -465,11 +470,25 @@ public struct Pagination: Codable, Equatable, Sendable {
     public var page: Int
     public var pageCount: Int?
     public var hasMore: Bool
+    /// Present only for validated category responses; nil keeps old caches and
+    /// search/action providers compatible. Unknown is distinct from end.
+    public var continuation: CategoryPageContinuation? = nil
 
     public init(page: Int, pageCount: Int?) {
         self.page = page
         self.pageCount = pageCount
         hasMore = pageCount.map { page < $0 } ?? false
+    }
+}
+
+public enum CategoryPageContinuation: String, Codable, Sendable {
+    case more, end, unknown
+}
+
+public enum CategoryPageResponseError: Error, LocalizedError {
+    case uncertain(String)
+    public var errorDescription: String? {
+        switch self { case .uncertain(let reason): return reason }
     }
 }
 
@@ -760,6 +779,14 @@ public struct ProviderPlaybackStableDescription: Codable, Equatable, Hashable, S
 /// This model is deliberately not Codable: authorization headers and proxy
 /// session context are runtime-only and must not leak into playback history.
 public struct PlaybackMediaSession: Equatable, Sendable {
+    public enum HistoryReusePolicy: Equatable, Sendable {
+        /// Default for provider proxies and signed URLs without an immutable target guarantee.
+        case refreshRequired
+        /// Only an adapter that guarantees a fixed resource may opt in.
+        case immutableResource
+    }
+
+    public var historyReusePolicy: HistoryReusePolicy = .refreshRequired
     public enum Transport: String, Equatable, Sendable {
         /// The media URL is a localhost capability owned by the provider VM.
         case providerLoopback
@@ -898,12 +925,14 @@ public struct SitePlaybackResult: Equatable, Sendable {
     public var code: String?
     public var jxFrom: String?
     public var danmaku: JSONValue?
+    public var danmakuSearchCapabilities: [DanmakuSearchCapability] = []
     public var drm: JSONValue?
     public var artwork: String?
     public var description: String?
     public var position: Double?
     public var lyrics: String?
     public var validationPolicy: ValidationPolicy
+    public var networkPolicy: MediaNetworkPolicy
     public var resourceReference: PlaybackResourceReference?
     public var mediaSession: PlaybackMediaSession?
     public var transferReceipt: TransferReceipt?
@@ -928,6 +957,7 @@ public struct SitePlaybackResult: Equatable, Sendable {
         position: Double? = nil,
         lyrics: String? = nil,
         validationPolicy: ValidationPolicy = .preflight,
+        networkPolicy: MediaNetworkPolicy = .inherited,
         resourceReference: PlaybackResourceReference? = nil,
         mediaSession: PlaybackMediaSession? = nil,
         transferReceipt: TransferReceipt? = nil
@@ -951,6 +981,7 @@ public struct SitePlaybackResult: Equatable, Sendable {
         self.position = position
         self.lyrics = lyrics
         self.validationPolicy = validationPolicy
+        self.networkPolicy = networkPolicy
         self.resourceReference = resourceReference
         self.mediaSession = mediaSession
         self.transferReceipt = transferReceipt

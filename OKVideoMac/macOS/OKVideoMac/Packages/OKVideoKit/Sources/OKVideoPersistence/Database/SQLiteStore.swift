@@ -9,8 +9,10 @@ public actor SQLiteStore:
     HistoryRepository,
     SettingsRepository
 {
-    public static let currentSchemaVersion = 10
+    public static let currentSchemaVersion = 13
 
+    var suppressedHistorySessions = Set<UUID>()
+    private var watchedSessionRecords: [UUID: [String: HistoryRecord]] = [:]
     private let connection: SQLiteConnection
     public let databaseURL: URL
     public nonisolated let importedIdentityAcceptanceEnabled: Bool
@@ -60,8 +62,8 @@ public actor SQLiteStore:
     private static func migrateAcceptance(_ connection: SQLiteConnection) throws {
         let version = try connection.scalarInt("PRAGMA user_version")
         if version < 11 { try Self.migrate(connection) }
-        guard version <= 12 else { throw ImportedExecutionError.blocked }
-        if version < 11 {
+        guard version <= 12 || version == 13 else { throw ImportedExecutionError.blocked }
+        if version < 11 || version == 13 {
             try connection.transaction {
                 try ImportedMigrationStore.createAuthoritySchema(connection)
                 try connection.execute("PRAGMA user_version=11")
@@ -73,6 +75,7 @@ public actor SQLiteStore:
         if try connection.scalarInt("PRAGMA user_version") == 11 {
             try ImportedSourceLifecycleSQL.migrate(connection)
         }
+        try migrateFavorites(connection, production: false)
     }
 
     public func importedCatalogMapping(sourceID: UUID, generation: ImportedCatalogGeneration) throws -> ImportedCatalogMapping {
@@ -440,7 +443,8 @@ public actor SQLiteStore:
     /// to the resolved local configuration identity before it is written.
     public func restoreConfigurationAndHistory(
         configuration importedConfiguration: StoredConfiguration,
-        history importedHistory: [HistoryRecord]
+        history importedHistory: [HistoryRecord],
+        favorites importedFavorites: [FavoriteRecord]? = nil
     ) throws -> ConfigurationHistoryRestoreResult {
         try connection.transaction {
             let existingConfigurations = try readConfigurations()
@@ -475,6 +479,13 @@ public actor SQLiteStore:
                 )
             }
 
+            for var favorite in importedFavorites ?? [] {
+                guard FavoritePersistencePolicy.isValid(favorite) else { throw AppError.database("备份收藏字段无效") }
+                favorite.favoriteID = UUID()
+                favorite.configurationID = targetID
+                favorite.configurationName = restoredConfiguration.name
+                try saveFavorite(favorite)
+            }
             let configurations = try readConfigurations()
             guard let committedConfiguration = configurations.first(where: {
                 $0.id == targetID
@@ -694,61 +705,148 @@ public actor SQLiteStore:
     }
 
     public func saveFavorite(_ favorite: FavoriteRecord) throws {
-        try connection.execute(
-            """
-            INSERT INTO favorites (
-                site_key, video_id, title, poster_url, synopsis, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(site_key, video_id) DO UPDATE SET
-                title = excluded.title,
-                poster_url = excluded.poster_url,
-                synopsis = excluded.synopsis
-            """,
-            bindings: [
-                .text(favorite.siteKey),
-                .text(favorite.videoID),
-                .text(favorite.title),
-                .optional(favorite.posterURL?.absoluteString),
-                .optional(favorite.synopsis),
-                .double(favorite.createdAt.timeIntervalSince1970)
-            ]
-        )
+        let records = try favorites()
+        let existing = records.first { $0.identity == favorite.identity }
+        guard !records.contains(where: { $0.favoriteID == favorite.favoriteID && $0.identity != favorite.identity }) else {
+            throw AppError.database("收藏记录标识冲突")
+        }
+        let recordID = existing?.favoriteID ?? favorite.favoriteID
+        try connection.execute("""
+            INSERT INTO favorites (favorite_id, configuration_id, configuration_name, site_name, source_fingerprint,
+                site_key, video_id, title, poster_url, synopsis, created_at, year, category_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(favorite_id) DO UPDATE SET title=excluded.title, poster_url=excluded.poster_url,
+                synopsis=excluded.synopsis, configuration_name=excluded.configuration_name,
+                site_name=excluded.site_name, year=excluded.year, category_name=excluded.category_name,
+                created_at=MIN(favorites.created_at, excluded.created_at)
+            """, bindings: [.text(recordID.uuidString.lowercased()),
+                .text(favorite.configurationID?.uuidString.lowercased() ?? ""),
+                .optional(favorite.configurationName), .optional(favorite.siteName), .text(favorite.sourceFingerprint),
+                .text(favorite.siteKey), .text(favorite.videoID), .text(favorite.title),
+                .optional(favorite.posterURL?.absoluteString), .optional(favorite.synopsis),
+                .double(favorite.createdAt.timeIntervalSince1970), .optional(favorite.year), .optional(favorite.categoryName)])
     }
 
     public func favorites() throws -> [FavoriteRecord] {
         var values: [FavoriteRecord] = []
-        try connection.query(
-            """
-            SELECT site_key, video_id, title, poster_url, synopsis, created_at
-            FROM favorites
-            ORDER BY created_at DESC
-            """
-        ) { statement in
-            values.append(
-                FavoriteRecord(
-                    siteKey: self.connection.text(statement, 0) ?? "",
-                    videoID: self.connection.text(statement, 1) ?? "",
-                    title: self.connection.text(statement, 2) ?? "",
-                    posterURL: self.connection.text(statement, 3).flatMap(URL.init(string:)),
-                    synopsis: self.connection.text(statement, 4),
-                    createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 5))
-                )
-            )
+        try connection.query("""
+            SELECT site_key, video_id, title, poster_url, synopsis, created_at, favorite_id,
+                configuration_id, configuration_name, site_name, source_fingerprint, year, category_name
+            FROM favorites ORDER BY created_at DESC, favorite_id
+            """) { row in
+            guard let id = self.connection.text(row, 6).flatMap(UUID.init(uuidString:)) else {
+                throw AppError.database("收藏记录标识无效")
+            }
+            values.append(FavoriteRecord(siteKey: self.connection.text(row, 0) ?? "",
+                videoID: self.connection.text(row, 1) ?? "", title: self.connection.text(row, 2) ?? "",
+                posterURL: self.connection.text(row, 3).flatMap(URL.init(string:)), synopsis: self.connection.text(row, 4),
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(row, 5)), favoriteID: id,
+                configurationID: self.connection.text(row, 7).flatMap(UUID.init(uuidString:)),
+                configurationName: self.connection.text(row, 8), siteName: self.connection.text(row, 9),
+                sourceFingerprint: self.connection.text(row, 10) ?? "", year: self.connection.text(row, 11),
+                categoryName: self.connection.text(row, 12)))
         }
         return values
     }
 
-    public func deleteFavorite(siteKey: String, videoID: String) throws {
-        try connection.execute(
-            "DELETE FROM favorites WHERE site_key = ? AND video_id = ?",
-            bindings: [.text(siteKey), .text(videoID)]
-        )
+    /// Explicit desired state, committed with its returned authoritative list.
+    public func setFavorite(_ record: FavoriteRecord, isFavorite: Bool) throws -> [FavoriteRecord] {
+        try connection.transaction {
+            if isFavorite { try saveFavorite(record) }
+            else {
+                for existing in try favorites() where existing.identity == record.identity {
+                    try connection.execute("DELETE FROM favorites WHERE favorite_id=?", bindings: [.text(existing.id)])
+                }
+            }
+            return try favorites()
+        }
     }
 
-    @discardableResult
-    public func deleteAllFavorites() throws -> Int {
+    public func deleteFavorites(ids: Set<String>) throws -> [FavoriteRecord] {
+        try connection.transaction {
+            for id in ids { try connection.execute("DELETE FROM favorites WHERE favorite_id=?", bindings: [.text(id)]) }
+            return try favorites()
+        }
+    }
+
+    /// Retained for older callers; an unscoped key may only remove a legacy row.
+    public func deleteFavorite(siteKey: String, videoID: String) throws {
+        try connection.execute("DELETE FROM favorites WHERE configuration_id='' AND site_key=? AND video_id=?",
+                               bindings: [.text(siteKey), .text(videoID)])
+    }
+    @discardableResult public func deleteAllFavorites() throws -> Int {
         try connection.execute("DELETE FROM favorites")
         return connection.lastChangedRowCount()
+    }
+
+    /// Optimistic UPDATE: a late detail response cannot create a removed row.
+    public func refreshFavorite(_ expected: FavoriteRecord, with metadata: FavoriteRecord) throws -> [FavoriteRecord] {
+        try connection.transaction {
+            guard try favorites().contains(expected) else { return try favorites() }
+            try connection.execute("UPDATE favorites SET title=?, poster_url=?, synopsis=?, year=?, category_name=? WHERE favorite_id=?",
+                bindings: [.text(metadata.title), .optional(metadata.posterURL?.absoluteString), .optional(metadata.synopsis),
+                    .optional(metadata.year), .optional(metadata.categoryName), .text(expected.id)])
+            return try favorites()
+        }
+    }
+
+    public func bindFavorite(_ expected: FavoriteRecord, to target: FavoriteRecord) throws -> [FavoriteRecord] {
+        try connection.transaction {
+            let all = try favorites()
+            guard all.contains(expected) else { throw AppError.database("收藏已更改，请重新打开") }
+            let duplicate = all.first { $0.id != expected.id && $0.identity == target.identity }
+            if let duplicate { try connection.execute("DELETE FROM favorites WHERE favorite_id=?", bindings: [.text(duplicate.id)]) }
+            try connection.execute("""
+                UPDATE favorites SET configuration_id=?, configuration_name=?, site_name=?, source_fingerprint=?,
+                    site_key=?, video_id=?, title=?, poster_url=?, synopsis=?, created_at=?, year=?, category_name=? WHERE favorite_id=?
+                """, bindings: [.text(target.configurationID?.uuidString.lowercased() ?? ""), .optional(target.configurationName),
+                    .optional(target.siteName), .text(target.sourceFingerprint), .text(target.siteKey), .text(target.videoID),
+                    .text(target.title), .optional(target.posterURL?.absoluteString), .optional(target.synopsis),
+                    .double(min(expected.createdAt, duplicate?.createdAt ?? expected.createdAt).timeIntervalSince1970),
+                    .optional(target.year), .optional(target.categoryName), .text(expected.id)])
+            return try favorites()
+        }
+    }
+
+    /// The database actor is the serialization boundary for playback and deletion.
+    /// Suppression lasts for a logical viewing session, including quality switches.
+    public func saveWatchedHistory(_ record: HistoryRecord, replacing original: HistoryRecord?,
+                                   sessionID: UUID) throws -> Bool {
+        guard !suppressedHistorySessions.contains(sessionID) else { return false }
+        let saved = try connection.transaction {
+            let changed = try writeHistory(record, onlyWhenNewer: true) > 0
+            if changed, let original, original.id != record.id {
+                _ = try deleteHistory(configurationID: original.configurationID,
+                    siteKey: original.siteKey, videoID: original.videoID, sourceKey: original.sourceKey)
+            }
+            return changed
+        }
+        if saved {
+            watchedSessionRecords[sessionID, default: [:]][record.id] = record
+            if let original { watchedSessionRecords[sessionID, default: [:]][original.id] = original }
+        }
+        return saved
+    }
+
+    public func deleteWatchedHistory(_ records: [HistoryRecord], suppressing sessions: Set<UUID>) throws {
+        var targets = Dictionary(records.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for session in sessions {
+            for (id, record) in watchedSessionRecords[session] ?? [:] { targets[id] = record }
+        }
+        try connection.transaction {
+            for record in targets.values {
+                _ = try deleteHistory(configurationID: record.configurationID,
+                    siteKey: record.siteKey, videoID: record.videoID, sourceKey: record.sourceKey)
+            }
+            try deletePlaybackCompletionMarkers(historyRecordIDs: Set(targets.keys))
+        }
+        suppressedHistorySessions.formUnion(sessions)
+    }
+
+    public func savePlaybackCompletionMarker(_ marker: PlaybackCompletionMarker,
+                                             sessionID: UUID) throws {
+        guard !suppressedHistorySessions.contains(sessionID) else { return }
+        try savePlaybackCompletionMarker(marker)
     }
 
     public func saveHistory(_ history: HistoryRecord, incognito: Bool) throws {
@@ -994,7 +1092,8 @@ public actor SQLiteStore:
 
     private static func migrate(_ connection: SQLiteConnection) throws {
         let version = try connection.scalarInt("PRAGMA user_version")
-        guard version <= currentSchemaVersion else {
+        let isolated = try connection.scalarInt("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='imported_reference_claims'") > 0
+        guard version <= currentSchemaVersion, version != 11, version != 12, !isolated else {
             throw AppError.database(
                 "数据库版本 \(version) 高于应用支持的 \(currentSchemaVersion)"
             )
@@ -1398,6 +1497,47 @@ public actor SQLiteStore:
                 try ImportedIdentityRegistrySQL.createSchema(connection)
                 try connection.execute("PRAGMA user_version = 10")
             }
+        }
+        try migrateFavorites(connection, production: true, backup: version > 0)
+    }
+
+    private static func migrateFavorites(_ connection: SQLiteConnection, production: Bool, backup: Bool = true) throws {
+        if try columnExists("favorite_id", in: "favorites", connection: connection) {
+            if production { try connection.execute("PRAGMA user_version=13") }
+            return
+        }
+        if backup {
+            let destination = connection.url.deletingLastPathComponent().appendingPathComponent("Backups")
+                .appendingPathComponent("before-favorites-schema13-\(UUID().uuidString).sqlite3")
+            try connection.verifiedBackup(to: destination)
+        }
+        try connection.transaction {
+            let count = try connection.scalarInt("SELECT count(*) FROM favorites")
+            try connection.execute("ALTER TABLE favorites RENAME TO favorites_legacy")
+            try connection.execute("""
+                CREATE TABLE favorites (
+                    favorite_id TEXT PRIMARY KEY NOT NULL,
+                    configuration_id TEXT NOT NULL DEFAULT '', configuration_name TEXT, site_name TEXT,
+                    source_fingerprint TEXT NOT NULL DEFAULT '', site_key TEXT NOT NULL, video_id TEXT NOT NULL,
+                    title TEXT NOT NULL, poster_url TEXT, synopsis TEXT, created_at REAL NOT NULL,
+                    year TEXT, category_name TEXT,
+                    UNIQUE(configuration_id, site_key, source_fingerprint, video_id))
+                """)
+            try connection.query("SELECT site_key, video_id, title, poster_url, synopsis, created_at FROM favorites_legacy") { row in
+                try connection.execute("""
+                    INSERT INTO favorites (favorite_id, site_key, video_id, title, poster_url, synopsis, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, bindings: [.text(UUID().uuidString.lowercased()), .text(connection.text(row, 0) ?? ""),
+                        .text(connection.text(row, 1) ?? ""), .text(connection.text(row, 2) ?? ""),
+                        .optional(connection.text(row, 3)), .optional(connection.text(row, 4)),
+                        .double(sqlite3_column_double(row, 5))])
+            }
+            guard try connection.scalarInt("SELECT count(*) FROM favorites") == count else {
+                throw AppError.database("收藏迁移数量验证失败")
+            }
+            try verify(connection)
+            try connection.execute("DROP TABLE favorites_legacy")
+            if production { try connection.execute("PRAGMA user_version = 13") }
         }
     }
 

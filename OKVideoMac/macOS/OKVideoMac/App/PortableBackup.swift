@@ -13,7 +13,7 @@ extension UTType {
 
 struct PortableBackupManifest: Codable, Equatable, Sendable {
     static let formatIdentifier = "com.okvideomac.portable-backup"
-    static let currentSchemaVersion = 3
+    static let currentSchemaVersion = 4
 
     var format: String
     var schemaVersion: Int
@@ -23,6 +23,7 @@ struct PortableBackupManifest: Codable, Equatable, Sendable {
     var activeConfigurationID: UUID
     var configurationCount: Int
     var historyCount: Int
+    var favoriteCount: Int? = nil
 }
 
 struct PortableConfigurationRecord: Codable, Equatable, Sendable {
@@ -66,19 +67,22 @@ struct PortableBackupPayload: Codable, Equatable, Sendable {
     var playbackSkipRules: [PlaybackSkipRule]
     var playbackCompletionMarkers: [PlaybackCompletionMarker]
     var danmakuBindings: [DanmakuBinding]
+    var favorites: [FavoriteRecord]?
 
     init(
         configuration: PortableConfigurationRecord,
         history: [HistoryRecord],
         playbackSkipRules: [PlaybackSkipRule] = [],
         playbackCompletionMarkers: [PlaybackCompletionMarker] = [],
-        danmakuBindings: [DanmakuBinding] = []
+        danmakuBindings: [DanmakuBinding] = [],
+        favorites: [FavoriteRecord]? = nil
     ) {
         self.configuration = configuration
         self.history = history
         self.playbackSkipRules = playbackSkipRules
         self.playbackCompletionMarkers = playbackCompletionMarkers
         self.danmakuBindings = danmakuBindings
+        self.favorites = favorites
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -87,6 +91,7 @@ struct PortableBackupPayload: Codable, Equatable, Sendable {
         case playbackSkipRules
         case playbackCompletionMarkers
         case danmakuBindings
+        case favorites
     }
 
     init(from decoder: Decoder) throws {
@@ -107,6 +112,7 @@ struct PortableBackupPayload: Codable, Equatable, Sendable {
             [PlaybackCompletionMarker].self,
             forKey: .playbackCompletionMarkers
         ) ?? []
+        favorites = try container.decodeIfPresent([FavoriteRecord].self, forKey: .favorites)
         danmakuBindings = try container.decodeIfPresent(
             [DanmakuBinding].self,
             forKey: .danmakuBindings
@@ -135,6 +141,7 @@ struct PortableBackupPreview: Identifiable, Equatable, Sendable {
     var appBuild: String
     var configurationName: String
     var historyCount: Int
+    var favoriteCount: Int = 0
 }
 
 struct PortableBackupImportSummary: Equatable, Sendable {
@@ -183,6 +190,7 @@ enum PortableBackupCodec {
         playbackSkipRules: [PlaybackSkipRule] = [],
         playbackCompletionMarkers: [PlaybackCompletionMarker] = [],
         danmakuBindings: [DanmakuBinding] = [],
+        favorites: [FavoriteRecord] = [],
         appVersion: String,
         appBuild: String,
         createdAt: Date = Date()
@@ -200,6 +208,7 @@ enum PortableBackupCodec {
             history,
             configurationID: configuration.id
         )
+        let scopedFavorites = try normalizedFavorites(favorites, configurationID: configuration.id)
         let payload = PortableBackupPayload(
             configuration: PortableConfigurationRecord(configuration),
             history: sanitizedHistory,
@@ -215,7 +224,8 @@ enum PortableBackupCodec {
             danmakuBindings: try normalizedDanmakuBindings(
                 danmakuBindings,
                 configurationID: configuration.id
-            )
+            ),
+            favorites: scopedFavorites
         )
         let payloadData = try encoder().encode(payload)
         let manifest = PortableBackupManifest(
@@ -226,7 +236,8 @@ enum PortableBackupCodec {
             appBuild: appBuild,
             activeConfigurationID: configuration.id,
             configurationCount: 1,
-            historyCount: sanitizedHistory.count
+            historyCount: sanitizedHistory.count,
+            favoriteCount: scopedFavorites.count
         )
         let envelope = PortableBackupEnvelope(
             manifest: manifest,
@@ -238,6 +249,18 @@ enum PortableBackupCodec {
             throw PortableBackupError.fileTooLarge
         }
         return data
+    }
+
+    private static func normalizedFavorites(_ records: [FavoriteRecord], configurationID: UUID) throws -> [FavoriteRecord] {
+        guard records.count <= maximumHistoryCount else { throw PortableBackupError.invalidDocument }
+        var identities = Set<FavoriteIdentity>(), ids = Set<String>()
+        for record in records {
+            guard record.configurationID == configurationID, FavoritePersistencePolicy.isValid(record),
+                  identities.insert(record.identity).inserted, ids.insert(record.id).inserted else {
+                throw PortableBackupError.invalidDocument
+            }
+        }
+        return records
     }
 
     static func decode(_ data: Data) throws -> DecodedPortableBackup {
@@ -315,6 +338,14 @@ enum PortableBackupCodec {
                 payload.danmakuBindings,
                 configurationID: configuration.id
               ) == payload.danmakuBindings else {
+            throw PortableBackupError.invalidDocument
+        }
+        if envelope.manifest.schemaVersion >= 4 {
+            guard let favorites = payload.favorites, envelope.manifest.favoriteCount == favorites.count,
+                  try normalizedFavorites(favorites, configurationID: configuration.id) == favorites else {
+                throw PortableBackupError.invalidDocument
+            }
+        } else if payload.favorites != nil || envelope.manifest.favoriteCount != nil {
             throw PortableBackupError.invalidDocument
         }
         return DecodedPortableBackup(

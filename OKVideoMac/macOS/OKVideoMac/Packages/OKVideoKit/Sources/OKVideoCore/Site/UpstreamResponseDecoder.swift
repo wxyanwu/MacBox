@@ -6,6 +6,54 @@ struct UpstreamResponse {
     var pageCount: Int?
     var player: SitePlaybackResult?
     var message: String?
+    var reportedPage: Int? = nil
+    var declaredHasMore: Bool? = nil
+    var total: Int? = nil
+    var limit: Int? = nil
+    var rawListCount: Int? = nil
+    var businessFailure = false
+
+    func searchPagination(requestedPage: Int) throws -> Pagination {
+        var response = self
+        // A number of search scripts use zero as an unknown page-count sentinel.
+        // Keep that compatibility when they actually supplied valid results.
+        if response.pageCount == 0 && !response.videos.isEmpty { response.pageCount = nil }
+        return try response.categoryPagination(requestedPage: requestedPage)
+    }
+
+    func categoryPagination(requestedPage: Int) throws -> Pagination {
+        if businessFailure {
+            throw AppError.spider(message ?? "站点返回了分页错误")
+        }
+        guard let rawListCount, rawListCount == videos.count else {
+            throw AppError.decoding("分类响应缺少有效的 list 列表或包含无效项目")
+        }
+        if let reportedPage, reportedPage != requestedPage {
+            throw CategoryPageResponseError.uncertain("请求第 \(requestedPage) 页，站点返回第 \(reportedPage) 页，尚不能确认是否已加载完")
+        }
+        if let pageCount, pageCount < 0 {
+            throw CategoryPageResponseError.uncertain("站点返回了无效的总页数")
+        }
+        let countMore = pageCount.map { requestedPage < $0 }
+        let totalMore: Bool? = {
+            guard pageCount == nil, declaredHasMore == nil, let total, total >= 0, let limit, limit > 0 else { return nil }
+            return Double(requestedPage) * Double(limit) < Double(total)
+        }()
+        let declarations = [declaredHasMore, countMore, totalMore].compactMap { $0 }
+        if Set(declarations).count > 1 {
+            throw CategoryPageResponseError.uncertain("站点返回的分页信息互相矛盾，尚不能确认是否已加载完")
+        }
+        var result = Pagination(page: requestedPage, pageCount: pageCount)
+        if let more = declarations.first {
+            result.continuation = more ? .more : .end
+        } else {
+            // In the list-based category protocol a valid empty list terminates
+            // an unknown-length sequence. Null/malformed/missing lists never do.
+            result.continuation = rawListCount == 0 ? .end : .unknown
+        }
+        result.hasMore = result.continuation != .end
+        return result
+    }
 }
 
 struct UpstreamVideo {
@@ -77,8 +125,26 @@ enum UpstreamResponseDecoder {
             videos: videos,
             pageCount: pageCount,
             player: player,
-            message: message
+            message: message,
+            reportedPage: integer(object["page"]),
+            declaredHasMore: paginationBoolean(object["hasMore"] ?? object["has_more"]),
+            total: integer(object["total"]),
+            limit: integer(object["limit"]),
+            rawListCount: { if case .array(let list) = object["list"] { return list.count }; return nil }(),
+            businessFailure: firstNonEmptyString(object["error"], object["errMsg"]) != nil
+                || object["success"] == .bool(false)
+                || (integer(object["code"]).map { $0 >= 400 } ?? false)
         )
+    }
+
+    private static func paginationBoolean(_ value: JSONValue?) -> Bool? {
+        switch value {
+        case .bool(let flag): return flag
+        case .integer(let number) where number == 0 || number == 1: return number == 1
+        case .string(let text):
+            switch text.lowercased() { case "true", "1": return true; case "false", "0": return false; default: return nil }
+        default: return nil
+        }
     }
 
     static func decodeXML(_ data: Data, site: SiteConfiguration) throws -> UpstreamResponse {
@@ -96,7 +162,9 @@ enum UpstreamResponseDecoder {
             videos: delegate.videos,
             pageCount: delegate.pageCount,
             player: nil,
-            message: nil
+            message: nil,
+            reportedPage: delegate.page,
+            rawListCount: delegate.hasList ? delegate.videos.count : nil
         )
     }
 
@@ -603,6 +671,16 @@ public enum SpiderResponseMapper {
         )
     }
 
+    /// Search accepts the existing list/string envelopes, but never interprets
+    /// missing/malformed content as a successfully exhausted result set.
+    public static func searchPage(_ value: JSONValue, site: SiteConfiguration,
+                                  baseURL: URL?, page: Int) throws -> VideoPage {
+        let response = try decode(value, site: site, baseURL: baseURL)
+        return VideoPage(items: UpstreamResponseDecoder.mediaSummaries(
+            from: response.videos, site: site, baseURL: baseURL),
+            pagination: try response.searchPagination(requestedPage: page))
+    }
+
     /// Preserves the mixed media/action list used by CatVod Java/Dex
     /// `categoryContent`. FongMi dispatches every item with an explicit
     /// `action` through `Spider.action` while ordinary items continue to
@@ -615,19 +693,24 @@ public enum SpiderResponseMapper {
         baseURL: URL?,
         page: Int
     ) throws -> VideoPage {
-        let response = try decode(
-            value,
-            site: site,
-            baseURL: baseURL,
-            allowEmpty: true
-        )
+        try categoryPage(value, site: site, baseURL: baseURL, page: page, preservesActions: true)
+    }
+
+    /// Strict only for category browsing. Home/search/action compatibility is
+    /// deliberately kept on their existing tolerant decoding paths.
+    public static func categoryPage(
+        _ value: JSONValue,
+        site: SiteConfiguration,
+        baseURL: URL?,
+        page: Int,
+        preservesActions: Bool = false
+    ) throws -> VideoPage {
+        let response = try decode(value, site: site, baseURL: baseURL)
+        let pagination = try response.categoryPagination(requestedPage: page)
+        let summaries = UpstreamResponseDecoder.summaries(from: response.videos, site: site, baseURL: baseURL)
         return VideoPage(
-            items: UpstreamResponseDecoder.summaries(
-                from: response.videos,
-                site: site,
-                baseURL: baseURL
-            ).filter { $0.resolvedContentKind != .unsupported },
-            pagination: Pagination(page: page, pageCount: response.pageCount)
+            items: summaries.filter { preservesActions ? $0.resolvedContentKind != .unsupported : $0.resolvedContentKind == .media },
+            pagination: pagination
         )
     }
 
@@ -1085,6 +1168,8 @@ private final class XMLVideoParserDelegate: NSObject, XMLParserDelegate {
     private(set) var categories: [VideoCategory] = []
     private(set) var videos: [UpstreamVideo] = []
     private(set) var pageCount: Int?
+    private(set) var page: Int?
+    private(set) var hasList = false
 
     private var element = ""
     private var text = ""
@@ -1106,8 +1191,10 @@ private final class XMLVideoParserDelegate: NSObject, XMLParserDelegate {
             if !name.isEmpty {
                 categories.append(VideoCategory(id: id, name: name))
             }
-        } else if element == "list", let rawPageCount = attributeDict["pagecount"] {
-            pageCount = Int(rawPageCount)
+        } else if element == "list" {
+            hasList = true
+            pageCount = attributeDict["pagecount"].flatMap(Int.init)
+            page = attributeDict["page"].flatMap(Int.init)
         }
     }
 

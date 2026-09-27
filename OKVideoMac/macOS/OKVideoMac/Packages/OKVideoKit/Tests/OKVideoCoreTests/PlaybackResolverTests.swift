@@ -2,6 +2,32 @@ import XCTest
 @testable import OKVideoCore
 
 final class PlaybackResolverTests: XCTestCase {
+    func testProviderNetworkIntentSurvivesResolutionWithoutChangingPlaybackBehavior() async {
+        for policy in [MediaNetworkPolicy.inherited, .systemHTTPProxy] {
+            let resolver = PlaybackResolver(
+                parseExecutor: FixtureParseExecutor(results: [:]),
+                mediaProbe: FixtureMediaProbe(validURLs: [])
+            )
+            let result = SitePlaybackResult(
+                url: "https://fixture.invalid/movie.mp4", needsParsing: false,
+                flag: "movie", validationPolicy: .playerAuthoritative,
+                networkPolicy: policy
+            )
+            let events = await collect(resolver.resolve(PlaybackResolutionRequest(
+                candidates: [PlaybackCandidate(siteKey: "native", siteName: "Native",
+                    sourceName: "movie", episodeName: "fixture", result: result)], parsers: []
+            )) { media, _ in
+                XCTAssertEqual(media.networkPolicy, policy)
+                XCTAssertEqual(media.compatibilityPolicy, .existing)
+                XCTAssertEqual(media.transportProfile, .standard)
+            })
+            XCTAssertTrue(events.contains {
+                if case .resolved(let media) = $0 { return media.networkPolicy == policy }
+                return false
+            })
+        }
+    }
+
     func testPlaybackResourceReferenceRoundTripsWithoutRuntimeSecrets() throws {
         let reference = PlaybackResourceReference(
             configurationIdentity: "configuration-v1",

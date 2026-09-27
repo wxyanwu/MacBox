@@ -2,7 +2,7 @@ import XCTest
 import Foundation
 import CSQLite
 import OKVideoCore
-import OKVideoPersistence
+@testable import OKVideoPersistence
 @testable import OKVideoMigrationDiagnostics
 
 final class ImportedShadowTests: XCTestCase {
@@ -156,12 +156,21 @@ final class ImportedShadowTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }; return root
     }
+    private func legacySchema10Store(at url: URL) throws -> SQLiteStore {
+        let store = try SQLiteStore(databaseURL: url)
+        let connection = try SQLiteConnection(url: url)
+        defer { connection.close() }
+        // ImportedShadowDiff deliberately audits the frozen schema-10 format.
+        // Keep its synthetic inputs independent of the application's current schema.
+        try connection.execute("PRAGMA user_version=10")
+        return store
+    }
     func testRejectsRealDatabasePathWithoutOpeningIt() throws {
         XCTAssertThrowsError(try ImportedShadowDiff.run(temporaryInput: URL(fileURLWithPath: "/Users/never/Library/Database.sqlite3"), output: directory()))
     }
     func testOnlineBackupIncludesWALAndNeverMigratesInputOrSnapshot() async throws {
         let root = try directory("OKVideoMac-8B2-DryRun-ShadowTest-"), url = root.appendingPathComponent("snapshot.sqlite3")
-        let store = try SQLiteStore(databaseURL: url)
+        let store = try legacySchema10Store(at: url)
         let s = StoredLiveSource(id: source, name: "Source", sourceKind: .pasted, rawData: Data(("#EXTM3U\n" + entry()).utf8), updatedAt: Date(timeIntervalSince1970: 1_800_000_000))
         try await store.saveLiveSource(s)
         let before = try QuiescentDatabaseSnapshot.audit(database: url), out = try directory()
@@ -190,7 +199,7 @@ final class ImportedShadowTests: XCTestCase {
     }
     func testParseFailureRemainsVisibleAndUndecided() async throws {
         let root = try directory("OKVideoMac-8B2-DryRun-ShadowTest-"), url = root.appendingPathComponent("snapshot.sqlite3")
-        let db = try SQLiteStore(databaseURL: url)
+        let db = try legacySchema10Store(at: url)
         try await db.saveLiveSource(.init(id: source, name: "Source", sourceKind: .pasted, rawData: Data()))
         let p = try ImportedShadowDiff.run(temporaryInput: url, output: directory())
         XCTAssertFalse(p.sources[0].parseAvailable); XCTAssertNil(p.summaries[0].proposedChannels)
@@ -202,7 +211,7 @@ final class ImportedShadowTests: XCTestCase {
         var reports: [ImportedShadowDiff.Report] = []
         for order in [[a, b], [b, a]] {
             let input = try directory("OKVideoMac-8B2-DryRun-ShadowTest-").appendingPathComponent("snapshot.sqlite3")
-            let db = try SQLiteStore(databaseURL: input)
+            let db = try legacySchema10Store(at: input)
             for s in order { try await db.saveLiveSource(s) }
             reports.append(try ImportedShadowDiff.run(temporaryInput: input, output: directory()))
         }
@@ -210,7 +219,7 @@ final class ImportedShadowTests: XCTestCase {
     }
     func testJSONAndMarkdownReportsNeverIncludeCanaryPayloads() async throws {
         let input = try directory("OKVideoMac-8B2-DryRun-ShadowTest-").appendingPathComponent("snapshot.sqlite3")
-        let db = try SQLiteStore(databaseURL: input)
+        let db = try legacySchema10Store(at: input)
         let raw = "#EXTM3U\n" + entry("1", name: "SECRET_TOKEN_DO_NOT_PERSIST", headers: "#EXTHTTP:{\"Authorization\":\"Bearer CANARY\",\"Cookie\":\"CANARY\"}\n") + entry("2", name: "SECRET_TOKEN_DO_NOT_PERSIST")
         try await db.saveLiveSource(.init(id: source, name: "SECRET_TOKEN_DO_NOT_PERSIST", sourceKind: .pasted, rawData: Data(raw.utf8)))
         let report = try ImportedShadowDiff.run(temporaryInput: input, output: directory())

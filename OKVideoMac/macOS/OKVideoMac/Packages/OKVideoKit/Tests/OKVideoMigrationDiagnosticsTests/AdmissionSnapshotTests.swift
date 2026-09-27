@@ -12,7 +12,12 @@ final class AdmissionSnapshotTests: XCTestCase {
         let url = directory.appendingPathComponent("snapshot.sqlite3")
         do { _ = try SQLiteStore(databaseURL: url) }
         let c = try SQLiteConnection(url: url)
-        if schema == 9 { try c.execute("DROP TABLE imported_channel_identities"); try c.execute("PRAGMA user_version=9") }
+        if schema == 9 {
+            try c.execute("DROP TABLE imported_channel_identities")
+        }
+        // This suite audits the legacy schema 9/10 admission boundary. Keep the
+        // synthetic fixture independent of the application's current schema.
+        try c.execute("PRAGMA user_version=\(schema)")
         let s = AdmissionFixture.source()
         try c.execute("INSERT INTO live_sources(id,name,source_kind,raw_data,updated_at) VALUES (?,?,?,?,?)",
             bindings: [.text(s.id.uuidString), .text(s.name), .text(s.sourceKind.rawValue), .blob(s.rawData), .double(0)])

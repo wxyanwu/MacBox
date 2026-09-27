@@ -7,7 +7,7 @@ public enum LogRedactor {
         "stoken", "signature", "sign", "requestkey", "key", "secret",
         "password", "passwd", "pwd", "session", "sessionid", "sid",
         "uidtoken", "jwt", "code", "ticket", "credential", "apikey",
-        "xapikey", "username"
+        "xapikey", "username", "authkey", "ork", "puus", "pus", "uid"
     ]
 
     public static func headers(_ headers: [String: String]) -> [String: String] {
@@ -34,7 +34,17 @@ public enum LogRedactor {
                     : item
             }
         }
-        components.path = redactingXtreamPathCredentials(in: components.path)
+        if let range = components.path.range(of: "/proxy/quark/", options: .caseInsensitive) {
+            // CatPaw encodes share tokens and file capabilities in path segments.
+            components.path = String(components.path[..<range.upperBound]) + "<redacted>"
+            components.query = nil
+        } else if let host = components.host?.lowercased(),
+                  host.hasPrefix("dl-"), host.hasSuffix(".drive.quark.cn") {
+            components.path = "/<redacted>"
+            components.query = nil
+        } else {
+            components.path = redactingXtreamPathCredentials(in: components.path)
+        }
         return components.string ?? url.absoluteString
     }
 
@@ -87,12 +97,17 @@ public enum LogRedactor {
             pattern: #"(?im)\b(authorization|proxy-authorization|cookie|set-cookie|x-auth-token|x-api-key|api-key|x-request-key)\s*:\s*[^\r\n]+"#,
             template: "$1: <redacted>"
         )
+        // Redact whole capability URLs before scalar replacement introduces
+        // angle brackets which would otherwise prematurely end URL matching.
+        output = replacingURLs(in: output)
         output = replacingMatches(
             in: output,
-            pattern: #"(?i)([\"']?(?:access[_-]?token|refresh[_-]?token|uid[_-]?token|token|auth|authorization|cookie|stoken|signature|sign|request[_-]?key|api[_-]?key|username|password|passwd|pwd|secret|credential|session(?:id)?|sid|jwt|code|ticket)[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^&\s,;}]+)"#,
+            pattern: #"(?i)([\"']?(?:access[_-]?token|refresh[_-]?token|uid[_-]?token|token|auth[_-]?key|ork|__puus|__pus|__uid|auth|authorization|cookie|stoken|signature|sign|request[_-]?key|api[_-]?key|username|password|passwd|pwd|secret|credential|session(?:id)?|sid|jwt|code|ticket)[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^&\s,;}]+)"#,
             template: "$1<redacted>"
         )
-        output = replacingURLs(in: output)
+        output = replacingMatches(in: output,
+            pattern: #"(?i)(/proxy/quark/)[^\s<>\"']+"#,
+            template: "$1<redacted>")
         return output
     }
 

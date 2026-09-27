@@ -1,4 +1,5 @@
 import AppKit
+import CoreVideo
 import Foundation
 import OKVideoCore
 import OKVideoPersistence
@@ -68,688 +69,344 @@ final class DanmakuSessionCoordinator: ObservableObject {
     @Published private(set) var timelineRevision: UInt64 = 0
     @Published private(set) var candidates: [DanmakuSourceDescriptor] = []
     @Published private(set) var selectedSource: DanmakuSourceDescriptor?
+    @Published private(set) var selectionDescription = ""
+    @Published private(set) var recoveryDescription: String?
     @Published var isEnabled: Bool {
         didSet {
             defaults.set(isEnabled, forKey: Keys.enabled)
             if !isEnabled {
-                loadTask?.cancel()
-                replaceTimeline(DanmakuTimeline(comments: []))
-                loadState = .disabled
-            } else {
-                resumeCurrentSessionIfNeeded()
-            }
+                resolveTask?.cancel(); searchTask?.cancel(); loadTask?.cancel()
+                epoch = UUID(); searchState = .idle; replaceTimeline(.init(comments: [])); loadState = .disabled
+            } else { resumeCurrentSessionIfNeeded() }
         }
     }
-    @Published var fontScale: Double {
-        didSet { defaults.set(fontScale, forKey: Keys.fontScale) }
+    @Published var autoMatchEnabled: Bool {
+        didSet { defaults.set(autoMatchEnabled, forKey: Keys.autoMatch); resumeCurrentSessionIfNeeded() }
     }
-    @Published var opacity: Double {
-        didSet { defaults.set(opacity, forKey: Keys.opacity) }
-    }
-    @Published var displayArea: DanmakuDisplayArea {
-        didSet { defaults.set(displayArea.rawValue, forKey: Keys.displayArea) }
-    }
-    @Published var density: DanmakuDensity {
-        didSet { defaults.set(density.rawValue, forKey: Keys.density) }
-    }
+    @Published var fontScale: Double { didSet { defaults.set(fontScale, forKey: Keys.fontScale) } }
+    @Published var opacity: Double { didSet { defaults.set(opacity, forKey: Keys.opacity) } }
+    @Published var displayArea: DanmakuDisplayArea { didSet { defaults.set(displayArea.rawValue, forKey: Keys.displayArea) } }
+    @Published var density: DanmakuDensity { didSet { defaults.set(density.rawValue, forKey: Keys.density) } }
     @Published var offset: TimeInterval = 0
-    @Published var externalServiceURL: String {
-        didSet { defaults.set(externalServiceURL, forKey: Keys.externalServiceURL) }
-    }
-
+    @Published var externalServiceURL: String { didSet { defaults.set(externalServiceURL, forKey: Keys.externalServiceURL) } }
     private enum Keys {
         static let enabled = "player.danmaku.enabled"
+        static let autoMatch = "player.danmaku.autoMatch"
         static let fontScale = "player.danmaku.fontScale"
         static let opacity = "player.danmaku.opacity"
         static let displayArea = "player.danmaku.displayArea"
         static let density = "player.danmaku.density"
         static let externalServiceURL = "player.danmaku.externalServiceURL"
     }
-
     private let defaults: UserDefaults
+    private let client: DanmakuServiceClient
     private var context: DanmakuPlaybackContext?
     private var playbackSessionID: UUID?
     private var database: SQLiteStore?
     private var selection: DanmakuSessionSelection?
+    private var resolveTask: Task<Void, Never>?
     private var loadTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
+    private var epoch = UUID()
+    private var searchRevision = UUID()
+    private var legacyLocator: StableDanmakuLocator?
+    private var preferredWork: String?
+    private var pushObserver: NSObjectProtocol?
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, client: DanmakuServiceClient? = nil) {
         self.defaults = defaults
-        if defaults.object(forKey: Keys.enabled) == nil {
-            isEnabled = true
-        } else {
-            isEnabled = defaults.bool(forKey: Keys.enabled)
-        }
-        let storedFontScale = defaults.double(forKey: Keys.fontScale)
-        fontScale = storedFontScale == 0 ? 1 : min(max(storedFontScale, 0.6), 2)
-        let storedOpacity = defaults.double(forKey: Keys.opacity)
-        opacity = storedOpacity == 0 ? 0.86 : min(max(storedOpacity, 0.2), 1)
-        displayArea = DanmakuDisplayArea(
-            rawValue: defaults.string(forKey: Keys.displayArea) ?? ""
-        ) ?? .upperHalf
-        density = DanmakuDensity(
-            rawValue: defaults.string(forKey: Keys.density) ?? ""
-        ) ?? .medium
+        self.client = client ?? .cached(directory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("OKVideoMac/Danmaku-v2", isDirectory: true))
+        isEnabled = defaults.object(forKey: Keys.enabled) == nil || defaults.bool(forKey: Keys.enabled)
+        autoMatchEnabled = defaults.object(forKey: Keys.autoMatch) == nil || defaults.bool(forKey: Keys.autoMatch)
+        fontScale = defaults.object(forKey: Keys.fontScale) == nil ? 1 : min(max(defaults.double(forKey: Keys.fontScale), 0.6), 2)
+        opacity = defaults.object(forKey: Keys.opacity) == nil ? 0.86 : min(max(defaults.double(forKey: Keys.opacity), 0.2), 1)
+        displayArea = DanmakuDisplayArea(rawValue: defaults.string(forKey: Keys.displayArea) ?? "") ?? .upperHalf
+        density = DanmakuDensity(rawValue: defaults.string(forKey: Keys.density) ?? "") ?? .medium
         externalServiceURL = defaults.string(forKey: Keys.externalServiceURL) ?? ""
+        pushObserver = NotificationCenter.default.addObserver(forName: DanmakuPushEvent.notification, object: nil, queue: .main) { [weak self] note in
+            guard let event = note.object as? DanmakuPushEvent else { return }
+            MainActor.assumeIsolated { self?.acceptPush(event) }
+        }
     }
+    deinit { if let pushObserver { NotificationCenter.default.removeObserver(pushObserver) } }
 
-    func begin(
-        context: DanmakuPlaybackContext?,
-        playbackSessionID: UUID,
-        database: SQLiteStore
-    ) {
+    func begin(context: DanmakuPlaybackContext?, playbackSessionID: UUID, database: SQLiteStore) {
         endSession()
-        self.context = context
-        self.playbackSessionID = playbackSessionID
-        self.database = database
-        guard isEnabled, let context else {
-            loadState = isEnabled ? .unavailable : .disabled
-            return
-        }
-        selection = DanmakuSessionSelection(
-            playbackSessionID: playbackSessionID,
-            runtimeGeneration: context.runtimeGeneration
-        )
+        self.context = context; self.playbackSessionID = playbackSessionID; self.database = database
+        guard isEnabled, let context else { loadState = isEnabled ? .unavailable : .disabled; return }
+        selection = .init(playbackSessionID: playbackSessionID, runtimeGeneration: context.runtimeGeneration)
         loadState = .resolvingSource
-        let editionIdentity = context.editionIdentity
-        loadTask = Task { [weak self] in
-            let binding = try? await database.danmakuBinding(
-                for: editionIdentity
-            )
-            guard !Task.isCancelled, let self,
-                  self.owns(playbackSessionID, generation: context.runtimeGeneration) else {
-                return
-            }
-            self.offset = binding?.offset ?? 0
-            if let binding {
-                if let source = context.providedSources.first(where: {
-                    $0.stable == binding.locator
-                }) ?? self.runtimeSource(for: binding.locator, in: context) {
-                    self.choose(
-                        source,
-                        authority: .savedBinding,
-                        persist: false
-                    )
-                    return
+        let token = epoch
+        resolveTask = Task { [weak self] in
+            let bindings = (try? await database.danmakuBindings(configurationID: context.contentIdentity.configurationID)) ?? []
+            guard let self, self.owns(token) else { return }
+            let binding = bindings.first { $0.editionIdentity == context.editionIdentity }
+            self.preferredWork = bindings.filter {
+                $0.verificationVersion == 2 && $0.authority == .userSelection &&
+                $0.editionIdentity.episode.content == context.contentIdentity &&
+                $0.editionIdentity.editionID == context.editionIdentity.editionID &&
+                $0.editionIdentity.episode.seasonNumber == context.editionIdentity.episode.seasonNumber
+            }.max { $0.updatedAt < $1.updatedAt }?.match?.workID
+            if let binding, binding.verificationVersion == 2 || binding.locator.kind == .localBookmark {
+                self.offset = binding.offset
+                if binding.authority == .userSelection || binding.locator.kind == .localBookmark {
+                    if let source = self.directSource(binding.locator, context: context) {
+                        self.choose(source, authority: .savedBinding); return
+                    }
+                    if let source = await self.restore(binding, context: context), self.owns(token) {
+                        self.choose(source, authority: .savedBinding); return
+                    }
+                    guard self.owns(token) else { return }
+                    self.loadState = .staleBinding(binding.locator); return
                 }
-                if binding.locator.kind == .providerURLIdentity,
-                   let source = await self.restoreSearchSource(
-                       for: binding.locator,
-                       in: context
-                   ),
-                   self.owns(
-                       playbackSessionID,
-                       generation: context.runtimeGeneration
-                   ) {
-                    self.choose(
-                        source,
-                        authority: .savedBinding,
-                        persist: false
-                    )
-                    return
-                }
-                self.loadState = .staleBinding(binding.locator)
-                return
+            } else if let binding {
+                self.legacyLocator = binding.locator
+                self.recoveryDescription = "原来源未成功验证，正在重新匹配本集"
             }
-            if let source = DanmakuProvidedSourcePolicy.automaticSource(
-                from: context.providedSources
-            ) {
-                self.choose(
-                    source,
-                    authority: .providedSource,
-                    persist: false
-                )
-            } else if context.providedSources.count > 1 {
-                self.candidates = context.providedSources
-                self.loadState = .awaitingSelection(context.providedSources)
+            guard self.owns(token) else { return }
+            if let requestID = context.upstreamRequestID, let event = DanmakuPushEvent.pending[requestID] {
+                self.acceptPush(event)
+                if self.selectedSource != nil { return }
+            }
+            if let source = DanmakuProvidedSourcePolicy.automaticSource(from: context.providedSources) {
+                self.choose(source, authority: .providedSource)
+            } else if !context.providedSources.isEmpty {
+                self.candidates = context.providedSources; self.loadState = .awaitingSelection(context.providedSources)
             } else {
-                self.loadState = .unavailable
+                await self.matchAutomatically(token: token)
             }
         }
     }
-
     func endSession() {
-        loadTask?.cancel()
-        searchTask?.cancel()
-        loadTask = nil
-        searchTask = nil
-        context = nil
-        playbackSessionID = nil
-        database = nil
-        selection = nil
-        selectedSource = nil
-        candidates = []
-        replaceTimeline(DanmakuTimeline(comments: []))
-        searchState = .idle
-        loadState = isEnabled ? .unavailable : .disabled
-        offset = 0
+        resolveTask?.cancel(); loadTask?.cancel(); searchTask?.cancel()
+        resolveTask = nil; loadTask = nil; searchTask = nil
+        epoch = UUID(); searchRevision = UUID()
+        context = nil; playbackSessionID = nil; database = nil; selection = nil
+        selectedSource = nil; candidates = []; preferredWork = nil; legacyLocator = nil
+        selectionDescription = ""; recoveryDescription = nil
+        replaceTimeline(.init(comments: [])); searchState = .idle
+        loadState = isEnabled ? .unavailable : .disabled; offset = 0
     }
-
+    private func owns(_ token: UUID) -> Bool { isEnabled && epoch == token && !Task.isCancelled }
+    private func resumeCurrentSessionIfNeeded() {
+        guard let context, let playbackSessionID, let database else { return }
+        begin(context: context, playbackSessionID: playbackSessionID, database: database)
+    }
     func select(_ source: DanmakuSourceDescriptor) {
-        choose(source, authority: .userSelection, persist: true)
+        resolveTask?.cancel(); searchTask?.cancel(); searchRevision = UUID()
+        offset = 0
+        searchState = candidates.isEmpty ? .idle : .results(candidates)
+        choose(source, authority: .userSelection)
     }
-
-    func importXML(from fileURL: URL) {
-        guard let context, fileURL.isFileURL else { return }
-        let source = DanmakuSourceDescriptor(
-            stable: StableDanmakuLocator(
-                kind: .localBookmark,
-                provider: "local",
-                resourceID: fileURL.path,
-                displayName: fileURL.lastPathComponent
-            ),
-            runtime: RuntimeDanmakuLocator(
-                url: fileURL,
-                runtimeGeneration: context.runtimeGeneration
-            )
-        )
-        choose(source, authority: .userSelection, persist: true)
+    func retry() {
+        guard isEnabled else { return }
+        if let selectedSource { choose(selectedSource, authority: selection?.authority ?? .userSelection) }
+        else { resumeCurrentSessionIfNeeded() }
     }
-
+    func rematch() {
+        guard let context, let playbackSessionID, isEnabled else { return }
+        resolveTask?.cancel(); loadTask?.cancel(); searchTask?.cancel()
+        epoch = UUID(); let token = epoch
+        selection = .init(playbackSessionID: playbackSessionID, runtimeGeneration: context.runtimeGeneration)
+        selectedSource = nil; offset = 0; replaceTimeline(.init(comments: []))
+        resolveTask = Task { [weak self] in await self?.matchAutomatically(token: token, explicitlyRequested: true) }
+    }
+    func importXML(from url: URL) {
+        guard let context, url.isFileURL else { return }
+        select(.init(stable: .init(kind: .localBookmark, provider: "local", resourceID: url.path, displayName: url.lastPathComponent),
+                     runtime: .init(url: url, runtimeGeneration: context.runtimeGeneration)))
+    }
     func updateOffset(_ value: TimeInterval) {
         offset = min(max(value.isFinite ? value : 0, -120), 120)
-        persistCurrentBinding()
+        persistCurrentBinding(authority: .userSelection)
     }
-
+    private func matchAutomatically(token: UUID, explicitlyRequested: Bool = false) async {
+        guard owns(token) else { return }
+        guard let context, let request = context.matchRequest,
+              autoMatchEnabled || explicitlyRequested else { loadState = .unavailable; return }
+        let endpoints = await searchEndpoints(context)
+        guard owns(token) else { return }
+        guard !endpoints.isEmpty, !request.searchTitle.isEmpty else { loadState = .unavailable; return }
+        searchState = .searching; loadState = .resolvingSource
+        do {
+            let result = try await client.search(keyword: request.searchTitle, endpoints: endpoints, generation: context.runtimeGeneration)
+            guard owns(token), selection?.authority == DanmakuSelectionAuthority.none else { return }
+            guard result.successfulServices > 0 else {
+                searchState = .failed(message: "弹幕服务暂不可用，可重试")
+                loadState = .failed(nil, message: "弹幕服务暂不可用，可重试"); return
+            }
+            let matched = DanmakuMatcher.candidates(result.sources, for: request, preferredWork: preferredWork)
+            candidates = Array((matched.isEmpty ? result.sources : matched).prefix(24))
+            searchState = candidates.isEmpty ? .empty : .results(candidates)
+            if let source = DanmakuMatcher.automaticSource(result.sources, for: request, preferredWork: preferredWork) {
+                choose(source, authority: .automaticMatch)
+            } else {
+                loadState = candidates.isEmpty ? .unavailable : .awaitingSelection(candidates)
+            }
+        } catch {
+            guard owns(token) else { return }
+            loadState = .failed(nil, message: "弹幕服务暂不可用，可重试")
+        }
+    }
     func search(_ rawKeyword: String) {
-        guard let context, let playbackSessionID else { return }
+        guard isEnabled, let context else { return }
         let keyword = rawKeyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !keyword.isEmpty else { return }
-        let endpoints = searchEndpoints(in: context)
-        guard !endpoints.isEmpty else {
-            searchState = .failed(message: "请先填写弹幕服务地址")
-            return
-        }
-        searchTask?.cancel()
+        searchTask?.cancel(); searchRevision = UUID()
+        let revision = searchRevision, token = epoch
         searchState = .searching
-        let generation = context.runtimeGeneration
-        searchTask = Task { [weak self] in
+        searchTask = Task { [weak self, client] in
             do {
-                let sources = try await Self.searchSources(
-                    keyword: keyword,
-                    endpoints: endpoints,
-                    runtimeGeneration: generation
-                )
-                try Task.checkCancellation()
-                guard let self,
-                      self.owns(playbackSessionID, generation: generation) else {
-                    return
-                }
-                self.candidates = sources
-                self.searchState = sources.isEmpty ? .empty : .results(sources)
-                if !sources.isEmpty {
-                    self.loadState = .awaitingSelection(sources)
-                }
-            } catch is CancellationError {
-                return
-            } catch {
-                guard let self,
-                      self.owns(playbackSessionID, generation: generation) else {
-                    return
-                }
-                self.searchState = .failed(message: error.localizedDescription)
-            }
+                guard let self else { return }
+                let endpoints = await self.searchEndpoints(context)
+                let result = try await client.search(keyword: keyword, endpoints: endpoints, generation: context.runtimeGeneration)
+                guard self.owns(token), self.searchRevision == revision else { return }
+                self.candidates = result.sources
+                self.searchState = result.successfulServices == 0 ? .failed(message: "弹幕服务暂不可用") :
+                    (result.sources.isEmpty ? .empty : .results(result.sources))
+                if self.selectedSource == nil { self.loadState = .awaitingSelection(result.sources) }
+            } catch { }
         }
     }
-
-    var statusText: String {
-        switch loadState {
-        case .disabled: return "弹幕已关闭"
-        case .resolvingSource: return "正在查找本集弹幕…"
-        case .awaitingSelection: return "请选择弹幕来源"
-        case .loading(let source): return "正在加载 \(source.stable.displayName)…"
-        case .ready(_, let timeline): return "已载入 \(timeline.comments.count) 条弹幕"
-        case .empty: return "这个来源没有弹幕"
-        case .staleBinding: return "以前选择的弹幕来源已失效"
-        case .failed(_, let message): return message
-        case .unavailable: return "当前视频没有提供弹幕"
-        }
-    }
-
-    var searchStatusText: String? {
-        switch searchState {
-        case .idle, .searching, .results:
-            return nil
-        case .empty:
-            return "没有找到匹配的弹幕"
-        case .failed(let message):
-            return "搜索失败：\(message)"
-        }
-    }
-
-    var suggestedSearchQuery: String {
-        guard let context else { return "" }
-        let contentTitle = context.contentIdentity.title.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-        let episode = context.editionIdentity.episode
-        let suffix: String
-        if let season = episode.seasonNumber,
-           let number = episode.episodeNumber {
-            suffix = String(format: "S%02dE%02d", season, number)
-        } else if let number = episode.episodeNumber {
-            suffix = "第\(number)集"
-        } else {
-            suffix = episode.title
-        }
-        return [contentTitle, suffix]
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-    }
-
-    private func resumeCurrentSessionIfNeeded() {
-        guard let context, let playbackSessionID, let database else {
-            loadState = .unavailable
-            return
-        }
-        begin(
-            context: context,
-            playbackSessionID: playbackSessionID,
-            database: database
-        )
-    }
-
-    private func choose(
-        _ source: DanmakuSourceDescriptor,
-        authority: DanmakuSelectionAuthority,
-        persist: Bool
-    ) {
-        guard isEnabled,
-              let context,
-              let playbackSessionID,
-              var currentSelection = selection else { return }
-        let revision = currentSelection.selectionRevision
-        guard currentSelection.select(
-            source,
-            authority: authority,
-            playbackSessionID: playbackSessionID,
-            runtimeGeneration: context.runtimeGeneration,
-            basedOnRevision: revision
-        ) else { return }
-        selection = currentSelection
-        selectedSource = source
-        if persist { persistCurrentBinding() }
-        load(source, playbackSessionID: playbackSessionID, revision: currentSelection.selectionRevision)
-    }
-
-    private func load(
-        _ source: DanmakuSourceDescriptor,
-        playbackSessionID: UUID,
-        revision: UInt64
-    ) {
-        loadTask?.cancel()
-        replaceTimeline(DanmakuTimeline(comments: []))
-        loadState = .loading(source)
-        let generation = source.runtime.runtimeGeneration
-        loadTask = Task { [weak self] in
+    private func choose(_ source: DanmakuSourceDescriptor, authority: DanmakuSelectionAuthority) {
+        guard isEnabled, let context, let playbackSessionID, var selection else { return }
+        guard selection.select(source, authority: authority, playbackSessionID: playbackSessionID,
+            runtimeGeneration: context.runtimeGeneration, basedOnRevision: selection.selectionRevision) else { return }
+        self.selection = selection; selectedSource = source
+        selectionDescription = authority >= .savedBinding ? "手动选择" : (authority == .providedSource ? "源提供" : "自动匹配")
+        loadTask?.cancel(); replaceTimeline(.init(comments: [])); loadState = .loading(source)
+        let revision = selection.selectionRevision, token = epoch
+        loadTask = Task { [weak self, client] in
             do {
-                let data = try await Self.loadData(from: source.runtime)
-                try Task.checkCancellation()
-                let parsed = try await Task.detached(priority: .userInitiated) {
-                    try BilibiliDanmakuXMLParser().parse(data)
-                }.value
-                try Task.checkCancellation()
-                guard let self,
-                      self.owns(playbackSessionID, generation: generation),
-                      self.selection?.selectionRevision == revision,
-                      self.selection?.selectedSource?.id == source.id else {
+                let parsed = try await client.load(source)
+                guard let self, self.owns(token), self.selection?.selectionRevision == revision else { return }
+                if parsed.comments.isEmpty, authority == .providedSource, self.autoMatchEnabled {
+                    self.selection = .init(playbackSessionID: playbackSessionID, runtimeGeneration: context.runtimeGeneration)
+                    await self.matchAutomatically(token: token)
                     return
                 }
                 self.replaceTimeline(parsed)
-                self.loadState = parsed.comments.isEmpty
-                    ? .empty(source)
-                    : .ready(source, parsed)
-            } catch is CancellationError {
-                return
-            } catch {
-                guard let self,
-                      self.owns(playbackSessionID, generation: generation),
-                      self.selection?.selectionRevision == revision else {
-                    return
+                self.loadState = parsed.comments.isEmpty ? .empty(source) : .ready(source, parsed)
+                if !parsed.comments.isEmpty {
+                    self.persistCurrentBinding(authority: authority == .savedBinding ? .userSelection : authority)
+                    if self.legacyLocator != nil { self.recoveryDescription = "原来源未成功验证，已重新匹配本集" }
                 }
-                self.loadState = .failed(
-                    source,
-                    message: "弹幕加载失败：\(error.localizedDescription)"
-                )
+            } catch {
+                guard let self, self.owns(token), self.selection?.selectionRevision == revision else { return }
+                self.loadState = .failed(source, message: "弹幕加载失败：\(error.localizedDescription)")
+                if authority == .providedSource, self.autoMatchEnabled {
+                    self.selection = .init(playbackSessionID: playbackSessionID, runtimeGeneration: context.runtimeGeneration)
+                    await self.matchAutomatically(token: token)
+                }
             }
         }
     }
-
-    private func persistCurrentBinding() {
-        guard let context, let selectedSource, let database else { return }
-        let binding = DanmakuBinding(
-            editionIdentity: context.editionIdentity,
-            locator: selectedSource.stable,
-            offset: offset
-        )
-        Task { try? await database.saveDanmakuBinding(binding) }
-    }
-
-    private func replaceTimeline(_ value: DanmakuTimeline) {
-        timeline = value
-        timelineRevision &+= 1
-    }
-
-    private func owns(_ sessionID: UUID, generation: UInt64) -> Bool {
-        playbackSessionID == sessionID
-            && context?.runtimeGeneration == generation
-    }
-
-    private func runtimeSource(
-        for locator: StableDanmakuLocator,
-        in context: DanmakuPlaybackContext
-    ) -> DanmakuSourceDescriptor? {
-        if locator.kind == .localBookmark {
-            let url = URL(fileURLWithPath: locator.resourceID)
-            guard FileManager.default.fileExists(atPath: url.path) else {
-                return nil
-            }
-            return DanmakuSourceDescriptor(
-                stable: locator,
-                runtime: RuntimeDanmakuLocator(
-                    url: url,
-                    runtimeGeneration: context.runtimeGeneration
-                )
-            )
+    private func persistCurrentBinding(authority: DanmakuSelectionAuthority) {
+        guard case .ready = loadState, let context, let source = selectedSource, let database else { return }
+        var binding = DanmakuBinding(editionIdentity: context.editionIdentity, locator: source.stable, offset: offset)
+        binding.verificationVersion = 2; binding.authority = authority; binding.match = source.match
+        binding.previousLocator = legacyLocator
+        let token = epoch, revision = selection?.selectionRevision
+        Task { [weak self] in
+            guard let self, self.owns(token), self.selection?.selectionRevision == revision else { return }
+            try? await database.saveDanmakuBinding(binding)
         }
-        guard locator.kind == .providerEpisode else { return nil }
-        for endpoint in searchEndpoints(in: context) {
-            guard endpoint.providerID == locator.provider,
-                  let url = endpoint.commentURL(resourceID: locator.resourceID) else {
-                continue
-            }
-            return DanmakuSourceDescriptor(
-                stable: locator,
-                runtime: RuntimeDanmakuLocator(
-                    url: url,
-                    headers: endpoint.headers,
-                    runtimeGeneration: context.runtimeGeneration
-                )
-            )
+    }
+    private func directSource(_ locator: StableDanmakuLocator, context: DanmakuPlaybackContext) -> DanmakuSourceDescriptor? {
+        if let source = context.providedSources.first(where: { $0.stable == locator }) { return source }
+        if locator.kind == .localBookmark, FileManager.default.fileExists(atPath: locator.resourceID) {
+            return .init(stable: locator, runtime: .init(url: URL(fileURLWithPath: locator.resourceID), runtimeGeneration: context.runtimeGeneration))
         }
         return nil
     }
-
-    private func restoreSearchSource(
-        for locator: StableDanmakuLocator,
-        in context: DanmakuPlaybackContext
-    ) async -> DanmakuSourceDescriptor? {
-        let endpoints = searchEndpoints(in: context)
-        let keyword = suggestedSearchQuery
-        guard !endpoints.isEmpty, !keyword.isEmpty else { return nil }
-        let sources = try? await Self.searchSources(
-            keyword: keyword,
-            endpoints: endpoints,
-            runtimeGeneration: context.runtimeGeneration
-        )
-        return sources?.first { $0.stable == locator }
-    }
-
-    private struct SearchEndpoint: Equatable, Sendable {
-        let url: URL
-        let headers: HTTPHeaders
-
-        var providerID: String {
-            "service:\(url.scheme ?? "")://\(url.host ?? "")\(basePath)"
-        }
-
-        var basePath: String {
-            let path = url.path
-            if let range = path.range(of: "/api/v2") {
-                return String(path[..<range.lowerBound])
-            }
-            return path == "/" ? "" : path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        }
-
-        func searchURL(keyword: String) -> URL? {
-            let template = url.absoluteString
-            if template.contains("{") {
-                let escaped = keyword.addingPercentEncoding(
-                    withAllowedCharacters: .urlQueryAllowed
-                ) ?? keyword
-                return URL(string: template
-                    .replacingOccurrences(of: "{name}", with: escaped)
-                    .replacingOccurrences(of: "{title}", with: escaped)
-                    .replacingOccurrences(of: "{keyword}", with: escaped))
-            }
-            var components: URLComponents
-            if url.path.contains("/api/v2/search/episodes") {
-                components = URLComponents(url: url, resolvingAgainstBaseURL: false) ?? URLComponents()
-            } else {
-                components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false) ?? URLComponents()
-                components.path = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                components.path = "/" + [components.path, "api/v2/search/episodes"]
-                    .filter { !$0.isEmpty && $0 != "/" }
-                    .joined(separator: "/")
-            }
-            var queryItems = components.queryItems ?? []
-            queryItems.removeAll { $0.name == "anime" }
-            queryItems.append(URLQueryItem(name: "anime", value: keyword))
-            components.queryItems = queryItems
-            return components.url
-        }
-
-        func commentURL(resourceID: String) -> URL? {
-            let encoded = resourceID.addingPercentEncoding(
-                withAllowedCharacters: .urlPathAllowed
-            ) ?? resourceID
-            var components = URLComponents(url: apiBaseURL, resolvingAgainstBaseURL: false)
-            let existingPath = components?.path.trimmingCharacters(
-                in: CharacterSet(charactersIn: "/")
-            ) ?? ""
-            components?.path = "/" + [
-                existingPath,
-                "api/v2/comment/\(encoded)"
-            ].filter { !$0.isEmpty }.joined(separator: "/")
-            components?.queryItems = [URLQueryItem(name: "format", value: "xml")]
-            return components?.url
-        }
-
-        private var apiBaseURL: URL {
-            guard !basePath.isEmpty else {
-                var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-                components?.path = ""
-                components?.query = nil
-                components?.fragment = nil
-                return components?.url ?? url
-            }
-            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-            components?.path = basePath.hasPrefix("/") ? basePath : "/\(basePath)"
-            components?.query = nil
-            components?.fragment = nil
-            return components?.url ?? url
+    private func restore(_ binding: DanmakuBinding, context: DanmakuPlaybackContext) async -> DanmakuSourceDescriptor? {
+        guard let request = context.matchRequest else { return nil }
+        let result = try? await client.search(keyword: request.searchTitle, endpoints: await searchEndpoints(context), generation: context.runtimeGeneration)
+        return result?.sources.first { source in
+            guard source.stable.provider == binding.locator.provider else { return false }
+            if binding.locator.kind == .providerURLIdentity { return source.stable == binding.locator }
+            if let video = binding.match?.videoID { return source.match?.videoID == video }
+            guard let previous = binding.match, let current = source.match else { return false }
+            return previous.workID == current.workID && previous.episode == current.episode && previous.season == current.season
         }
     }
-
-    private func searchEndpoints(
-        in context: DanmakuPlaybackContext
-    ) -> [SearchEndpoint] {
-        var endpoints: [SearchEndpoint] = []
+    private func searchEndpoints(_ context: DanmakuPlaybackContext) async -> [DanmakuServiceEndpoint] {
+        var values: [DanmakuServiceEndpoint] = []
         for capability in context.searchCapabilities {
             switch capability {
-            case .catPawAPI(let baseURL, let headers),
-                 .providerWebPage(let baseURL, let headers):
-                endpoints.append(SearchEndpoint(url: baseURL, headers: headers))
-            case .configuredEndpoint(let value):
-                endpoints.append(contentsOf: Self.urls(in: value).map {
-                    SearchEndpoint(url: $0, headers: [:])
-                })
+            case .catPawAPI(let url, let headers):
+                if let e = DanmakuServiceEndpoint(url: url, headers: headers, identity: "source:\(context.contentIdentity.configurationID):\(context.contentIdentity.siteKey)") { values.append(e) }
+            case .configuredEndpoint(let raw):
+                for url in Self.urls(raw) {
+                    if let endpoint = DanmakuServiceEndpoint(url: url) { values.append(endpoint) }
+                    else { values += await client.discover(page: url, identity: "source:\(context.contentIdentity.configurationID):\(context.contentIdentity.siteKey)") }
+                }
+            case .providerWebPage(let url, let headers):
+                values += await client.discover(page: url, headers: headers, identity: "source:\(context.contentIdentity.configurationID):\(context.contentIdentity.siteKey)")
             }
         }
-        endpoints.append(contentsOf: Self.urls(in: externalServiceURL).map {
-            SearchEndpoint(url: $0, headers: [:])
-        })
+        values += Self.urls(externalServiceURL).compactMap { DanmakuServiceEndpoint(url: $0) }
         var seen = Set<String>()
-        return endpoints.filter { seen.insert($0.url.absoluteString).inserted }
+        return values.filter { seen.insert($0.identity).inserted }
     }
-
-    nonisolated private static func urls(in rawValue: String) -> [URL] {
-        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return [] }
-        if let url = URL(string: value), url.scheme != nil { return [url] }
-        guard let data = value.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) else {
+    private static func urls(_ raw: String) -> [URL] {
+        if let url = URL(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)), ["http", "https"].contains(url.scheme ?? "") { return [url] }
+        guard let data = raw.data(using: .utf8), let json = try? JSONSerialization.jsonObject(with: data) else { return [] }
+        func collect(_ value: Any, depth: Int) -> [URL] {
+            guard depth < 6 else { return [] }
+            if let string = value as? String, let url = URL(string: string), ["http", "https"].contains(url.scheme ?? "") { return [url] }
+            if let list = value as? [Any] { return list.flatMap { collect($0, depth: depth + 1) } }
+            if let object = value as? [String: Any] { return ["url", "api", "endpoint", "search", "urls"].flatMap { object[$0].map { collect($0, depth: depth + 1) } ?? [] } }
             return []
         }
-        var values: [URL] = []
-        func collect(_ object: Any) {
-            if let string = object as? String,
-               let url = URL(string: string), url.scheme != nil {
-                values.append(url)
-            } else if let array = object as? [Any] {
-                array.forEach(collect)
-            } else if let object = object as? [String: Any] {
-                for key in ["url", "api", "endpoint", "search", "urls"] {
-                    if let child = object[key] { collect(child) }
-                }
-            }
-        }
-        collect(json)
-        return values
+        return collect(json, depth: 0)
     }
+    private func acceptPush(_ event: DanmakuPushEvent) {
+        guard isEnabled, let context, event.requestID == context.upstreamRequestID,
+              event.siteKey == context.contentIdentity.siteKey,
+              (selection?.authority ?? .none) <= .providedSource else { return }
+        DanmakuPushEvent.pending[event.requestID] = nil
+        let sources = DanmakuSourceNormalizer.sources(from: event.payload, provider: "catpaw:\(event.siteKey)",
+            baseURL: event.baseURL, runtimeGeneration: context.runtimeGeneration)
+        if let source = DanmakuProvidedSourcePolicy.automaticSource(from: sources) { choose(source, authority: .providedSource) }
+    }
+    private func replaceTimeline(_ value: DanmakuTimeline) { timeline = value; timelineRevision &+= 1 }
+    var suggestedSearchQuery: String { context?.matchRequest?.searchTitle ?? context?.contentIdentity.title ?? "" }
+    var statusText: String {
+        switch loadState {
+        case .disabled: return "弹幕已关闭"
+        case .resolvingSource: return "正在自动匹配本集弹幕…"
+        case .awaitingSelection: return "请确认作品、集数或版本"
+        case .loading(let source): return "正在加载 \(source.stable.displayName)…"
+        case .ready(let source, let timeline): return "\(selectionDescription)：\(source.stable.displayName) · \(timeline.comments.count) 条"
+        case .empty: return "这个来源暂无本集弹幕"
+        case .staleBinding: return "已选来源需重新匹配，请重试或选择重新匹配"
+        case .failed(_, let message): return message
+        case .unavailable: return "暂无可自动匹配的本集弹幕"
+        }
+    }
+    var searchStatusText: String? {
+        switch searchState {
+        case .empty: return "没有找到匹配的弹幕"
+        case .failed(let message): return "搜索失败：\(message)"
+        default: return nil
+        }
+    }
+}
 
-    nonisolated private static func loadData(
-        from locator: RuntimeDanmakuLocator
-    ) async throws -> Data {
-        if locator.url.isFileURL {
-            let data = try Data(contentsOf: locator.url, options: [.mappedIfSafe])
-            guard data.count <= 32 * 1_024 * 1_024 else {
-                throw DanmakuXMLParserError.documentTooLarge
-            }
-            return data
-        }
-        var request = URLRequest(url: locator.url)
-        request.timeoutInterval = 15
-        for (key, value) in locator.headers.dictionary {
-            request.setValue(value, forHTTPHeaderField: key)
-        }
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse,
-              (200...299).contains(http.statusCode) else {
-            throw AppError.network("弹幕服务没有返回有效数据")
-        }
-        guard data.count <= 32 * 1_024 * 1_024 else {
-            throw DanmakuXMLParserError.documentTooLarge
-        }
-        return data
+struct DanmakuPushEvent: Sendable {
+    @MainActor static var pending: [UUID: DanmakuPushEvent] = [:]
+    @MainActor static func publish(_ event: DanmakuPushEvent) {
+        if pending.count > 16 { pending.removeAll() }
+        pending[event.requestID] = event
+        NotificationCenter.default.post(name: notification, object: event)
     }
-
-    nonisolated private static func searchSources(
-        keyword: String,
-        endpoints: [SearchEndpoint],
-        runtimeGeneration: UInt64
-    ) async throws -> [DanmakuSourceDescriptor] {
-        var collected: [DanmakuSourceDescriptor] = []
-        try await withThrowingTaskGroup(of: [DanmakuSourceDescriptor].self) { group in
-            for endpoint in endpoints {
-                group.addTask {
-                    do {
-                        guard let url = endpoint.searchURL(keyword: keyword) else {
-                            return []
-                        }
-                        var request = URLRequest(url: url)
-                        request.timeoutInterval = 12
-                        for (key, value) in endpoint.headers.dictionary {
-                            request.setValue(value, forHTTPHeaderField: key)
-                        }
-                        let (data, response) = try await URLSession.shared.data(
-                            for: request
-                        )
-                        guard let http = response as? HTTPURLResponse,
-                              (200...299).contains(http.statusCode),
-                              data.count <= 4 * 1_024 * 1_024 else { return [] }
-                        return decodeSearchResults(
-                            data,
-                            endpoint: endpoint,
-                            runtimeGeneration: runtimeGeneration
-                        )
-                    } catch is CancellationError {
-                        throw CancellationError()
-                    } catch {
-                        // Endpoints are independent. A dead optional service
-                        // must not erase useful candidates from another one.
-                        return []
-                    }
-                }
-            }
-            for try await values in group { collected.append(contentsOf: values) }
-        }
-        var seen = Set<String>()
-        return collected.filter { seen.insert($0.id).inserted }
-    }
-
-    nonisolated private static func decodeSearchResults(
-        _ data: Data,
-        endpoint: SearchEndpoint,
-        runtimeGeneration: UInt64
-    ) -> [DanmakuSourceDescriptor] {
-        guard let root = try? JSONSerialization.jsonObject(with: data) else {
-            return []
-        }
-        var output: [DanmakuSourceDescriptor] = []
-        func string(_ object: [String: Any], _ keys: [String]) -> String? {
-            for key in keys {
-                if let value = object[key] as? String,
-                   !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    return value
-                }
-                if let value = object[key] as? NSNumber { return value.stringValue }
-            }
-            return nil
-        }
-        func walk(_ value: Any, inheritedTitle: String?) {
-            if let array = value as? [Any] {
-                array.forEach { walk($0, inheritedTitle: inheritedTitle) }
-                return
-            }
-            guard let object = value as? [String: Any] else { return }
-            let title = string(object, ["episodeTitle", "title", "name", "animeTitle"])
-                ?? inheritedTitle
-            if let rawURL = string(object, ["url", "xml", "href"]),
-               let url = URL(string: rawURL), url.scheme != nil {
-                let name = title ?? "弹幕来源"
-                output.append(DanmakuSourceDescriptor(
-                    stable: StableDanmakuLocator(
-                        kind: .providerURLIdentity,
-                        provider: endpoint.providerID,
-                        resourceID: PlaybackReferenceIdentity.episode(name: name, reference: rawURL),
-                        displayName: name
-                    ),
-                    runtime: RuntimeDanmakuLocator(
-                        url: url,
-                        headers: endpoint.headers,
-                        runtimeGeneration: runtimeGeneration
-                    )
-                ))
-            } else if let resourceID = string(
-                object,
-                ["episodeId", "episode_id", "commentId", "id"]
-            ), let url = endpoint.commentURL(resourceID: resourceID) {
-                let name = title ?? "弹幕 \(resourceID)"
-                output.append(DanmakuSourceDescriptor(
-                    stable: StableDanmakuLocator(
-                        kind: .providerEpisode,
-                        provider: endpoint.providerID,
-                        resourceID: resourceID,
-                        displayName: name
-                    ),
-                    runtime: RuntimeDanmakuLocator(
-                        url: url,
-                        headers: endpoint.headers,
-                        runtimeGeneration: runtimeGeneration
-                    )
-                ))
-            }
-            for (key, child) in object where [
-                "data", "result", "results", "list", "items", "animes", "episodes"
-            ].contains(key) {
-                walk(child, inheritedTitle: title)
-            }
-        }
-        walk(root, inheritedTitle: nil)
-        return output
-    }
+    static let notification = Notification.Name("OKVideoMac.DanmakuPush")
+    let requestID: UUID
+    let siteKey: String
+    let baseURL: URL
+    let payload: JSONValue
 }
 
 struct DanmakuOverlayRepresentable: NSViewRepresentable {
@@ -780,16 +437,63 @@ struct DanmakuOverlayRepresentable: NSViewRepresentable {
     }
 }
 
+/// CVDisplayLink supports the app's macOS 12 minimum. The realtime callback
+/// never touches AppKit and can enqueue at most one outstanding main-thread frame.
+final class DanmakuDisplayDriver {
+    private var link: CVDisplayLink?
+    private let lock = NSLock()
+    private var running = false
+    private var revision: UInt64 = 0
+    private var pending: UInt64?
+    private let frame: () -> Void
+    init(frame: @escaping () -> Void) { self.frame = frame }
+    var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return running }
+    func start(displayID: CGDirectDisplayID) {
+        guard !isRunning else { return }
+        var created: CVDisplayLink?
+        guard CVDisplayLinkCreateWithCGDisplay(displayID, &created) == kCVReturnSuccess,
+              let created else { return }
+        guard CVDisplayLinkSetOutputHandler(created, { [weak self] _, _, _, _, _ in
+            self?.enqueue(); return kCVReturnSuccess
+        }) == kCVReturnSuccess else { return }
+        link = created
+        lock.lock(); revision &+= 1; running = true; lock.unlock()
+        if CVDisplayLinkStart(created) != kCVReturnSuccess { stop() }
+    }
+    private func enqueue() {
+        lock.lock()
+        guard running, pending == nil else { lock.unlock(); return }
+        let ticket = revision
+        pending = ticket
+        lock.unlock()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let deliver = self.running && self.revision == ticket && self.pending == ticket
+            if self.pending == ticket { self.pending = nil }
+            self.lock.unlock()
+            if deliver { self.frame() }
+        }
+    }
+    func stop() {
+        lock.lock(); running = false; revision &+= 1; pending = nil; lock.unlock()
+        if let link { CVDisplayLinkStop(link) }
+        link = nil
+    }
+    deinit { stop() }
+}
+
 final class DanmakuOverlayNSView: NSView {
     private struct ActiveComment {
-        let comment: DanmakuComment
         let lane: Int
         let startTime: TimeInterval
         let width: CGFloat
+        let laneHeight: CGFloat
         let lifetime: TimeInterval
         let mode: DanmakuMode
+        let layer: CALayer
+        let bytes: Int
     }
-
     private var timeline = DanmakuTimeline(comments: [])
     private var timelineRevision: UInt64?
     private var clock = DanmakuClock()
@@ -797,14 +501,19 @@ final class DanmakuOverlayNSView: NSView {
     private var lastPresentedMediaTime: TimeInterval?
     private var active: [ActiveComment] = []
     private var scrollingScheduler = DanmakuLaneScheduler(laneCount: 0)
-    private var timer: Timer?
+    private var displayDriver: DanmakuDisplayDriver?
     private var offset: TimeInterval = 0
     private var fontScale: Double = 1
     private var commentOpacity: Double = 0.86
     private var displayArea: DanmakuDisplayArea = .upperHalf
     private var density: DanmakuDensity = .medium
     private var lastBoundsSize: CGSize = .zero
-
+    private let spriteRoot = CALayer()
+    private(set) var rasterizationCount = 0
+    private(set) var rasterBytes = 0
+    static let maximumRasterBytes = 48 * 1_024 * 1_024
+    var activeCommentCount: Int { active.count }
+    var isDisplayDriverRunning: Bool { displayDriver?.isRunning == true }
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { false }
 
@@ -812,189 +521,166 @@ final class DanmakuOverlayNSView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
-        timer = Timer.scheduledTimer(withTimeInterval: 1 / 30, repeats: true) {
-            [weak self] _ in self?.tick()
+        spriteRoot.masksToBounds = true
+        // AppKit supplies the flipped view coordinates; do not flip sublayers again.
+        layer?.addSublayer(spriteRoot)
+        displayDriver = DanmakuDisplayDriver { [weak self] in
+            guard let self else { return }
+            self.renderFrame(at: ProcessInfo.processInfo.systemUptime)
         }
     }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
+    required init?(coder: NSCoder) { nil }
+    deinit { displayDriver?.stop(); NotificationCenter.default.removeObserver(self) }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        displayDriver?.stop()
+        NotificationCenter.default.removeObserver(self)
+        if let window {
+            for name in [NSWindow.didChangeScreenNotification, NSWindow.didChangeOcclusionStateNotification] {
+                NotificationCenter.default.addObserver(self, selector: #selector(windowDisplayChanged), name: name, object: window)
+            }
+        }
+        refreshDriver()
     }
-
-    deinit { timer?.invalidate() }
-
-    func update(
-        timeline: DanmakuTimeline,
-        timelineRevision: UInt64,
-        snapshot: PlayerSnapshot,
-        offset: TimeInterval,
-        fontScale: Double,
-        opacity: Double,
-        displayArea: DanmakuDisplayArea,
-        density: DanmakuDensity
-    ) {
-        if timelineRevision != self.timelineRevision {
-            self.timeline = timeline
-            self.timelineRevision = timelineRevision
-            resetPresentation(at: snapshot.position)
+    @objc private func windowDisplayChanged() {
+        displayDriver?.stop()
+        refreshDriver()
+    }
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        resetPresentation(at: clock.currentTime(at: ProcessInfo.processInfo.systemUptime))
+        refreshDriver()
+    }
+    private func refreshDriver() {
+        guard let window, window.occlusionState.contains(.visible), !isHiddenOrHasHiddenAncestor,
+              clock.isAdvancing, !timeline.comments.isEmpty, bounds.width > 0 else {
+            displayDriver?.stop(); return
         }
-        if self.offset != offset
-            || self.fontScale != fontScale
-            || self.displayArea != displayArea {
-            self.offset = offset
-            self.fontScale = fontScale
-            self.displayArea = displayArea
-            resetPresentation(at: snapshot.position)
-        }
-        commentOpacity = opacity
-        if self.density != density {
-            self.density = density
-            resetPresentation(at: snapshot.position)
-        }
+        let id = (window.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? CGMainDisplayID()
+        displayDriver?.start(displayID: id)
+    }
+    func update(timeline: DanmakuTimeline, timelineRevision: UInt64, snapshot: PlayerSnapshot,
+                offset: TimeInterval, fontScale: Double, opacity: Double,
+                displayArea: DanmakuDisplayArea, density: DanmakuDensity) {
         let now = ProcessInfo.processInfo.systemUptime
-        let expected = clock.currentTime(at: now)
-        if snapshot.isSeeking || abs(snapshot.position - expected) > 0.8 {
-            generation &+= 1
-            resetPresentation(at: snapshot.seekTarget ?? snapshot.position)
+        var reset = self.timelineRevision != timelineRevision || self.offset != offset
+            || self.fontScale != fontScale || self.displayArea != displayArea || self.density != density
+        if self.timelineRevision != timelineRevision {
+            self.timeline = timeline; self.timelineRevision = timelineRevision; generation &+= 1
         }
-        let isPlaying: Bool
-        if case .playing = snapshot.status { isPlaying = true } else { isPlaying = false }
-        clock.anchor(
-            mediaTime: snapshot.position,
-            monotonicTime: now,
-            rate: snapshot.speed,
-            isPlaying: isPlaying,
+        self.offset = offset; self.fontScale = fontScale; self.displayArea = displayArea; self.density = density
+        commentOpacity = opacity
+        let discontinuity = clock.synchronize(mediaTime: snapshot.seekTarget ?? snapshot.position,
+            sampleUptime: snapshot.isSeeking ? now : snapshot.positionSampleUptime, monotonicTime: now,
+            rate: snapshot.speed, isPlaying: snapshot.status == .playing,
             isBuffering: snapshot.isPausedForCache || snapshot.status == .buffering,
-            isSeeking: snapshot.isSeeking,
-            generation: generation
-        )
+            isSeeking: snapshot.isSeeking, generation: generation)
+        reset = reset || discontinuity
+        if reset { resetPresentation(at: clock.currentTime(at: now)) }
+        // Also updates opacity and final paused/buffering positions without a running display link.
+        renderFrame(at: now)
+        refreshDriver()
     }
-
     override func layout() {
         super.layout()
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        spriteRoot.frame = bounds
+        CATransaction.commit()
         if bounds.size != lastBoundsSize {
             lastBoundsSize = bounds.size
             resetPresentation(at: clock.currentTime(at: ProcessInfo.processInfo.systemUptime))
         }
+        refreshDriver()
     }
-
-    private func tick() {
-        guard window != nil, !timeline.comments.isEmpty, bounds.width > 0 else { return }
-        let mediaTime = clock.currentTime(at: ProcessInfo.processInfo.systemUptime)
-        presentComments(through: mediaTime)
+    /// Main-thread frame entry shared by the display link and deterministic rendering tests.
+    func renderFrame(at uptime: TimeInterval) {
+        guard !timeline.comments.isEmpty, bounds.width > 0 else { return }
+        let mediaTime = clock.currentTime(at: uptime)
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
         active.removeAll { item in
-            mediaTime - item.startTime > item.lifetime
+            guard mediaTime - item.startTime > item.lifetime else { return false }
+            item.layer.removeFromSuperlayer(); rasterBytes -= item.bytes
+            return true
         }
-        needsDisplay = true
+        presentComments(through: mediaTime)
+        for item in active {
+            let y = item.mode == .bottom
+                ? max(0, bounds.height * displayArea.fraction - CGFloat(item.lane + 1) * item.laneHeight)
+                : CGFloat(item.lane) * item.laneHeight
+            let progress = min(max((mediaTime - item.startTime) / item.lifetime, 0), 1)
+            let x = item.mode == .scrolling ? bounds.width - CGFloat(progress) * (bounds.width + item.width)
+                : max(0, (bounds.width - item.width) / 2)
+            item.layer.position = CGPoint(x: x, y: y)
+            item.layer.opacity = Float(commentOpacity)
+        }
     }
-
     private func presentComments(through mediaTime: TimeInterval) {
         let previous = lastPresentedMediaTime ?? max(0, mediaTime - 0.15)
-        guard mediaTime >= previous, mediaTime - previous < 1.5 else {
-            resetPresentation(at: mediaTime)
-            return
+        // A final pause observation can be a few milliseconds behind the last
+        // interpolated frame. Keep its sprites; explicit seeks reset in update.
+        guard mediaTime >= previous else { return }
+        guard mediaTime - previous < 1.5 else {
+            resetPresentation(at: mediaTime); return
         }
-        // Timeline windows are closed on both ends; advance the lower edge by
-        // a tiny amount so a comment exactly on the previous frame boundary
-        // is not emitted twice.
-        let sourceStart = previous - offset + 0.000_001
-        let sourceEnd = mediaTime - offset
-        for comment in timeline.comments(from: sourceStart, through: sourceEnd) {
+        for comment in timeline.comments(from: previous - offset + 0.000_001, through: mediaTime - offset) {
             guard active.count < density.maximumActiveComments else { break }
             add(comment, at: comment.time + offset)
         }
         lastPresentedMediaTime = mediaTime
     }
-
     private func add(_ comment: DanmakuComment, at time: TimeInterval) {
-        let font = NSFont.systemFont(
-            ofSize: CGFloat(min(max(comment.fontSize * fontScale, 13), 58)),
-            weight: .semibold
-        )
-        let width = ceil((comment.text as NSString).size(withAttributes: [.font: font]).width) + 8
+        let font = NSFont.systemFont(ofSize: CGFloat(min(max(comment.fontSize * fontScale, 13), 58)), weight: .semibold)
+        let color = NSColor(calibratedRed: CGFloat((comment.color >> 16) & 0xFF) / 255,
+            green: CGFloat((comment.color >> 8) & 0xFF) / 255, blue: CGFloat(comment.color & 0xFF) / 255, alpha: 1)
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color,
+            .strokeColor: NSColor.black.withAlphaComponent(0.9), .strokeWidth: -2.5]
+        let size = (comment.text as NSString).size(withAttributes: attributes)
+        let width = ceil(size.width) + 8, height = ceil(size.height) + 8
+        let scale = window?.backingScaleFactor ?? 2
+        let pixelWidth = Int(ceil(width * scale)), pixelHeight = Int(ceil(height * scale))
+        let bytes = pixelWidth * pixelHeight * 4
+        guard pixelWidth > 0, pixelWidth <= 16_384, pixelHeight > 0,
+              bytes <= Self.maximumRasterBytes - rasterBytes else { return }
         let laneHeight = font.pointSize + density.laneSpacing
-        let displayHeight = max(laneHeight, bounds.height * displayArea.fraction)
-        let laneCount = max(1, Int(displayHeight / laneHeight))
+        let laneCount = max(1, Int(max(laneHeight, bounds.height * displayArea.fraction) / laneHeight))
+        let lane: Int
         if comment.mode == .scrolling {
-            if scrollingScheduler.reserve(
-                at: time,
-                textWidth: Double(width),
-                viewportWidth: Double(bounds.width),
-                lifetime: 8
-            ).map({ reservation in
-                active.append(ActiveComment(
-                    comment: comment,
-                    lane: reservation.lane,
-                    startTime: time,
-                    width: width,
-                    lifetime: 8,
-                    mode: .scrolling
-                ))
-            }) == nil {
-                return
-            }
+            guard let reservation = scrollingScheduler.reserve(at: time, textWidth: Double(width),
+                viewportWidth: Double(bounds.width), lifetime: 8) else { return }
+            lane = reservation.lane
         } else {
-            let occupied = Set(active.filter {
-                $0.mode == comment.mode && time - $0.startTime < $0.lifetime
-            }.map(\.lane))
-            guard let lane = (0..<laneCount).first(where: { !occupied.contains($0) }) else {
-                return
-            }
-            active.append(ActiveComment(
-                comment: comment,
-                lane: lane,
-                startTime: time,
-                width: width,
-                lifetime: 4,
-                mode: comment.mode
-            ))
+            let occupied = Set(active.filter { $0.mode == comment.mode }.map(\.lane))
+            guard let free = (0..<laneCount).first(where: { !occupied.contains($0) }) else { return }
+            lane = free
         }
+        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixelWidth, pixelsHigh: pixelHeight,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: pixelWidth * 4, bitsPerPixel: 32),
+            let graphics = NSGraphicsContext(bitmapImageRep: bitmap) else { return }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = graphics
+        graphics.cgContext.scaleBy(x: scale, y: scale)
+        (comment.text as NSString).draw(at: CGPoint(x: 4, y: 4), withAttributes: attributes)
+        NSGraphicsContext.restoreGraphicsState()
+        guard let image = bitmap.cgImage else { return }
+        let sprite = CALayer()
+        sprite.anchorPoint = .zero; sprite.bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        sprite.contents = image; sprite.contentsScale = scale
+        sprite.opacity = Float(commentOpacity)
+        spriteRoot.addSublayer(sprite)
+        rasterizationCount += 1; rasterBytes += bytes
+        active.append(ActiveComment(lane: lane, startTime: time, width: width, laneHeight: laneHeight,
+            lifetime: comment.mode == .scrolling ? 8 : 4, mode: comment.mode, layer: sprite, bytes: bytes))
     }
-
     private func resetPresentation(at mediaTime: TimeInterval) {
-        active.removeAll(keepingCapacity: true)
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        active.forEach { $0.layer.removeFromSuperlayer() }
+        CATransaction.commit()
+        active.removeAll(keepingCapacity: true); rasterBytes = 0
         let fontHeight = CGFloat(28 * fontScale) + density.laneSpacing
-        let laneCount = max(1, Int(max(1, bounds.height * displayArea.fraction) / max(1, fontHeight)))
-        scrollingScheduler.reset(laneCount: laneCount)
+        scrollingScheduler.reset(laneCount: max(1, Int(max(1, bounds.height * displayArea.fraction) / max(1, fontHeight))))
         lastPresentedMediaTime = max(0, mediaTime - 0.15)
-        needsDisplay = true
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        let mediaTime = clock.currentTime(at: ProcessInfo.processInfo.systemUptime)
-        for item in active {
-            let fontSize = CGFloat(min(max(item.comment.fontSize * fontScale, 13), 58))
-            let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
-            let color = NSColor(
-                calibratedRed: CGFloat((item.comment.color >> 16) & 0xFF) / 255,
-                green: CGFloat((item.comment.color >> 8) & 0xFF) / 255,
-                blue: CGFloat(item.comment.color & 0xFF) / 255,
-                alpha: CGFloat(commentOpacity)
-            )
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: font,
-                .foregroundColor: color,
-                .strokeColor: NSColor.black.withAlphaComponent(0.9),
-                .strokeWidth: -2.5
-            ]
-            let laneHeight = font.pointSize + density.laneSpacing
-            let y: CGFloat
-            switch item.mode {
-            case .bottom:
-                y = max(0, bounds.height * displayArea.fraction - CGFloat(item.lane + 1) * laneHeight)
-            case .scrolling, .top:
-                y = CGFloat(item.lane) * laneHeight
-            }
-            let x: CGFloat
-            if item.mode == .scrolling {
-                let progress = min(max((mediaTime - item.startTime) / item.lifetime, 0), 1)
-                x = bounds.width - CGFloat(progress) * (bounds.width + item.width)
-            } else {
-                x = max(0, (bounds.width - item.width) / 2)
-            }
-            (item.comment.text as NSString).draw(at: CGPoint(x: x, y: y), withAttributes: attributes)
-        }
     }
 }
 
@@ -1035,10 +721,19 @@ struct PlayerDanmakuPanel: View {
                     .controlSize(.small)
             }
 
+            Toggle("自动匹配本集", isOn: $coordinator.autoMatchEnabled)
+                .toggleStyle(.checkbox)
             Text(coordinator.statusText)
                 .font(.caption)
                 .foregroundColor(.white.opacity(0.58))
 
+            if let recovery = coordinator.recoveryDescription {
+                Text(recovery).font(.caption).foregroundColor(.white.opacity(0.58))
+            }
+            HStack {
+                Button("重试") { coordinator.retry() }
+                Button("重新匹配") { coordinator.rematch() }
+            }.buttonStyle(.bordered).controlSize(.small)
             if !coordinator.candidates.isEmpty {
                 VStack(spacing: 5) {
                     ForEach(coordinator.candidates) { source in
@@ -1143,9 +838,9 @@ struct PlayerDanmakuPanel: View {
                 Text("时间校准")
                 Spacer()
                 Button("−0.5s") { coordinator.updateOffset(coordinator.offset - 0.5) }
-                Text(String(format: "%+.1fs", coordinator.offset))
+                Text(coordinator.offset == 0 ? "同步" : String(format: coordinator.offset > 0 ? "延后%.1fs" : "提前%.1fs", abs(coordinator.offset)))
                     .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                    .frame(width: 48)
+                    .frame(width: 80)
                 Button("+0.5s") { coordinator.updateOffset(coordinator.offset + 0.5) }
             }
             .buttonStyle(.bordered)

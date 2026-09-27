@@ -13,7 +13,7 @@
 使用 Swift 和 SwiftUI/AppKit 构建。Android 是部分 Java/Dex Provider 按需使用的
 可选兼容层。
 
-当前源码版本为 **0.7.0（Build 102）**。下方仍列出最近一个已完成 Apple 公证的
+当前发布候选为 **0.7.3（Build 129）**。下方仍列出最近一个已完成 Apple 公证的
 稳定版本。
 
 **原生 macOS · Xtream · IPTV/点播 · M3U/XMLTV · libmpv · 多 Provider 搜索 ·
@@ -36,6 +36,22 @@ QuickJS/Node Spider**
 > OKVideoMac 是播放器与 Provider 客户端，不内置第三方影视源、账号、Cookie、
 > 解析服务或 DRM 密钥。
 
+## 0.7.3 发布候选
+
+- **原生完整节目单：** 支持有界加载 XMLTV 与 Native Xtream 节目数据，提供日期导航、
+  回到当前时刻、虚拟化频道行和节目详情。
+- **原生弹幕：** 支持源提供的 XML/JSON 弹幕、Bilibili XML 导入、本集匹配、候选选择、
+  时间校准及与屏幕刷新同步的 AppKit 覆盖层。
+- **历史与收藏：** 原生来源感知列表，更安全的续播、删除和进度记录；迁移旧记录，
+  便携备份升级到 v4。
+- **浏览与播放稳定性：** 分类/搜索续页、详情缓存和异步所有权更加明确；记忆音量，
+  Native Xtream 媒体遵循系统代理；改进全屏动画及无法退出全屏时的恢复。
+- **界面统一：** 点播、直播、历史和收藏统一原生悬浮与选中反馈；有内容的列表保留
+  行分割线，空白区域不再出现网格线。
+
+该源码候选尚未替代已公证的 0.6.1 下载。范围与限制见
+[0.7.3 发布说明](Docs/RELEASE_NOTES_0.7.3.md)。
+
 ## 0.6.1 新增内容
 
 - **Android 分类存储统计：** 分别查看托管组件、安装缓存、Android 用户数据与备份，
@@ -48,7 +64,7 @@ QuickJS/Node Spider**
 - **恢复与文档：** 中断的维护事务可以继续处理；中英文项目介绍同步突出已有的 Native Xtream。
 
 Native Xtream 已在 0.6.0 引入，包括认证、Movies、Series、电影/剧集搜索和 Basic Live。
-Xtream EPG、回看/时移与 `direct_source` 仍不支持。详见
+0.6.1 当时尚未支持 Xtream EPG、回看/时移与 `direct_source`。详见
 [0.6.1 发布说明](Docs/RELEASE_NOTES_0.6.1.md)。
 
 ## 软件截图
@@ -101,8 +117,8 @@ Xtream EPG、回看/时移与 `direct_source` 仍不支持。详见
 | 原生 macOS 界面 | 支持 | SwiftUI/AppKit，不是 Android UI 套壳 |
 | Apple Silicon | 支持 | `arm64`，macOS 12.0 或更高版本 |
 | 点播与 libmpv 播放 | 支持 | 实际媒体行为仍取决于源和服务器 |
-| 直播与 XMLTV EPG | 支持 | M3U、TXT、JSON 独立导入路径 |
-| Native Xtream | 支持 | 账号认证、Movies、Series、电影/剧集搜索和 Basic Live；不同服务端仍有差异 |
+| 直播与节目单 | 支持 | M3U/TXT/JSON 导入、XMLTV 与 Native Xtream 短 EPG/完整节目单 |
+| Native Xtream | 支持 | 账号认证、Movies、Series、搜索、Basic Live 与短 EPG；不同服务端仍有差异 |
 | Native CMS JSON | 支持 | 首页、分类、筛选、详情、搜索与播放地址交接 |
 | QuickJS Spider | 部分兼容 | 符合当前接口的 selected scripts |
 | Node Spider | 部分兼容 | CatVod/CatPaw 风格视频接口子集 |
@@ -150,7 +166,7 @@ Managed 安装事务与 Emulator Session 生命周期互相独立。存储、修
 
 | 源 / 运行时 | 级别 | 当前范围 |
 | --- | --- | --- |
-| Native Xtream | 支持 | 账号认证、Movies、Series、电影/剧集搜索和 Basic Live；不同服务端仍有差异 |
+| Native Xtream | 支持 | 账号认证、Movies、Series、搜索、Basic Live 与短 EPG；不支持回看/时移或 `direct_source` |
 | Native CMS JSON | 支持 | 主要 Provider 路径 |
 | CMS XML / Native type 4 | 部分支持 | 覆盖窄于 CMS JSON |
 | TVBox/CatVod 风格 QuickJS | 部分兼容 | `home`、`category`、`detail`、`search`、`play` 与部分辅助接口 |
@@ -255,6 +271,7 @@ Tag `v0.6.1` 固定发布提交 `25155f52fb8c416f3245c9a829a93175dec9857b`，下
 - [从源码构建](OKVideoMac/macOS/OKVideoMac/Docs/BUILDING.md)
 - [架构说明](OKVideoMac/macOS/OKVideoMac/Docs/ARCHITECTURE.md)
 - [Android 存储与卸载](Docs/ANDROID_MANAGED_UNINSTALL.md)
+- [0.7.3 发布说明](Docs/RELEASE_NOTES_0.7.3.md)
 - [0.6.1 发布说明](Docs/RELEASE_NOTES_0.6.1.md)
 - [更新日志](CHANGELOG.md)
 - [安全政策](SECURITY.md)

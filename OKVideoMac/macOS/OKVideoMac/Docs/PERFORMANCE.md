@@ -1,8 +1,8 @@
 # Performance
 
 - 文档类型：当前性能基线与待验证项
-- 对照版本：0.7.0（Build 102）
-- 最近更新：2026-09-07
+- 对照版本：0.7.3（Build 129）
+- 最近更新：2026-09-27
 
 ## 已设置的资源边界
 
@@ -16,6 +16,8 @@
 - Android/Dex 远程媒体由 libmpv 直连 CDN 并直接处理 Range；Bridge 仅保留给
   Android loopback 媒体，避免模拟器二次转发造成起播、拖动和长连接回退；
 - QuickJS 64 MiB / 10 秒，C smoke test 已验证无限循环中断。
+- Full Guide 最多维护 48 个活跃频道行，只请求当前视口附近 1–2 个 12 小时
+  时间片；Xtream demand 限制请求数与并发，并使用 5 分钟短期缓存。
 
 ## 播放器生命周期基线
 
@@ -43,6 +45,17 @@
   执行正则归一化；
 - 回归测试明确要求播放器时间线更新不会发送 `AppState.objectWillChange`。
 
+## 弹幕与节目单渲染边界
+
+- 弹幕动画由 `CVDisplayLink` 驱动；播放器媒体时钟以最新可信快照为锚点连续推进，
+  重复或轻微回退的进度事件不会让文字倒退；暂停、缓存、Seek 和换片分别重置状态；
+- 每条弹幕文字先渲染为可复用位图，逐帧只更新合成位置，减少 Core Text 重排；
+  lane 调度和屏幕外回收仍受覆盖层大小及密度限制；
+- Full Guide 使用固定时间几何和 AppKit 按需绘制，频道行、时间轴和节目区域独立裁剪；
+  刷新保留可验证的时间/频道锚点，避免重建完整节目视图树；
+- 这些边界改善主线程负载与视觉连续性，不等同于所有分辨率、刷新率和弹幕密度
+  组合已经完成 Instruments 长时测量。
+
 ## 播放渲染与缓存边界
 
 - libmpv 的 VideoToolbox–OpenGL IOSurface 互操作已启用，允许支持的编码直接把
@@ -57,16 +70,13 @@
   `OKVIDEOMAC_MPV_RENDER_CONTROL=legacy` 可关闭 advanced render control，
   两个回滚开关相互独立。
 
-## 当前构建与测试基线
+## 发布候选验证
 
-2026-08-15 在 0.3.41（Build 63）集成工作树上：
-
-- Xcode 集成测试 198 项通过，OKVideoKit 独立测试 94 项通过；
-- arm64 Release 与 Android Release Bridge 构建通过；
-- 包体仍须由当前 commit 的最终本地 packaging gate 重新验证 28 个 Mach-O
-  对象的架构、最低系统、依赖和签名。
-
-这些结果证明功能和发布门禁可运行，不等价于 Instruments 性能基线。
+0.7.3（Build 129）的全量测试、静态检查和本地 Release 包验证结果记录在
+[`RELEASE_READINESS_0.7.3.md`](../../../../Docs/RELEASE_READINESS_0.7.3.md)。
+自动化通过只证明相应合同和发布门禁可运行，不等价于 Instruments 性能基线。
+0.3.41（Build 63）的 198 项 Xcode / 94 项 OKVideoKit 结果仅是历史记录，不再作为
+当前候选状态。
 
 ## 仍待完成的性能验收
 

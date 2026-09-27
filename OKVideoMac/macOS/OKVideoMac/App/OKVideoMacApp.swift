@@ -73,7 +73,7 @@ struct OKVideoMacApp: App {
         }
 
         Settings {
-            SettingsView()
+            SettingsView(navigation: state.settingsNavigation)
                 .environmentObject(state)
                 .environmentObject(state.navigation)
                 .environment(\.locale, localizer.locale)
@@ -98,8 +98,7 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
     private var playerPresentationCancellable: AnyCancellable?
     private var playerWindowCommandCancellable: AnyCancellable?
     private var appWindowLayoutCommandCancellable: AnyCancellable?
-    private var windowDidExitFullScreenCancellable: AnyCancellable?
-    private var pendingMainWindowLayoutReset = false
+    private let mainWindowResetKey = UUID()
     private var terminationState = TerminationState.idle
     private var terminationTask: Task<Void, Never>?
     private var terminationTimeoutTask: Task<Void, Never>?
@@ -130,11 +129,6 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
             .compactMap { $0 }
             .sink { [weak self] command in
                 self?.executeWindowLayoutCommand(command)
-            }
-        windowDidExitFullScreenCancellable = NotificationCenter.default
-            .publisher(for: NSWindow.didExitFullScreenNotification)
-            .sink { [weak self] notification in
-                self?.completeDeferredMainWindowReset(notification)
             }
         // Prebuild only the lightweight AppKit window shell. Mounting the
         // SwiftUI player tree here would make its loading animations keep the
@@ -172,38 +166,16 @@ final class OKVideoMacAppDelegate: NSObject, NSApplicationDelegate {
     private func resetMainWindowLayout() {
         guard let window = AppWindowLayoutPolicy.window(for: .mainWindow) else {
             AppWindowLayoutPolicy.clearSavedFrame(for: .mainWindow)
-            pendingMainWindowLayoutReset = false
             return
         }
-        if window.styleMask.contains(.fullScreen) {
-            AppWindowLayoutPolicy.prepareForDeferredReset(
-                window,
-                target: .mainWindow
-            )
-            pendingMainWindowLayoutReset = true
-            return
+        WindowTransitionCoordinator.state(for: window).whenStable(
+            key: mainWindowResetKey, windowedOnly: true
+        ) { stableWindow in
+            guard let stableWindow else { return }
+            AppWindowLayoutPolicy.restoreDefaultLayout(stableWindow, target: .mainWindow)
         }
-        pendingMainWindowLayoutReset = false
-        AppWindowLayoutPolicy.restoreDefaultLayout(
-            window,
-            target: .mainWindow
-        )
     }
 
-    private func completeDeferredMainWindowReset(
-        _ notification: Notification
-    ) {
-        guard pendingMainWindowLayoutReset,
-              let window = notification.object as? NSWindow,
-              window.identifier
-                == AppWindowLayoutPolicy.descriptor(for: .mainWindow).identifier
-        else { return }
-        pendingMainWindowLayoutReset = false
-        AppWindowLayoutPolicy.restoreDefaultLayout(
-            window,
-            target: .mainWindow
-        )
-    }
 
     func applicationShouldTerminate(
         _ sender: NSApplication
@@ -300,6 +272,11 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     private var lastProgrammaticFrame: NSRect?
     private var isClosingWindow = false
     private var isResettingPreference = false
+    private var userOwnsCurrentFrame = false
+    private var geometryGeneration: UInt64 = 0
+    private let explicitGeometryKey = UUID()
+    private let userFrameKey = UUID()
+    private let fullscreenPresentation = PlayerFullscreenPresentation()
     private var snapshotGeometryCancellable: AnyCancellable?
     private var windowModeCancellable: AnyCancellable?
 
@@ -344,6 +321,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     }
 
 #if DEBUG || OKVIDEO_PERFORMANCE_TEST
+    var windowForTesting: NSWindow? { window }
     var isWindowShellPreparedForTesting: Bool {
         window != nil
     }
@@ -363,14 +341,9 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
             hasDeferredLayoutReset = false
             return
         }
-        if window.styleMask.contains(.fullScreen) {
-            hasDeferredLayoutReset = true
-            return
-        }
-        hasDeferredLayoutReset = false
+        hasDeferredLayoutReset = true
         desiredAspectRatio = currentEffectiveAspectRatio()
-        lastAppliedAspectRatio = nil
-        scheduleGeometryApplication(immediate: true)
+        requestExplicitGeometry(for: window)
     }
 
     func execute(_ command: PlayerWindowCommand) {
@@ -385,7 +358,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
             showWithoutStealingFocus(command: command)
         case .toggleFullScreen:
             guard owns(command), let window else { return }
-            window.toggleFullScreen(nil)
+            WindowTransitionCoordinator.state(for: window).requestFullScreenToggle()
         case .close:
             dismiss()
         }
@@ -510,6 +483,10 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
+        WindowTransitionCoordinator.state(for: window).onFullScreenRecovery = { [weak self] window in
+            guard let self, self.window === window else { return }
+            self.fullscreenPresentation.failed(window: window)
+        }
         window.delegate = self
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
@@ -526,7 +503,12 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         )
         window.contentAspectRatio = .zero
         self.window = window
-        playerContentContainer = window.contentView
+        if let content = window.contentView {
+            content.wantsLayer = true
+            let composition = PlayerFullscreenContentView(frame: content.bounds)
+            content.addSubview(composition)
+            playerContentContainer = composition
+        }
 
         configureInitialGeometry(for: window)
         return window
@@ -566,6 +548,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     }
 
     private func restoreVisibleFrameIfNeeded(_ window: NSWindow) {
+        guard WindowTransitionCoordinator.state(for: window).canChangeGeometry else { return }
         let visibleFrames = NSScreen.screens.map(\.visibleFrame)
         let fallback = window.screen?.visibleFrame
             ?? NSScreen.main?.visibleFrame
@@ -584,6 +567,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         pendingFocusCommandID = nil
         pendingPresentationCommandID = nil
         persistUserFrameIfEligible(window)
+        preferenceStore.flushPendingUserFrame()
         cancelGeometryWork()
         isDismissingFromState = true
         isClosingWindow = true
@@ -596,6 +580,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         guard let closingWindow = notification.object as? NSWindow,
               closingWindow === window else { return }
         persistUserFrameIfEligible(closingWindow)
+        preferenceStore.flushPendingUserFrame()
         isClosingWindow = true
         cancelGeometryWork()
         let shouldClosePlayback = !isDismissingFromState
@@ -625,39 +610,133 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         guard let resizedWindow = notification.object as? NSWindow,
               resizedWindow === window,
               !resizedWindow.inLiveResize else { return }
+        stageUserFrame(for: resizedWindow)
         scheduleUserFramePersistence(for: resizedWindow)
     }
 
     func windowDidMove(_ notification: Notification) {
         guard let movedWindow = notification.object as? NSWindow,
               movedWindow === window else { return }
+        stageUserFrame(for: movedWindow)
         scheduleUserFramePersistence(for: movedWindow)
+    }
+
+    func windowWillStartLiveResize(_ notification: Notification) {
+        guard let resizedWindow = notification.object as? NSWindow,
+              resizedWindow === window else { return }
+        if WindowTransitionCoordinator.state(for: resizedWindow).phase == .windowed,
+           !isApplyingProgrammaticFrame {
+            userOwnsCurrentFrame = true
+        }
+        cancelGeometryWork()
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
         guard let resizedWindow = notification.object as? NSWindow,
               resizedWindow === window else { return }
-        persistUserFrameIfEligible(resizedWindow)
-        scheduleGeometryApplication(immediate: true)
+        // Notification/delegate ordering is unspecified. Wait until both have
+        // returned before reading the final user frame.
+        let transition = WindowTransitionCoordinator.state(for: resizedWindow)
+        guard transition.phase == .windowed else { return }
+        transition.whenStable(key: userFrameKey, windowedOnly: true) { [weak self] stableWindow in
+            guard let self, let stableWindow, self.window === stableWindow,
+                  self.userOwnsCurrentFrame else { return }
+            self.stageUserFrame(for: stableWindow)
+            self.persistUserFrameIfEligible(stableWindow)
+        }
     }
 
     func windowWillEnterFullScreen(_ notification: Notification) {
-        guard let fullScreenWindow = notification.object as? NSWindow,
-              fullScreenWindow === window else { return }
-        pendingGeometryWorkItem?.cancel()
-        pendingGeometryWorkItem = nil
-        pendingPersistenceWorkItem?.cancel()
-        pendingPersistenceWorkItem = nil
+        guard let changedWindow = notification.object as? NSWindow,
+              changedWindow === window else { return }
+        WindowTransitionCoordinator.state(for: changedWindow).beginFullScreen(entering: true)
+        cancelGeometryWork()
+    }
+
+    private func videoSurface(in view: NSView?) -> MPVOpenGLView? {
+        guard let view else { return nil }
+        if let surface = view as? MPVOpenGLView { return surface }
+        for child in view.subviews {
+            if let surface = videoSurface(in: child) { return surface }
+        }
+        return nil
+    }
+
+    func customWindowsToEnterFullScreen(for window: NSWindow, on screen: NSScreen) -> [NSWindow]? {
+        guard self.window === window,
+              appState?.isLivePlayback != true,
+              fullscreenPresentation.prepareToEnter(window: window,
+                surface: videoSurface(in: window.contentView),
+                aspectRatio: currentEffectiveAspectRatio(),
+                presentationView: playerContentContainer) else { return nil }
+        return [window]
+    }
+
+    func window(_ window: NSWindow, startCustomAnimationToEnterFullScreenOn screen: NSScreen,
+                withDuration duration: TimeInterval) {
+        guard self.window === window else { return }
+        fullscreenPresentation.startEntering(window: window, screen: screen, duration: duration)
+    }
+
+    func customWindowsToExitFullScreen(for window: NSWindow) -> [NSWindow]? {
+        guard self.window === window,
+              appState?.isLivePlayback != true,
+              fullscreenPresentation.prepareToExit(window: window,
+                surface: videoSurface(in: window.contentView),
+                aspectRatio: currentEffectiveAspectRatio()) else { return nil }
+        return [window]
+    }
+
+    func window(_ window: NSWindow, startCustomAnimationToExitFullScreenWithDuration duration: TimeInterval) {
+        guard self.window === window else { return }
+        fullscreenPresentation.startExiting(window: window, duration: duration)
+    }
+
+    func windowWillExitFullScreen(_ notification: Notification) {
+        guard let changedWindow = notification.object as? NSWindow,
+              changedWindow === window else { return }
+        WindowTransitionCoordinator.state(for: changedWindow).beginFullScreen(entering: false)
+        cancelGeometryWork()
+    }
+
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        guard let changedWindow = notification.object as? NSWindow,
+              changedWindow === window else { return }
+        fullscreenPresentation.complete(window: changedWindow, isFullScreen: true)
+        WindowTransitionCoordinator.state(for: changedWindow).completeFullScreen(isFullScreen: true)
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
-        guard let exitedWindow = notification.object as? NSWindow,
-              exitedWindow === window else { return }
-        if hasDeferredLayoutReset {
-            hasDeferredLayoutReset = false
-            lastAppliedAspectRatio = nil
+        guard let changedWindow = notification.object as? NSWindow,
+              changedWindow === window else { return }
+        fullscreenPresentation.complete(window: changedWindow, isFullScreen: false)
+        WindowTransitionCoordinator.state(for: changedWindow).completeFullScreen(isFullScreen: false)
+        userOwnsCurrentFrame = true
+        scheduleUserFramePersistence(for: changedWindow)
+    }
+
+    func windowDidFailToEnterFullScreen(_ window: NSWindow) {
+        guard self.window === window else { return }
+        fullscreenPresentation.failed(window: window)
+        WindowTransitionCoordinator.state(for: window).fullScreenDidFail()
+    }
+
+    func windowDidFailToExitFullScreen(_ window: NSWindow) {
+        guard self.window === window else { return }
+        fullscreenPresentation.failed(window: window)
+        WindowTransitionCoordinator.state(for: window).fullScreenDidFail()
+    }
+
+    private func requestExplicitGeometry(for window: NSWindow) {
+        WindowTransitionCoordinator.state(for: window).whenStable(
+            key: explicitGeometryKey, windowedOnly: true
+        ) { [weak self] stableWindow in
+            guard let self, let stableWindow, self.window === stableWindow else { return }
+            self.hasDeferredLayoutReset = false
+            self.userOwnsCurrentFrame = false
+            self.lastAppliedAspectRatio = nil
+            self.scheduleGeometryApplication(immediate: true)
         }
-        scheduleGeometryApplication(immediate: true)
     }
 
     private func beginGeometryRequestIfNeeded(_ requestID: UUID?) {
@@ -687,18 +766,13 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     }
 
     private func handleModeChange(_ mode: PlayerWindowMode) {
-        guard !isResettingPreference else { return }
-        if let window,
-           !window.styleMask.contains(.fullScreen),
-           !window.inLiveResize,
+        guard !isResettingPreference, let window else { return }
+        if WindowTransitionCoordinator.state(for: window).canChangeGeometry,
            !isClosingWindow {
-            preferenceStore.captureModeTransition(
-                to: mode,
-                currentContentSize: contentSize(of: window)
-            )
+            preferenceStore.captureModeTransition(to: mode,
+                currentContentSize: contentSize(of: window))
         }
-        lastAppliedAspectRatio = nil
-        scheduleGeometryApplication(immediate: true)
+        requestExplicitGeometry(for: window)
     }
 
     private func configureInitialGeometry(for window: NSWindow) {
@@ -740,12 +814,15 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     private func scheduleGeometryApplication(immediate: Bool) {
         guard let window else { return }
         pendingGeometryWorkItem?.cancel()
-        guard !window.styleMask.contains(.fullScreen),
-              !window.inLiveResize,
+        geometryGeneration &+= 1
+        let generation = geometryGeneration
+        guard WindowTransitionCoordinator.state(for: window).canChangeGeometry,
+              !userOwnsCurrentFrame,
               !isClosingWindow else { return }
 
         let workItem = DispatchWorkItem { [weak self, weak window] in
-            guard let self, let window, self.window === window else { return }
+            guard let self, let window, self.window === window,
+                  self.geometryGeneration == generation else { return }
             self.applyPreferredGeometry(to: window, animate: window.isVisible)
         }
         pendingGeometryWorkItem = workItem
@@ -764,8 +841,8 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         animate: Bool
     ) {
         guard self.window === window,
-              !window.styleMask.contains(.fullScreen),
-              !window.inLiveResize,
+              WindowTransitionCoordinator.state(for: window).canChangeGeometry,
+              !userOwnsCurrentFrame,
               !isClosingWindow else { return }
         pendingGeometryWorkItem = nil
 
@@ -848,6 +925,10 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         to window: NSWindow,
         animate: Bool
     ) {
+        guard WindowTransitionCoordinator.state(for: window).canChangeGeometry,
+              frame.origin.x.isFinite, frame.origin.y.isFinite,
+              frame.width.isFinite, frame.height.isFinite,
+              frame.width > 0, frame.height > 0 else { return }
         pendingPersistenceWorkItem?.cancel()
         pendingPersistenceWorkItem = nil
         programmaticMutationGeneration &+= 1
@@ -880,6 +961,22 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         )
     }
 
+    private func stageUserFrame(for window: NSWindow) {
+        guard shouldPersistUserFrame(window) else { return }
+        userOwnsCurrentFrame = true
+        let targetScreen = window.screen
+            ?? screen(containing: window.frame)
+            ?? NSScreen.main
+        let visibleFrame = targetScreen?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1_440, height: 900)
+        preferenceStore.stageUserFrame(
+            contentSize: contentSize(of: window),
+            windowFrame: window.frame,
+            visibleFrame: visibleFrame,
+            screenIdentifier: targetScreen?.okVideoScreenIdentifier
+        )
+    }
+
     private func persistUserFrameIfEligible(_ window: NSWindow) {
         guard shouldPersistUserFrame(window) else { return }
         pendingPersistenceWorkItem?.cancel()
@@ -902,8 +999,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         guard self.window === window,
               !isClosingWindow,
               !isApplyingProgrammaticFrame,
-              !window.styleMask.contains(.fullScreen),
-              !window.inLiveResize else { return false }
+              WindowTransitionCoordinator.state(for: window).canChangeGeometry else { return false }
         if let lastProgrammaticFrame,
            framesMatch(window.frame, lastProgrammaticFrame) {
             return false
@@ -912,6 +1008,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     }
 
     private func cancelGeometryWork() {
+        geometryGeneration &+= 1
         pendingGeometryWorkItem?.cancel()
         pendingGeometryWorkItem = nil
         pendingPersistenceWorkItem?.cancel()
@@ -979,6 +1076,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     }
 
     private func clearWindowReferences() {
+        fullscreenPresentation.cancel()
         cancelGeometryWork()
         pendingFocusCommandID = nil
         pendingPresentationCommandID = nil
@@ -987,6 +1085,10 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         lastAppliedAspectRatio = nil
         appState?.setPlayerWindowKey(false)
         hostingController?.view.removeFromSuperview()
+        if let window {
+            WindowTransitionCoordinator.state(for: window).cancel(explicitGeometryKey)
+            WindowTransitionCoordinator.state(for: window).cancel(userFrameKey)
+        }
         window?.delegate = nil
         window = nil
         playerContentContainer = nil
@@ -994,6 +1096,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         lastProgrammaticFrame = nil
         isApplyingProgrammaticFrame = false
         isClosingWindow = false
+        userOwnsCurrentFrame = false
     }
 
     private func initialContentSize() -> NSSize {
@@ -1009,7 +1112,10 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
 @MainActor
 enum BrowserWindowChromeController {
     static func configure(_ window: NSWindow) {
-        window.styleMask.insert(.fullSizeContentView)
+        let transition = WindowTransitionCoordinator.state(for: window)
+        guard !transition.browserChromeConfigured, transition.canChangeGeometry else { return }
+        transition.browserChromeConfigured = true
+        if !window.styleMask.contains(.fullSizeContentView) { window.styleMask.insert(.fullSizeContentView) }
         // Keep the full-size titlebar so the Sidebar can extend behind the
         // traffic lights, but let AppKit draw the unified toolbar material.
         // A transparent titlebar exposes scrolled posters underneath the real
@@ -1024,6 +1130,70 @@ enum BrowserWindowChromeController {
         // it cannot retain a stale outline from the pre-configuration frame.
         window.hasShadow = true
         window.invalidateShadow()
+    }
+}
+
+/// Explicit persistence survives SwiftUI replacing its generated frame-autosave name.
+@MainActor
+final class MainWindowGeometryStore {
+    static let storageKey = "OKVideoMac.MainWindow.Geometry.v1"
+    private static var associationKey: UInt8 = 0
+    private weak var window: NSWindow?
+    private let defaults: UserDefaults
+    private var observers: [NSObjectProtocol] = []
+    private var saveTask: Task<Void, Never>?
+
+    static func attach(to window: NSWindow) {
+        guard objc_getAssociatedObject(window, &associationKey) == nil else { return }
+        let store = MainWindowGeometryStore(window: window)
+        objc_setAssociatedObject(window, &associationKey, store, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    static func savedFrame(defaults: UserDefaults = .standard) -> NSRect? {
+        guard let data = defaults.data(forKey: storageKey),
+              let frame = try? JSONDecoder().decode(CGRect.self, from: data),
+              [frame.origin.x, frame.origin.y, frame.width, frame.height].allSatisfy({ $0.isFinite }),
+              frame.width >= 300, frame.height >= 200 else { return nil }
+        return frame
+    }
+
+    init(window: NSWindow, defaults: UserDefaults = .standard) {
+        self.window = window
+        self.defaults = defaults
+        let center = NotificationCenter.default
+        for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification,
+                     NSWindow.didEndLiveResizeNotification, NSWindow.didExitFullScreenNotification] {
+            observers.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.scheduleSave() }
+            })
+        }
+        for (name, object) in [(NSWindow.willCloseNotification, window as AnyObject),
+                               (NSApplication.willTerminateNotification, NSApp as AnyObject)] {
+            observers.append(center.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.save() }
+            })
+        }
+        scheduleSave()
+    }
+
+    private func scheduleSave() {
+        saveTask?.cancel()
+        saveTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 300_000_000) } catch { return }
+            self?.save()
+        }
+    }
+
+    func save() {
+        guard let window, WindowTransitionCoordinator.state(for: window).canChangeGeometry,
+              !window.isMiniaturized, window.frame.width >= 300, window.frame.height >= 200,
+              let data = try? JSONEncoder().encode(window.frame) else { return }
+        defaults.set(data, forKey: Self.storageKey)
+    }
+
+    deinit {
+        saveTask?.cancel()
+        observers.forEach(NotificationCenter.default.removeObserver)
     }
 }
 
@@ -1123,19 +1293,19 @@ enum AppWindowLayoutPolicy {
     ) {
         let descriptor = descriptor(for: target)
         let isAlreadyConfigured = window.identifier == descriptor.identifier
+        guard !isAlreadyConfigured,
+              WindowTransitionCoordinator.state(for: window).canChangeGeometry else { return }
         window.identifier = descriptor.identifier
         window.contentMinSize = descriptor.minimumContentSize
 
-        guard !isAlreadyConfigured else {
-            restoreVisibleFrameIfNeeded(window)
-            return
-        }
-
-        if !window.setFrameUsingName(descriptor.frameAutosaveName) {
+        if target == .mainWindow, let frame = MainWindowGeometryStore.savedFrame() {
+            window.setFrame(frame, display: false)
+        } else if !window.setFrameUsingName(descriptor.frameAutosaveName) {
             applyDefaultFrame(window, target: target, animate: false)
         }
         window.setFrameAutosaveName(descriptor.frameAutosaveName)
         restoreVisibleFrameIfNeeded(window)
+        if target == .mainWindow { MainWindowGeometryStore.attach(to: window) }
     }
 
     @MainActor
@@ -1143,6 +1313,7 @@ enum AppWindowLayoutPolicy {
         _ window: NSWindow,
         target: AppWindowLayoutTarget
     ) {
+        guard WindowTransitionCoordinator.state(for: window).canChangeGeometry else { return }
         prepareForDeferredReset(window, target: target)
         let descriptor = descriptor(for: target)
         window.identifier = descriptor.identifier
@@ -1161,6 +1332,9 @@ enum AppWindowLayoutPolicy {
     }
 
     static func clearSavedFrame(for target: AppWindowLayoutTarget) {
+        if target == .mainWindow {
+            UserDefaults.standard.removeObject(forKey: MainWindowGeometryStore.storageKey)
+        }
         let autosaveName = descriptor(for: target).frameAutosaveName
         UserDefaults.standard.removeObject(
             forKey: "NSWindow Frame \(autosaveName)"
@@ -1175,6 +1349,7 @@ enum AppWindowLayoutPolicy {
 
     @MainActor
     static func restoreVisibleFrameIfNeeded(_ window: NSWindow) {
+        guard WindowTransitionCoordinator.state(for: window).canChangeGeometry else { return }
         let visibleFrames = NSScreen.screens.map(\.visibleFrame)
         let fallback = window.screen?.visibleFrame
             ?? NSScreen.main?.visibleFrame
@@ -1344,12 +1519,32 @@ struct PlayerPlaybackWindowRoot: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
-        .alert(item: $appState.playerPresentedError) { error in
-            Alert(
-                title: Text(error.title),
-                message: Text(error.message),
-                dismissButton: .default(Text(L10n.string("common.ok", fallback: "OK")))
-            )
+        .overlay(alignment: .top) {
+            if let error = appState.playerPresentedError {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "exclamationmark.circle")
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(error.title).font(.headline)
+                        Text(error.message).font(.callout).textSelection(.enabled)
+                    }
+                    Button { appState.playerPresentedError = nil } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(L10n.string("common.close", fallback: "Close"))
+                }
+                .foregroundStyle(.white)
+                .padding(16)
+                .frame(maxWidth: 560)
+                .shadow(color: .black.opacity(0.65), radius: 2, y: 1)
+                .padding(.top, 54)
+                .padding(.horizontal, 20)
+            }
+        }
+        .task(id: appState.playerPresentedError?.id) {
+            guard let id = appState.playerPresentedError?.id else { return }
+            do { try await Task.sleep(nanoseconds: 6_000_000_000) } catch { return }
+            if appState.playerPresentedError?.id == id { appState.playerPresentedError = nil }
         }
         .appConfigurationSheet(scope: .player)
     }
@@ -1705,14 +1900,14 @@ struct AppCommands: Commands {
 
             Divider()
 
-            Button(L10n.string("menu.playback.previous-episode", fallback: "Previous Episode")) {
+            Button(state.previousPlayerResourceTitle) {
                 Task { await state.playAdjacentEpisode(offset: -1) }
             }
                 .keyboardShortcut(.leftArrow, modifiers: .option)
                 .disabled(
                     !state.allowsPlayerShortcuts || !state.hasPreviousEpisode
                 )
-            Button(L10n.string("menu.playback.next-episode", fallback: "Next Episode")) {
+            Button(state.nextPlayerResourceTitle) {
                 Task { await state.playAdjacentEpisode(offset: 1) }
             }
                 .keyboardShortcut(.rightArrow, modifiers: .option)

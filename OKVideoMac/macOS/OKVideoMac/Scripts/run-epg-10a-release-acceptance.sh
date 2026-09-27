@@ -74,6 +74,7 @@ CLANG_MODULE_CACHE_PATH="$CLANG_CACHE" xcodebuild \
   -configuration Release \
   -destination 'platform=macOS,arch=arm64' \
   -derivedDataPath "$DERIVED_DATA" \
+  PRODUCT_BUNDLE_IDENTIFIER=com.okvideomac.EPG10AAcceptance \
   ENABLE_TESTABILITY=YES \
   SWIFT_ACTIVE_COMPILATION_CONDITIONS=OKVIDEO_PERFORMANCE_TEST \
   CODE_SIGNING_ALLOWED=NO \

@@ -1,5 +1,8 @@
 # OKVideoMac 0.7.0（Build 102）Release Notes
 
+> 历史本地候选稿：0.7.0 未创建 Git tag 或 GitHub Release，内容已合并并由
+> [0.7.3 发布说明](RELEASE_NOTES_0.7.3.md)取代，不代表当前版本或公开发布状态。
+
 日期：2026-09-19
 
 ## 弹幕

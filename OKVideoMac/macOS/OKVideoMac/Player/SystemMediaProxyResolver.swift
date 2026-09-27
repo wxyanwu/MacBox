@@ -39,9 +39,33 @@ enum MediaProxyDecision: Equatable, Sendable {
         }
         // mpv omits an empty http-proxy option when building the AV dictionary.
         // Explicit empty FFmpeg values suppress its environment proxy fallback.
-        // All three belong exclusively to the Native Xtream player instance.
+        // Apply these as loadfile options so replacement, stop and failure all
+        // restore the preceding values, including on a reused VOD player.
         return [("http-proxy", proxy), ("stream-lavf-o", "http_proxy=\(proxy)"),
                 ("demuxer-lavf-o", "http_proxy=\(proxy)"), ("tls-verify", "yes")]
+    }
+}
+
+/// mpv parses loadfile's option list separately from each nested lavf list.
+/// Length quoting uses UTF-8 bytes and protects commas, percent signs and
+/// quotes without changing the option value (including explicit empty values).
+enum MPVFileOptionEncoder {
+    static func encode(name: String, value: String) -> String {
+        "\(name)=%\(value.utf8.count)%\(value)"
+    }
+}
+
+enum PlayerMediaNetworkPolicy {
+    static func usesSystemProxy(_ media: ResolvedMedia) -> Bool {
+        media.networkPolicy == .systemHTTPProxy
+            || media.compatibilityPolicy == .nativeXtreamLive
+    }
+
+    static func decision(for media: ResolvedMedia) -> MediaProxyDecision? {
+        guard usesSystemProxy(media) else { return nil }
+        return SystemMediaProxyResolver.resolve(
+            for: media.hlsStartupSelection?.routingURL ?? media.url
+        )
     }
 }
 

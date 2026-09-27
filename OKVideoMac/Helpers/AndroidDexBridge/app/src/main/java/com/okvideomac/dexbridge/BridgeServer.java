@@ -1270,6 +1270,8 @@ final class BridgeServer {
                 );
                 return;
             }
+            response = response.clone();
+            response[2] = session.guardStream((InputStream) response[2]);
             writeProxy(output, response, headersOnly);
             return;
         }
@@ -1359,7 +1361,7 @@ final class BridgeServer {
                         + " outputFraming=chunked");
                 MEDIA_READ_REQUEST.set(requestID);
                 try {
-                    writeMediaResponse(output, response, headersOnly, normalizedRange);
+                    writeMediaResponse(output, response, headersOnly, normalizedRange, session);
                 } finally {
                     MEDIA_READ_REQUEST.remove();
                 }
@@ -1603,7 +1605,16 @@ final class BridgeServer {
     private static void writeMediaResponse(
             BufferedOutputStream output, Response response, boolean headersOnly, String normalizedRange
     ) throws IOException {
+        writeMediaResponse(output, response, headersOnly, normalizedRange, null);
+    }
+
+    private static void writeMediaResponse(
+            BufferedOutputStream output, Response response, boolean headersOnly, String normalizedRange,
+            BridgeMediaSessionRegistry.Session session
+    ) throws IOException {
         ResponseBody responseBody = response.body();
+        InputStream body = responseBody == null ? new ByteArrayInputStream(new byte[0]) : responseBody.byteStream();
+        if (session != null) body = session.guardStream(body);
         String contentType = response.header(
                 "Content-Type",
                 "application/octet-stream"
@@ -1615,9 +1626,7 @@ final class BridgeServer {
                 new Object[] {
                         response.code(),
                         contentType,
-                        responseBody == null
-                                ? new ByteArrayInputStream(new byte[0])
-                                : responseBody.byteStream(),
+                        body,
                         headers
                 },
                 headersOnly

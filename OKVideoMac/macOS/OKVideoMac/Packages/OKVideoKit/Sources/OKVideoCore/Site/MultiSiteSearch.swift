@@ -16,19 +16,22 @@ public struct SearchFailure: Equatable, Sendable {
     public var message: String
     public var category: SearchFailureCategory
     public var isRetryable: Bool
+    public var isPaginationUncertain: Bool
 
     public init(
         siteKey: String,
         siteName: String,
         message: String,
         category: SearchFailureCategory? = nil,
-        isRetryable: Bool = false
+        isRetryable: Bool = false,
+        isPaginationUncertain: Bool = false
     ) {
         self.siteKey = siteKey
         self.siteName = siteName
         self.message = message
         self.category = category ?? Self.classify(message)
         self.isRetryable = isRetryable
+        self.isPaginationUncertain = isPaginationUncertain
     }
 
     public static func classify(_ message: String) -> SearchFailureCategory {
@@ -180,6 +183,7 @@ private struct PageSearchFailure: Sendable {
     var message: String
     var category: SearchFailureCategory
     var isRetryable: Bool
+    var isPaginationUncertain = false
 }
 
 private actor FirstPageSearchOutcome {
@@ -509,7 +513,8 @@ public struct MultiSiteSearch {
         providers: [SiteProvider],
         keyword: String,
         quick: Bool = false,
-        providerPolicies: [String: MultiSiteSearchProviderPolicy] = [:]
+        providerPolicies: [String: MultiSiteSearchProviderPolicy] = [:],
+        onPage: (@Sendable (SearchPageProgress) async -> Void)? = nil
     ) -> AsyncStream<MultiSiteSearchEvent> {
         AsyncStream { continuation in
             let task = Task {
@@ -600,6 +605,8 @@ public struct MultiSiteSearch {
                         let provider = enabled[result.providerIndex]
                         switch result.outcome {
                         case .page(let page, let resolvedKeyword):
+                            await onPage?(SearchPageProgress(siteKey: provider.site.key,
+                                keyword: resolvedKeyword, requestedPage: 1, page: page))
                             let items = Self.deduplicatedWithinSite(page.items)
                             siteResultCounts[provider.site.key] = items.count
                             if pool.ingest(items) {
@@ -608,7 +615,7 @@ public struct MultiSiteSearch {
                             let pageCount = page.pagination.pageCount.flatMap {
                                 $0 > 0 ? $0 : nil
                             }
-                            let hasDeclaredNextPage = pageCount.map { $0 > 1 } ?? true
+                            let hasDeclaredNextPage = page.pagination.continuation != .end && (pageCount.map { $0 > 1 } ?? true)
                             let providerMaximumPages = providerPolicies[
                                 provider.site.key
                             ]?.maximumPagesPerSite ?? maximumPagesPerSite
@@ -661,7 +668,7 @@ public struct MultiSiteSearch {
                                     siteKey: provider.site.key,
                                     siteName: provider.site.name,
                                     message: failure.message,
-                                    category: failure.category
+                                    category: failure.category, isPaginationUncertain: failure.isPaginationUncertain
                                 )
                                 continuation.yield(
                                     .failure(searchFailure)
@@ -777,6 +784,8 @@ public struct MultiSiteSearch {
                             let provider = enabled[result.providerIndex]
                             switch result.outcome {
                             case .page(let page, let resolvedKeyword):
+                            await onPage?(SearchPageProgress(siteKey: provider.site.key,
+                                keyword: resolvedKeyword, requestedPage: 1, page: page))
                                 let items = Self.deduplicatedWithinSite(page.items)
                                 siteResultCounts[provider.site.key] = items.count
                                 if pool.ingest(items) {
@@ -789,6 +798,7 @@ public struct MultiSiteSearch {
                                     provider.site.key
                                 ]?.maximumPagesPerSite ?? maximumPagesPerSite
                                 if !items.isEmpty,
+                                   page.pagination.continuation != .end,
                                    pageCount.map({ $0 > 1 }) ?? true,
                                    providerMaximumPages > 1,
                                    pool.retainedCount(for: provider.site.key)
@@ -831,7 +841,7 @@ public struct MultiSiteSearch {
                                     siteName: provider.site.name,
                                     message: failure.message,
                                     category: failure.category,
-                                    isRetryable: failure.isRetryable
+                                    isRetryable: failure.isRetryable, isPaginationUncertain: failure.isPaginationUncertain
                                 )
                                 continuation.yield(
                                     .failure(searchFailure)
@@ -905,7 +915,7 @@ public struct MultiSiteSearch {
                                     providers: enabled,
                                     quick: quick,
                                     deadline: deadline,
-                                    providerPolicies: providerPolicies
+                                    providerPolicies: providerPolicies, onPage: onPage
                                 )
                             }
                         }
@@ -927,7 +937,7 @@ public struct MultiSiteSearch {
                                     siteKey: provider.site.key,
                                     siteName: provider.site.name,
                                     message: failure.message,
-                                    category: failure.category
+                                    category: failure.category, isPaginationUncertain: failure.isPaginationUncertain
                                 )
                                 continuation.yield(.failure(searchFailure))
                                 continuation.yield(.siteOutcome(.failure(searchFailure)))
@@ -1066,7 +1076,8 @@ public struct MultiSiteSearch {
         providers: [SiteProvider],
         quick: Bool,
         deadline: Date,
-        providerPolicies: [String: MultiSiteSearchProviderPolicy]
+        providerPolicies: [String: MultiSiteSearchProviderPolicy],
+        onPage: (@Sendable (SearchPageProgress) async -> Void)?
     ) async -> BackgroundSearchResult {
         var state = initialState
         let provider = providers[state.providerIndex]
@@ -1105,6 +1116,8 @@ public struct MultiSiteSearch {
                 deadlineLimited: remaining <= providerTimeout
             ) {
             case .page(let page, _):
+                await onPage?(SearchPageProgress(siteKey: provider.site.key,
+                    keyword: state.keyword, requestedPage: state.nextPage, page: page))
                 guard !page.items.isEmpty else { break searchLoop }
                 var newItems: [VideoSummary] = []
                 for item in page.items where state.seenIDs.insert(item.id).inserted {
@@ -1119,6 +1132,7 @@ public struct MultiSiteSearch {
                     state.explicitPageCount = pageCount
                 }
                 state.nextPage += 1
+                if page.pagination.continuation == .end { break searchLoop }
             case .failure(let failure):
                 return BackgroundSearchResult(
                     providerIndex: state.providerIndex,
@@ -1149,6 +1163,35 @@ public struct MultiSiteSearch {
             failure: nil,
             reachedDeadline: false
         )
+    }
+
+    /// Demand-driven continuation uses the same timeout, cancellation, transport
+    /// lane and page-one keyword fallback as the initial aggregate search.
+    public func nextPage(provider: SiteProvider, cursor: SearchPageCursor) async -> SearchPageAttempt {
+        let outcome: PageSearchOutcome
+        if cursor.nextPage == 1 {
+            outcome = await initialPageOutcome(provider: provider, keyword: cursor.keyword, quick: false)
+        } else {
+            outcome = await searchPageWithTimeout(provider: provider, keyword: cursor.keyword,
+                page: cursor.nextPage, quick: false,
+                timeout: Self.effectiveSiteTimeout(base: siteTimeout, capability: provider.capability),
+                deadlineLimited: false)
+        }
+        switch outcome {
+        case .page(let page, let keyword): return .success(page, keyword: keyword)
+        case .failure(let failure): return .failure(failure.message, uncertain: failure.isPaginationUncertain)
+        case .deadlineReached: return .failure("搜索超时", uncertain: false)
+        case .cancelled: return .cancelled
+        }
+    }
+
+    public static func merging(existing: [VideoSummary], incoming: [VideoSummary], keyword: String,
+                               maximumRetainedCandidates: Int, maximumResultsPerSite: Int) -> MultiSiteSearchSnapshot {
+        var pool = SearchCandidatePool(keyword: keyword,
+            maximumRetainedCandidates: maximumRetainedCandidates, maximumResultsPerSite: maximumResultsPerSite)
+        _ = pool.ingest(existing)
+        _ = pool.ingest(incoming)
+        return pool.snapshot
     }
 
     private static func deduplicatedWithinSite(
@@ -1200,6 +1243,9 @@ public struct MultiSiteSearch {
                 await firstOutcome.resolve(.page(result, keyword: keyword))
             } catch is CancellationError {
                 await firstOutcome.resolve(.cancelled)
+            } catch let error as CategoryPageResponseError {
+                await firstOutcome.resolve(.failure(PageSearchFailure(message: error.localizedDescription,
+                    category: .provider, isRetryable: false, isPaginationUncertain: true)))
             } catch let error as SiteSearchError {
                 await firstOutcome.resolve(
                     .failure(

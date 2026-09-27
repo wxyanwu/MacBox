@@ -789,6 +789,7 @@ final class SQLiteStoreTests: XCTestCase {
                 .text(rawLegacyReference)
             ]
         )
+        try legacy.execute("CREATE TABLE favorites (site_key TEXT NOT NULL, video_id TEXT NOT NULL, title TEXT NOT NULL, poster_url TEXT, synopsis TEXT, created_at REAL NOT NULL, PRIMARY KEY (site_key, video_id))")
         try legacy.execute("PRAGMA user_version = 5")
         legacy.close()
 
@@ -896,6 +897,7 @@ final class SQLiteStoreTests: XCTestCase {
             """,
             bindings: [.text(rawLegacyReference)]
         )
+        try legacy.execute("CREATE TABLE favorites (site_key TEXT NOT NULL, video_id TEXT NOT NULL, title TEXT NOT NULL, poster_url TEXT, synopsis TEXT, created_at REAL NOT NULL, PRIMARY KEY (site_key, video_id))")
         try legacy.execute("PRAGMA user_version = 6")
         legacy.close()
 
@@ -1016,6 +1018,7 @@ final class SQLiteStoreTests: XCTestCase {
                 .text(encodedReference)
             ]
         )
+        try legacy.execute("CREATE TABLE favorites (site_key TEXT NOT NULL, video_id TEXT NOT NULL, title TEXT NOT NULL, poster_url TEXT, synopsis TEXT, created_at REAL NOT NULL, PRIMARY KEY (site_key, video_id))")
         try legacy.execute("PRAGMA user_version = 8")
         legacy.close()
 
@@ -1263,7 +1266,8 @@ final class SQLiteStoreTests: XCTestCase {
                     .text(persistedReference)
                 ]
             )
-            try connection.execute("PRAGMA user_version = 7")
+            try connection.execute("CREATE TABLE favorites (site_key TEXT NOT NULL, video_id TEXT NOT NULL, title TEXT NOT NULL, poster_url TEXT, synopsis TEXT, created_at REAL NOT NULL, PRIMARY KEY (site_key, video_id))")
+        try connection.execute("PRAGMA user_version = 7")
         }
 
         let store = try SQLiteStore(databaseURL: databaseURL)
@@ -1274,7 +1278,7 @@ final class SQLiteStoreTests: XCTestCase {
         XCTAssertEqual(record.episodeName, "第8集")
         XCTAssertEqual(record.position, 88)
         XCTAssertEqual(record.playbackReference?.sourceIdentity, "line-2")
-        XCTAssertEqual(SQLiteStore.currentSchemaVersion, 10)
+        XCTAssertEqual(SQLiteStore.currentSchemaVersion, 13)
 
         let verification = try SQLiteConnection(url: databaseURL)
         var storedPlaybackReference: String?

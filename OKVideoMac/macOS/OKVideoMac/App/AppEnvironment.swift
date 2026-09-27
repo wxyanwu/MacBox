@@ -65,7 +65,8 @@ struct AppEnvironment {
             databaseResult = try SQLiteStore.openRecovering(databaseURL: databaseURL)
         }
         let player = PlayerLifecycleController(
-            mode: PlayerTeardownMode.configured()
+            mode: PlayerTeardownMode.configured(),
+            audioPreferences: PlaybackAudioPreferenceStore(defaults: .standard)
         )
         let androidRuntimeManager = try AndroidManagedRuntimeManager.live(
             applicationSupportDirectory: directories.applicationSupport

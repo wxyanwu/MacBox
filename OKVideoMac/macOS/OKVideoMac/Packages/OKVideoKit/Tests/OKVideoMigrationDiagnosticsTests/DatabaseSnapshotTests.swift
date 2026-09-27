@@ -36,7 +36,10 @@ final class DatabaseSnapshotTests: XCTestCase {
         let f = try fixture(); let s = try snapshot(f)
         XCTAssertEqual(s.schemaVersion, 9)
         _ = try await ImportedMigrationDryRun.run(snapshot: s)
-        XCTAssertEqual(try QuiescentDatabaseSnapshot.inspectTemporary(database: s.database).schema, 10)
+        XCTAssertEqual(
+            try QuiescentDatabaseSnapshot.inspectTemporary(database: s.database).schema,
+            SQLiteStore.currentSchemaVersion
+        )
         XCTAssertEqual(s.sourceFiles, try QuiescentDatabaseSnapshot.audit(database: f.db))
     }
     func testWALCommittedSettingsEnterConsistentSnapshot() throws {

@@ -2,6 +2,29 @@ import XCTest
 @testable import OKVideoCore
 
 final class LogRedactorTests: XCTestCase {
+    func testQuarkCapabilityURLsAndStandaloneCredentialsAreRedacted() throws {
+        let samples = [
+            "https://dl-pc-sz.drive.quark.cn/opaque-path-secret/video?auth_key=signed-secret&ork=ork-secret&unknown=capability-secret",
+            "http://127.0.0.1:9000/proxy/quark/encoded-share-secret/file-secret/down?opaque=capability-secret",
+            "request /proxy/quark/encoded-share-secret/file-secret/down?opaque=capability-secret failed",
+            "__puus=rotating-secret; __pus=login-secret; __uid=identity-secret auth_key=signed-secret ork=ork-secret"
+        ]
+        for sample in samples {
+            let result = LogRedactor.text(sample)
+            XCTAssertFalse(result.contains("-secret"), result)
+            XCTAssertTrue(result.contains("redacted"))
+        }
+        let object = LogRedactor.json(["auth_key": "signed-secret", "__puus": "rotating-secret", "ork": "ork-secret"]) as? [String: String]
+        XCTAssertEqual(object?.values.filter { $0 == "<redacted>" }.count, 3)
+    }
+
+    func testQuarkRedactionPreservesUnrelatedMediaPaths() throws {
+        let original = "https://media.example.invalid/posters/movie.jpg?page=2"
+        XCTAssertEqual(LogRedactor.url(try XCTUnwrap(URL(string: original))), original)
+        let redacted = LogRedactor.url(try XCTUnwrap(URL(string: "http://localhost:8080/proxy/quark/opaque-secret")))
+        XCTAssertFalse(redacted.contains("opaque-secret"))
+        XCTAssertTrue(redacted.contains("/proxy/quark/"))
+    }
     func testURLRedactsUserInfoWithoutQueryItems() throws {
         let url = try XCTUnwrap(
             URL(string: "https://account:password@example.invalid/index.js.md5")

@@ -694,8 +694,8 @@ enum NodeBundleRuntimeError: Error, Equatable, LocalizedError {
 }
 
 struct NodeBundleDeterministicPatch: Equatable, Sendable {
-    static let quarkLifecycleV2 = NodeBundleDeterministicPatch(
-        identifier: "catpaw-quark-lifecycle-v2",
+    static let quarkLifecycleV3 = NodeBundleDeterministicPatch(
+        identifier: "catpaw-quark-lifecycle-v3",
         requestedChecksumURL: URL(
             string: "https://raw.githubusercontent.com/Darklessing/catvod/refs/heads/main/douer/index.js.md5"
         )!,
@@ -706,11 +706,11 @@ struct NodeBundleDeterministicPatch: Equatable, Sendable {
             string: "https://raw.githubusercontent.com/Darklessing/catvod/c47d135469d4a32a4178531ce1b8f4e2e936f0b8/douer/index.js"
         )!,
         inputSHA256: "0ad3ed101dc961e6d73b758a5089ac1e10a12d27666468436e1fff2e39df01cc",
-        outputSHA256: "21de5bd519f056199688fa4be265b6ac42a549a1cd8d256a248e18cafd856371",
+        outputSHA256: "73e5436f3e733e15bd2a6d3e39990277cd190a0da4d0e486cb34a04c57dc8f5d",
         patchResourceName: "catpaw-quark-lifecycle.patch",
-        patchResourceSHA256: "8ff76dde6c944de760fc5a0df52fe1bf9c5ebbc7eb00062115cbbef0a76dac91",
+        patchResourceSHA256: "e2a150e803fd8ca837e53d235210af1563755bf33312bf0f105709c8a59f7e6c",
         moduleResourceName: "catpaw-quark-transfer-lifecycle",
-        moduleResourceSHA256: "e0cb843d5c84fec74f17594e937287b2cd8bbcda746d981013d55cb5978dabf4",
+        moduleResourceSHA256: "92673dc877eadb0881bb5e4c2f4988ce7a2493bcc088f59c05ce813221c05e70",
         legacyCacheKeys: [
             // Cache identity of the formerly unpinned refs/heads/main URL.
             // Migration still requires the exact fixed input SHA before the
@@ -733,8 +733,8 @@ struct NodeBundleDeterministicPatch: Equatable, Sendable {
 
     static func matching(_ checksumURL: URL) -> Self? {
         let normalized = checksumURL.absoluteString
-        return normalized == quarkLifecycleV2.requestedChecksumURL.absoluteString
-            ? quarkLifecycleV2
+        return normalized == quarkLifecycleV3.requestedChecksumURL.absoluteString
+            ? quarkLifecycleV3
             : nil
     }
 }

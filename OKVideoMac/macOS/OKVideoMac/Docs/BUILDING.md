@@ -1,6 +1,35 @@
 # Building OKVideoMac
 
-## 0.6.1 release verification
+## 0.7.3 release candidate verification
+
+The current source candidate is 0.7.3 (Build 129). Its final automated test,
+static-check and local Release packaging results are recorded in the
+[0.7.3 release-readiness record](../../../../Docs/RELEASE_READINESS_0.7.3.md).
+The committed Xcode project must match `project.yml` when regenerated with
+XcodeGen 2.38.0 exactly; a newer generator is not an accepted substitute.
+
+The release-candidate gate passed 47 Node tests, 24 SourceAudit tests (7
+conditional skips), 57 AndroidRuntimeKit tests (1 online-install skip), 1029
+OKVideoKit tests (22 performance/network experiment skips), and 1154 repeatable
+App tests (11 conditional skips), with no failures. Three focused App regressions
+and the audio preference writer/reader in separate processes also passed. The
+Android bridge passed 34 JVM tests, lint and `assembleRelease`; the signed APK
+build completed. Four real-Emulator lifecycle tests remain explicit opt-in gates;
+the real application-termination cleanup test was also run separately and passed.
+
+AGP 8.7.3 lint reports non-fatal Kotlin metadata diagnostics because the pinned
+OkHttp 5.1.0 dependency uses Kotlin 2.2 metadata while that analyzer supports
+Kotlin 2.0 metadata. Lint still completed with zero errors and six warnings. Do
+not suppress these diagnostics or describe this host-tooling limitation as a
+successful real-device compatibility matrix.
+
+Local ad-hoc Release packaging verifies the app bundle before installation, but
+formal publication still requires an exact clean release commit followed by
+Developer ID signing, notarization, stapling, Gatekeeper, installation smoke and
+the complete source/SBOM/hash asset set. Debug builds and earlier local candidates
+are never release deliverables.
+
+## 0.6.1 historical release verification
 
 The complete default suite executes 721 App tests (713 passed, 8 conditional
 external/Android/renderer gates skipped), 261 OKVideoKit tests (all passed),

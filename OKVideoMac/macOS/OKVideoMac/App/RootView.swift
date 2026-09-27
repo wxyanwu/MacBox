@@ -90,6 +90,110 @@ private struct BrowserWindowVibrancyBackground: NSViewRepresentable {
     }
 }
 
+/// Back the native divider at its actual AppKit coordinates. A canvas behind
+/// NavigationSplitView does not cover every independently composited edge of
+/// the sidebar's behind-window material during window overview scaling.
+struct BrowserSplitDividerBacking: NSViewRepresentable {
+    func makeNSView(context: Context) -> Probe { Probe() }
+    func updateNSView(_ view: Probe, context: Context) { view.attach() }
+    static func dismantleNSView(_ view: Probe, coordinator: ()) { view.detach() }
+
+    final class Probe: NSView {
+        private weak var split: NSSplitView?
+        let backing = CALayer()
+        private let separator = CALayer()
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            backing.name = "OKVideoMac.opaqueSidebarDivider"
+            backing.zPosition = 1 // Stay above AppKit-owned divider/material layers.
+            backing.isOpaque = true
+            separator.isOpaque = true
+            backing.addSublayer(separator)
+            NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(refresh),
+                name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        }
+        required init?(coder: NSCoder) { nil }
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+            NSWorkspace.shared.notificationCenter.removeObserver(self)
+            backing.removeFromSuperlayer()
+        }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func viewDidMoveToSuperview() { super.viewDidMoveToSuperview(); attach() }
+        override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); attach() }
+        override func layout() { super.layout(); attach() }
+        override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); refresh() }
+
+        func attach() {
+            guard window != nil else { detach(); return }
+            var ancestor = superview
+            while let view = ancestor {
+                if let candidate = view as? NSSplitView, candidate.isVertical {
+                    if split !== candidate {
+                        detach()
+                        split = candidate
+                        candidate.wantsLayer = true
+                        candidate.layer?.addSublayer(backing)
+                        let center = NotificationCenter.default
+                        center.addObserver(self, selector: #selector(refresh),
+                            name: NSSplitView.didResizeSubviewsNotification, object: candidate)
+                        center.addObserver(self, selector: #selector(refresh),
+                            name: NSWindow.didChangeBackingPropertiesNotification, object: window)
+                    }
+                    refresh()
+                    return
+                }
+                ancestor = view.superview
+            }
+            detach()
+        }
+        func detach() {
+            NotificationCenter.default.removeObserver(self)
+            backing.removeFromSuperlayer()
+            split = nil
+        }
+        @objc func refresh() {
+            guard let split else { return }
+            let panes = split.arrangedSubviews
+            guard panes.count == 2, !panes[0].isHidden, !panes[1].isHidden,
+                  !split.isSubviewCollapsed(panes[0]), !split.isSubviewCollapsed(panes[1]) else {
+                backing.isHidden = true
+                return
+            }
+            let scale = max(1, window?.backingScaleFactor ?? 1)
+            let pixel = 1 / scale
+            let left = panes[0].frame.maxX
+            let right = panes[1].frame.minX
+            guard right >= left, left > split.bounds.minX, right < split.bounds.maxX else {
+                backing.isHidden = true
+                return
+            }
+            // One physical pixel of overlap on each side closes fractional
+            // sampling edges without adding a layout gap or a hit-test view.
+            let start = floor(left * scale) / scale - pixel
+            let end = ceil(right * scale) / scale + pixel
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            backing.isHidden = false
+            backing.contentsScale = scale
+            backing.frame = NSRect(x: start, y: split.bounds.minY,
+                                   width: end - start, height: split.bounds.height)
+            separator.contentsScale = scale
+            separator.frame = NSRect(x: floor((left + right) * 0.5 * scale) / scale - start,
+                                     y: 0, width: pixel, height: split.bounds.height)
+            effectiveAppearance.performAsCurrentDrawingAppearance {
+                let background = NSColor.textBackgroundColor
+                let contrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+                let line = background.blended(withFraction: contrast ? 0.35 : 0.12, of: .labelColor) ?? background
+                backing.backgroundColor = background.withAlphaComponent(1).cgColor
+                separator.backgroundColor = line.withAlphaComponent(1).cgColor
+            }
+            CATransaction.commit()
+        }
+    }
+}
+
 /// A shared, low-presence hover treatment for the browsing interface. It does
 /// not replace selected, destructive, or disabled states; it only adds the
 /// small amount of motion and contrast needed to make an interactive surface
@@ -360,7 +464,8 @@ struct RootView: View {
 
     var body: some View {
         ZStack {
-            BrowserWindowVibrancyBackground()
+            // Base canvas; the native divider has its own opaque edge backing.
+            AppSurfacePalette.background
                 .ignoresSafeArea()
 
             browsingContent
@@ -1374,6 +1479,7 @@ private final class WindowCloseObserverView: NSView {
     var onClose: (() -> Void)?
     var onKeyChange: ((Bool) -> Void)?
     private var observers: [NSObjectProtocol] = []
+    private let configurationKey = UUID()
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -1382,10 +1488,12 @@ private final class WindowCloseObserverView: NSView {
         // Resizing while SwiftUI is mounting this representable can re-enter
         // AppKit layout. Configure on the next run-loop turn, after the
         // browser hierarchy has completed its current layout transaction.
-        DispatchQueue.main.async { [weak self, weak window] in
-            guard let self, let window, self.window === window else { return }
-            AppWindowLayoutPolicy.configure(window, target: .mainWindow)
-            BrowserWindowChromeController.configure(window)
+        WindowTransitionCoordinator.state(for: window).whenStable(
+            key: configurationKey, windowedOnly: true
+        ) { [weak self] stableWindow in
+            guard let self, let stableWindow, self.window === stableWindow else { return }
+            AppWindowLayoutPolicy.configure(stableWindow, target: .mainWindow)
+            BrowserWindowChromeController.configure(stableWindow)
         }
         onKeyChange?(window.isKeyWindow)
         observers = [
@@ -2107,13 +2215,15 @@ private struct SidebarView: View {
             presentation: searchPresentation,
             isSearchEnabled: searchIsEnabled,
             focusRequest: state.globalSearchFocusRequest,
-            selectedSection: navigation.selectedSection,
+            selection: navigation.selection,
+            navigation: navigation,
             onTextChange: handleSearchTextChange,
             onSubmit: submitSearch,
             onExitSearch: exitSearchField,
             onSelect: state.selectSection
         )
         .modifier(SidebarColumnWidthModifier())
+        .background { BrowserSplitDividerBacking() }
     }
 
     private var searchPresentation: SidebarSearchPresentation {
@@ -2175,7 +2285,8 @@ struct NativeSidebarSourceList: NSViewRepresentable {
     let presentation: SidebarSearchPresentation
     let isSearchEnabled: Bool
     let focusRequest: UInt64
-    let selectedSection: AppSection
+    let selection: NavigationSelection
+    let navigation: AppNavigationState
     let onTextChange: (String) -> Void
     let onSubmit: () -> Void
     let onExitSearch: () -> Bool
@@ -2208,7 +2319,7 @@ struct NativeSidebarSourceList: NSViewRepresentable {
     final class ContainerView: NSVisualEffectView {
         let searchField = NSSearchField()
         let scrollView = NSScrollView()
-        let outlineView = NSOutlineView()
+        let outlineView = BrowserSidebarOutlineView()
 
         init(coordinator: Coordinator) {
             super.init(frame: .zero)
@@ -2307,6 +2418,12 @@ struct NativeSidebarSourceList: NSViewRepresentable {
     }
 
     final class SourceListRowView: NSTableRowView {
+        var activate: (() -> Void)?
+        override func accessibilityPerformPress() -> Bool {
+            guard let activate else { return false }
+            activate()
+            return true
+        }
         // App Store keeps the navigation selection neutral while the glyph
         // continues to use its adaptive blue semantic color. This asks AppKit
         // for its native neutral source-list selection instead of painting
@@ -2325,6 +2442,7 @@ struct NativeSidebarSourceList: NSViewRepresentable {
         var parent: NativeSidebarSourceList
         var lastFocusRequest: UInt64 = 0
         private var isSynchronizingSelection = false
+        private var latestUserSelection: NavigationSelection?
         private let items = AppSection.allCases.map(ItemNode.init(section:))
 
         init(_ parent: NativeSidebarSourceList) {
@@ -2333,9 +2451,33 @@ struct NativeSidebarSourceList: NSViewRepresentable {
 
         func attach(to view: ContainerView) {
             view.outlineView.reloadData()
+            view.outlineView.currentNavigationSelection = { [weak self] in
+                self?.parent.navigation.selection ?? NavigationSelection(section: .home, revision: 0)
+            }
+            view.outlineView.onActivateRow = { [weak self, weak view] row in
+                guard let self, let view else { return }
+                self.activate(row: row, in: view.outlineView)
+            }
+        }
+
+        private func activate(row: Int, in outlineView: NSOutlineView) {
+            guard let item = outlineView.item(atRow: row) as? ItemNode else { return }
+            parent.onSelect(item.section)
+            let selection = parent.navigation.selection
+            latestUserSelection = selection
+            BrowserInteractionTrace.record("navigation.action", revision: selection.revision)
+            synchronizeSelection(outlineView)
+            let navigation = parent.navigation
+            (outlineView as? BrowserSidebarOutlineView)?.requestContentFocus(for: selection) {
+                navigation.selection == selection
+            }
         }
 
         func synchronize(_ view: ContainerView) {
+            // A Representable value may predate a newer AppKit click. Never
+            // replay that value into either the selection or search control.
+            guard parent.selection == parent.navigation.selection,
+                  parent.selection.revision >= (latestUserSelection?.revision ?? 0) else { return }
             let field = view.searchField
             field.placeholderString = parent.presentation.placeholder
             field.setAccessibilityLabel(parent.presentation.accessibilityLabel)
@@ -2345,13 +2487,24 @@ struct NativeSidebarSourceList: NSViewRepresentable {
                 field.stringValue = parent.text
             }
             synchronizeSelection(view.outlineView)
+            if let selected = latestUserSelection, selected == parent.selection {
+                let navigation = parent.navigation
+                view.outlineView.requestContentFocus(for: selected) {
+                    navigation.selection == selected
+                }
+                latestUserSelection = nil
+            }
 
             guard parent.focusRequest > 0,
                   lastFocusRequest != parent.focusRequest else { return }
             lastFocusRequest = parent.focusRequest
-            DispatchQueue.main.async { [weak field] in
-                guard let field,
-                      let window = field.window,
+            let request = parent.focusRequest
+            let selection = parent.selection
+            let navigation = parent.navigation
+            DispatchQueue.main.async { [weak self, weak field] in
+                guard let self, self.parent.focusRequest == request,
+                      navigation.selection == selection,
+                      let field, let window = field.window,
                       field.isEnabled else { return }
                 window.makeFirstResponder(field)
                 field.selectText(nil)
@@ -2360,7 +2513,7 @@ struct NativeSidebarSourceList: NSViewRepresentable {
 
         private func synchronizeSelection(_ outlineView: NSOutlineView) {
             guard let row = row(
-                for: parent.selectedSection,
+                for: parent.navigation.selection.section,
                 in: outlineView
             ), outlineView.selectedRow != row else { return }
             isSynchronizingSelection = true
@@ -2439,17 +2592,22 @@ struct NativeSidebarSourceList: NSViewRepresentable {
             _ outlineView: NSOutlineView,
             rowViewForItem item: Any
         ) -> NSTableRowView? {
-            item is ItemNode ? SourceListRowView() : nil
+            guard let item = item as? ItemNode else { return nil }
+            let view = SourceListRowView()
+            view.activate = { [weak self, weak outlineView] in
+                guard let self, let outlineView else { return }
+                self.activate(row: outlineView.row(forItem: item), in: outlineView)
+            }
+            return view
         }
 
         func outlineViewSelectionDidChange(_ notification: Notification) {
             guard !isSynchronizingSelection,
-                  let outlineView = notification.object as? NSOutlineView,
-                  outlineView.selectedRow >= 0,
-                  let item = outlineView.item(
-                    atRow: outlineView.selectedRow
-                  ) as? ItemNode else { return }
-            parent.onSelect(item.section)
+                  let outlineView = notification.object as? NSOutlineView else { return }
+            // A delayed native callback is not a new user command. Restore the
+            // authoritative row without manufacturing a newer navigation revision.
+            BrowserInteractionTrace.record("navigation.nativeSelection", revision: parent.navigation.selection.revision)
+            synchronizeSelection(outlineView)
         }
 
         func controlTextDidChange(_ notification: Notification) {
@@ -2682,6 +2840,7 @@ private struct SectionContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppSurfacePalette.background)
+        .environment(\.browserNavigationSelection, navigation.selection)
         .transaction { transaction in
             // AppKit hosts SwiftUI toolbar items in constraint-based views.
             // A structural detail-route animation can invalidate those
@@ -2697,16 +2856,16 @@ private struct SectionContentView: View {
             case .home, .live:
                 HomeLiveSectionContainer(liveSession: liveSession)
             case .favorites:
-                StandardBrowserSectionContainer {
+                StandardBrowserSectionContainer(nativeChrome: true) {
                     FavoritesView()
                 }
             case .history:
-                StandardBrowserSectionContainer {
+                StandardBrowserSectionContainer(nativeChrome: true) {
                     HistoryView()
                 }
             case .settings:
                 StandardBrowserSectionContainer {
-                    SettingsView()
+                    SettingsView(navigation: state.settingsNavigation)
                 }
             }
         }
@@ -2719,8 +2878,10 @@ private struct StandardBrowserSectionContainer<Content: View>: View {
     @EnvironmentObject private var state: AppState
     @State private var isContentScrolled = false
     private let content: Content
+    private let nativeChrome: Bool
 
-    init(@ViewBuilder content: () -> Content) {
+    init(nativeChrome: Bool = false, @ViewBuilder content: () -> Content) {
+        self.nativeChrome = nativeChrome
         self.content = content()
     }
 
@@ -2741,7 +2902,8 @@ private struct StandardBrowserSectionContainer<Content: View>: View {
                 .modifier(
                     BrowserToolbarChromeModifier(
                         isScrolled: isContentScrolled,
-                        isWindowActive: state.isBrowserWindowKey
+                        isWindowActive: state.isBrowserWindowKey,
+                        usesSystemChrome: nativeChrome
                     )
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2758,9 +2920,15 @@ private struct BrowserDetailRouteContainer: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if state.selectedDetail != nil, state.detailLoadState.message != nil {
+                DetailRequestStatusView()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(20)
+            }
             if let detail = state.selectedDetail {
                 DetailView(detail: detail)
-            } else if let summary = state.pendingDetailSummary {
+                    .id(detail.summary.id)
+            } else if let summary = state.detailRouteSummary ?? state.pendingDetailSummary {
                 DetailLoadingView(summary: summary)
             }
         }
@@ -2783,11 +2951,16 @@ private struct BrowserDetailRouteContainer: View {
                     height: PrimaryToolbarMetrics.iconControlSize
                 )
             }
-            ToolbarItem(id: "detail.favorite", placement: .primaryAction) {
-                if let detail = state.selectedDetail {
-                    DetailFavoriteButton(detail: detail)
-                }
+            ToolbarItem(id: "detail.space", placement: .principal) {
+                Spacer(minLength: 0).frame(maxWidth: .infinity)
             }
+            ToolbarItem(id: "detail.refresh", placement: .primaryAction) {
+                DetailRefreshButton(isLoading: state.isRefreshingDetail) {
+                    Task { await state.refreshDetail() }
+                }
+                .frame(width: PrimaryToolbarMetrics.iconControlSize, height: PrimaryToolbarMetrics.iconControlSize)
+            }
+
         }
         .environment(\.browserToolbarScrollReporter) { isScrolled in
             if isContentScrolled != isScrolled {
@@ -2865,6 +3038,10 @@ private struct HomeLiveSectionContainer: View {
             }
             .onChange(of: state.isHomeSearchPresented) { _ in
                 isBrowserContentScrolled = false
+            }
+            .onChange(of: state.shortcutLiveSourceSelection) { request in
+                guard let request else { return }
+                liveSession.selectedSourceID = request.sourceID
             }
             .transaction { transaction in
                 transaction.disablesAnimations = true

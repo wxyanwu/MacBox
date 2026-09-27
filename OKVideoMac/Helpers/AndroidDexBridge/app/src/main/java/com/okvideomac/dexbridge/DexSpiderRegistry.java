@@ -11,11 +11,8 @@ import org.json.JSONObject;
 import org.json.JSONTokener;
 
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.lang.reflect.Method;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -40,7 +37,9 @@ final class DexSpiderRegistry {
 
     private final Context context;
     private final OkHttpClient httpClient;
+    private final VerifiedDexJarCache jarCache;
     private final ConfigurationHostPolicy hostPolicy;
+    private final ProviderLifecycle lifecycle = new ProviderLifecycle();
     private final Map<String, DexClassLoader> loaders = new ConcurrentHashMap<>();
     private final Map<String, Spider> spiders = new ConcurrentHashMap<>();
     private final Map<String, Method> proxyMethods = new ConcurrentHashMap<>();
@@ -58,6 +57,9 @@ final class DexSpiderRegistry {
                 .followRedirects(true)
                 .followSslRedirects(true)
                 .build();
+        this.jarCache = new VerifiedDexJarCache(
+                new File(context.getCacheDir(), "jars")
+        );
         this.hostPolicy = new ConfigurationHostPolicy(
                 hosts -> OkHttp.dns().replaceAll(hosts)
         );
@@ -76,14 +78,15 @@ final class DexSpiderRegistry {
         String method = requireString(payload, "method");
         JSONArray arguments = payload.optJSONArray("arguments");
         if (arguments == null) arguments = new JSONArray();
-        if ("destroy".equals(method)) {
-            String siteKey = requireString(payload, "siteKey");
-            destroySpider(payload, siteKey);
-            return JSONObject.NULL;
-        }
-        try (ConfigurationHostPolicy.Lease ignored =
-                     hostPolicy.acquire(payload)) {
-            return invokeWithHostPolicy(payload, method, arguments);
+        try (ProviderLifecycle.Lease lease = lifecycle.acquire(jarKey(payload), "destroy".equals(method))) {
+            if ("destroy".equals(method)) {
+                String siteKey = requireString(payload, "siteKey");
+                destroySpider(payload, siteKey);
+                return JSONObject.NULL;
+            }
+            try (ConfigurationHostPolicy.Lease ignored = hostPolicy.acquire(payload)) {
+                return invokeWithHostPolicy(payload, method, arguments);
+            }
         }
     }
 
@@ -143,6 +146,7 @@ final class DexSpiderRegistry {
                 raw = spider.liveContent(arguments.getString(0));
                 break;
             case "action":
+                ProviderMediaEpoch.advance(providerOwner.jarKey);
                 raw = spider.action(arguments.getString(0));
                 break;
             default:
@@ -155,6 +159,7 @@ final class DexSpiderRegistry {
         String key = spiderKey(payload, siteKey);
         Object lock = spiderLocks.computeIfAbsent(key, ignored -> new Object());
         synchronized (lock) {
+            ProviderMediaEpoch.advance(jarKey(payload));
             Spider removed = spiders.remove(key);
             if (removed != null) removed.destroy();
             completedPlaybacks.keySet().removeIf(
@@ -201,64 +206,50 @@ final class DexSpiderRegistry {
             JSONArray arguments,
             BridgeProviderOwnerRegistry.Binding providerOwner
     ) throws Exception {
-        String siteKey = requireString(payload, "siteKey");
-        String playbackKey = spiderKey(payload, siteKey)
-                + "\u0000" + arguments.optString(0, "")
-                + "\u0000" + arguments.optString(1, "");
-        boolean refreshRequested = requestsPlaybackRefresh(payload);
-        JSONObject siteHeaders = payload.optJSONObject("siteHeaders");
-        if (refreshRequested) completedPlaybacks.remove(playbackKey);
-        String cached = refreshRequested
-                ? null
-                : takeCompletedPlayback(playbackKey);
-        if (cached != null) {
-            return decodePlaybackResult(
-                    cached,
-                    false,
-                    siteHeaders,
-                    providerOwner
-            );
-        }
-
-        PlaybackLock lock = retainPlaybackLock(playbackKey);
+        PLAYER_CONTENT_PROXY_LOCK.lockInterruptibly();
         try {
-            synchronized (lock) {
-                // The original Mac request remains inside playerContent while
-                // an Android login dialog is visible. A non-refresh retry may
-                // consume that completed handoff. A true same-resource refresh
-                // always bypasses it so an expiring signature is regenerated.
-                // Repeat the invalidation while holding the per-resource lock:
-                // a normal invocation that was already in flight may have
-                // populated the handoff cache after the optimistic removal
-                // above.
-                if (refreshRequested) completedPlaybacks.remove(playbackKey);
-                cached = refreshRequested
-                        ? null
-                        : takeCompletedPlayback(playbackKey);
-                if (cached != null) {
-                    return decodePlaybackResult(
-                            cached,
-                            false,
-                            siteHeaders,
-                            providerOwner
-                    );
-                }
-                PLAYER_CONTENT_PROXY_LOCK.lockInterruptibly();
-                try {
+            String siteKey = requireString(payload, "siteKey");
+            String playbackKey = spiderKey(payload, siteKey)
+                    + "\u0000" + arguments.optString(0, "")
+                    + "\u0000" + arguments.optString(1, "");
+            boolean refreshRequested = requestsPlaybackRefresh(payload);
+            JSONObject siteHeaders = payload.optJSONObject("siteHeaders");
+            if (refreshRequested) completedPlaybacks.remove(playbackKey);
+            CachedPlayback cached = refreshRequested
+                    ? null
+                    : takeCompletedPlayback(playbackKey);
+            if (cached != null) {
+                return decodeCurrentPlayback(cached.raw, false, siteHeaders, providerOwner, cached.epoch);
+            }
+
+            PlaybackLock lock = retainPlaybackLock(playbackKey);
+            try {
+                synchronized (lock) {
+                    // The original Mac request remains inside playerContent while
+                    // an Android login dialog is visible. A non-refresh retry may
+                    // consume that completed handoff. A true same-resource refresh
+                    // always bypasses it so an expiring signature is regenerated.
+                    // Repeat the invalidation while holding the per-resource lock:
+                    // a normal invocation that was already in flight may have
+                    // populated the handoff cache after the optimistic removal
+                    // above.
+                    if (refreshRequested) completedPlaybacks.remove(playbackKey);
+                    cached = refreshRequested
+                            ? null
+                            : takeCompletedPlayback(playbackKey);
+                    if (cached != null) {
+                        return decodeCurrentPlayback(cached.raw, false, siteHeaders, providerOwner, cached.epoch);
+                    }
                     return invokePlayerWithCompatibilityProxy(
-                            spider,
-                            arguments,
-                            providerOwner,
-                            playbackKey,
-                            refreshRequested,
-                            siteHeaders
+                            spider, arguments, providerOwner, playbackKey,
+                            refreshRequested, siteHeaders
                     );
-                } finally {
-                    PLAYER_CONTENT_PROXY_LOCK.unlock();
                 }
+            } finally {
+                releasePlaybackLock(playbackKey, lock);
             }
         } finally {
-            releasePlaybackLock(playbackKey, lock);
+            PLAYER_CONTENT_PROXY_LOCK.unlock();
         }
     }
 
@@ -270,10 +261,12 @@ final class DexSpiderRegistry {
             boolean refreshRequested,
             JSONObject siteHeaders
     ) throws Exception {
+        long resolutionEpoch = ProviderMediaEpoch.advance(providerOwner.jarKey);
         Throwable firstError = null;
         for (int attempt = 0; attempt < 2; attempt++) {
             FongMiCompatProxyServer.Lease lease = null;
             try {
+                ProviderMediaEpoch.requireCurrent(providerOwner.jarKey, resolutionEpoch);
                 if (attempt > 0) {
                     FongMiCompatProxyServer.restart(context);
                     // Any cached raw localhost URL was issued against the old
@@ -289,6 +282,7 @@ final class DexSpiderRegistry {
                         arguments.getString(1),
                         stringList(arguments, 2)
                 );
+                ProviderMediaEpoch.requireCurrent(providerOwner.jarKey, resolutionEpoch);
                 FongMiCompatProxyServer.Failure proxyFailure = lease.failure();
                 if (proxyFailure != FongMiCompatProxyServer.Failure.NONE
                         && !isPlayableResponse(raw)) {
@@ -301,18 +295,13 @@ final class DexSpiderRegistry {
                 if (!refreshRequested && isPlayableResponse(raw)) {
                     completedPlaybacks.put(
                             playbackKey,
-                            new CachedPlayback(raw == null ? "" : raw)
+                            new CachedPlayback(raw == null ? "" : raw, providerOwner.jarKey, resolutionEpoch)
                     );
                 }
                 // Secure a returned compatibility URL while its exact owner
                 // lease is still active. The resulting 9978 media capability
                 // permanently retains that owner after this lease closes.
-                return decodePlaybackResult(
-                        raw,
-                        refreshRequested,
-                        siteHeaders,
-                        providerOwner
-                );
+                return decodeCurrentPlayback(raw, refreshRequested, siteHeaders, providerOwner, resolutionEpoch);
             } catch (Throwable error) {
                 FongMiCompatProxyServer.Failure proxyFailure = lease == null
                         ? FongMiCompatProxyServer.Failure.NOT_READY
@@ -336,6 +325,16 @@ final class DexSpiderRegistry {
                 "TVBox local proxy recovery failed",
                 firstError
         );
+    }
+
+    private Object decodeCurrentPlayback(String raw, boolean refreshRequested,
+            JSONObject siteHeaders, BridgeProviderOwnerRegistry.Binding owner, long expectedEpoch) throws Exception {
+        ProviderMediaEpoch.requireCurrent(owner.jarKey, expectedEpoch);
+        Object decoded = decodePlaybackResult(raw, refreshRequested, siteHeaders, owner);
+        // An authorization/config action may run while the provider is awaiting
+        // user input. Never stamp its old result with that action's new epoch.
+        ProviderMediaEpoch.requireCurrent(owner.jarKey, expectedEpoch);
+        return decoded;
     }
 
     private static IllegalStateException playbackProxyFailure(
@@ -468,14 +467,14 @@ final class DexSpiderRegistry {
         return "";
     }
 
-    private String takeCompletedPlayback(String key) {
+    private CachedPlayback takeCompletedPlayback(String key) {
         CachedPlayback cached = completedPlaybacks.remove(key);
-        if (cached == null) return null;
+        if (cached == null || ProviderMediaEpoch.current(cached.scope) != cached.epoch) return null;
         if (System.currentTimeMillis() - cached.createdAt
                 > PLAYBACK_HANDOFF_CACHE_MS) {
             return null;
         }
-        return cached.raw;
+        return cached;
     }
 
     private static Object decodeRawResult(String raw) {
@@ -491,7 +490,12 @@ final class DexSpiderRegistry {
         final String raw;
         final long createdAt;
 
-        CachedPlayback(String raw) {
+        final String scope;
+        final long epoch;
+
+        CachedPlayback(String raw, String scope, long epoch) {
+            this.scope = scope;
+            this.epoch = epoch;
             this.raw = raw;
             this.createdAt = System.currentTimeMillis();
         }
@@ -510,7 +514,12 @@ final class DexSpiderRegistry {
         // A proxy call is part of the provider capability that created it.
         // Never guess from the most recently used jar or probe every loaded
         // jar: both approaches can leak credentials/media across sites.
-        return invokeProxy(proxyMethods.get(owner.jarKey), params);
+        try (ProviderLifecycle.Lease lease = lifecycle.acquire(owner.jarKey, false)) {
+            return invokeProxy(proxyMethods.get(owner.jarKey), params);
+        } catch (InterruptedException cancelled) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
     }
 
     private Spider spider(JSONObject payload) throws Exception {
@@ -614,42 +623,23 @@ final class DexSpiderRegistry {
         if (!jarURL.startsWith("https://") && !jarURL.startsWith("http://")) {
             throw new IllegalArgumentException("DEX package must use HTTP/HTTPS");
         }
-        String fileKey = sha256(jarURL.getBytes());
-        File output = new File(new File(context.getCacheDir(), "jars"), fileKey + ".jar");
-        if (output.isFile() && output.length() > 0) {
-            if (expectedMD5.isEmpty() || expectedMD5.equals(md5(output))) return output;
-            if (!output.delete()) throw new IllegalStateException("Unable to replace DEX cache");
-        }
-        File parent = output.getParentFile();
-        if (!parent.exists() && !parent.mkdirs()) {
-            throw new IllegalStateException("Unable to create DEX package cache");
-        }
-        Request request = new Request.Builder().url(jarURL).get().build();
-        try (Response response = httpClient.newCall(request).execute()) {
-            if (!response.isSuccessful() || response.body() == null) {
-                throw new IllegalStateException("DEX download HTTP " + response.code());
-            }
-            long maximum = 16L * 1024L * 1024L;
-            try (InputStream input = response.body().byteStream();
-                 FileOutputStream file = new FileOutputStream(output)) {
-                byte[] buffer = new byte[16_384];
-                long total = 0;
-                int count;
-                while ((count = input.read(buffer)) != -1) {
-                    total += count;
-                    if (total > maximum) {
-                        throw new IllegalStateException("DEX package exceeds 16 MiB");
+        return jarCache.load(jarURL, expectedMD5, (url, output) -> {
+            Request request = new Request.Builder().url(url).get().build();
+            try (Response response = httpClient.newCall(request).execute()) {
+                if (!response.isSuccessful() || response.body() == null) {
+                    throw new IllegalStateException(
+                            "DEX download HTTP " + response.code()
+                    );
+                }
+                try (InputStream input = response.body().byteStream()) {
+                    byte[] buffer = new byte[16_384];
+                    int count;
+                    while ((count = input.read(buffer)) != -1) {
+                        output.write(buffer, 0, count);
                     }
-                    file.write(buffer, 0, count);
                 }
             }
-        }
-        if (!expectedMD5.isEmpty() && !expectedMD5.equals(md5(output))) {
-            if (!output.delete()) output.deleteOnExit();
-            throw new SecurityException("DEX package MD5 mismatch");
-        }
-        output.setReadOnly();
-        return output;
+        });
     }
 
     private void invokePackageInit(DexClassLoader loader) {
@@ -712,23 +702,4 @@ final class DexSpiderRegistry {
         return values;
     }
 
-    private static String md5(File file) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("MD5");
-        try (InputStream input = new java.io.FileInputStream(file)) {
-            byte[] buffer = new byte[16_384];
-            int count;
-            while ((count = input.read(buffer)) != -1) digest.update(buffer, 0, count);
-        }
-        return hex(digest.digest());
-    }
-
-    private static String sha256(byte[] value) throws Exception {
-        return hex(MessageDigest.getInstance("SHA-256").digest(value));
-    }
-
-    private static String hex(byte[] value) {
-        StringBuilder output = new StringBuilder(value.length * 2);
-        for (byte item : value) output.append(String.format(Locale.ROOT, "%02x", item));
-        return output.toString();
-    }
 }

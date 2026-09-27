@@ -4,12 +4,15 @@ import OKVideoCore
 
 struct SearchView: View {
     @EnvironmentObject private var state: AppState
-    @StateObject private var presentationCache = SearchResultPresentationCache()
+    @State private var projection: [SearchResultCluster] = []
+    @State private var projectionKey: String?
+    @State private var projectionWorker = SearchPresentationWorker()
     @State private var sortOrder: SearchResultSortOrder = .relevance
     @AppStorage(SearchDisplayPreferences.mergesDuplicateTitlesKey)
     private var mergesDuplicateTitles = true
     @State private var sourceSelectionCluster: SearchResultCluster?
     @State private var showingSearchScope = false
+    @State private var acceptedOrderRevision: UInt64 = 0
     private let resultsScrollCoordinateSpace = "search-results-scroll"
 
     var body: some View {
@@ -18,6 +21,13 @@ struct SearchView: View {
                 contentWidth: proxy.size.width
             )
             searchContent
+                .task(id: presentationInput) {
+                    let input = presentationInput
+                    let result = await projectionWorker.clusters(input)
+                    guard !Task.isCancelled else { return }
+                    projectionKey = input.key
+                    projection = result
+                }
                 .navigationTitle("")
                 .background(AppSurfacePalette.background.ignoresSafeArea())
                 .toolbar {
@@ -41,30 +51,13 @@ struct SearchView: View {
                             searchMergeControl(layout: toolbarLayout)
                             searchSortControl(layout: toolbarLayout)
                         }
-                        SearchToolbarStatusView(
-                            layout: toolbarLayout,
-                            isSearching: state.isSearching,
-                            firstPageCompleted: state.searchFirstPageCompletedSiteCount,
-                            completed: state.searchCompletedSiteCount,
-                            total: state.searchTotalSiteCount,
-                            termination: state.searchTermination,
-                            resultCount: state.searchResults.count,
-                            outcomes: Array(state.searchSiteOutcomes.values),
-                            runtimeNotice: state.searchRuntimeProfileNotice,
-                            maximumRetainedCandidates:
-                                state.searchMaximumRetainedCandidates,
-                            maximumResultsPerSite:
-                                state.searchMaximumResultsPerSite,
-                            didDiscardCandidates:
-                                state.searchDidDiscardCandidates,
-                            onCancel: state.cancelSearch
-                        )
+                        refreshToolbarControl
                     }
                 }
                 .overlay {
                     if let cluster = sourceSelectionCluster {
                         SearchSourcePicker(
-                            cluster: cluster,
+                            cluster: presentedClusters.first(where: { $0.id == cluster.id }) ?? cluster,
                             onSelect: openSearchSource,
                             onDismiss: { sourceSelectionCluster = nil }
                         )
@@ -85,6 +78,20 @@ struct SearchView: View {
         }
     }
 
+    private var refreshToolbarControl: some View {
+        BrowserRefreshToolbarControl(
+            isLoading: state.searchPageIsLoading,
+            error: state.searchPageError,
+            status: state.currentSearchFolder == nil ? state.searchPaginationFooter.statusText : nil,
+            title: state.searchRefreshTitle,
+            cancel: state.currentSearchFolder == nil ? { state.cancelSearch() } : nil,
+            restart: { Task { await state.refreshSearchPage(force: true) } },
+            action: {
+                acceptLatestOrder()
+                Task { await state.refreshSearchPage() }
+            })
+    }
+
     @ViewBuilder
     private var searchContent: some View {
         if let folder = state.currentSearchFolder {
@@ -93,12 +100,6 @@ struct SearchView: View {
                 path: state.searchFolderPath
             )
             .environmentObject(state)
-        } else if state.searchResults.isEmpty {
-            EmptyStateView(
-                systemImage: "magnifyingglass",
-                title: emptyStateTitle,
-                message: emptyStateMessage
-            )
         } else {
             searchResults
         }
@@ -173,41 +174,73 @@ struct SearchView: View {
         .help(L10n.string("search.sort.help", fallback: "Sort: %@", sortOrder.title))
     }
 
-    private var searchResults: some View {
-        let clusters = presentedClusters
-        return ScrollView {
-            BrowserToolbarScrollMarker(
-                coordinateSpaceName: resultsScrollCoordinateSpace
-            )
-            VStack(alignment: .leading, spacing: 0) {
-                SearchSourceNavigation(
-                    options: state.searchSiteOptions,
-                    selectedKey: state.selectedSearchSiteKey,
-                    totalCount: state.searchResults.count
-                ) { key in
-                    state.selectSearchSite(key)
-                }
+    private func acceptLatestOrder() {
+        state.searchBrowseMemory.presentation(for: browserKey).acceptOrder()
+        acceptedOrderRevision &+= 1
+    }
 
-                SearchClusterGrid(
-                    clusters: clusters
-                ) { cluster in
-                    if SearchClusterOpenPolicy.requiresSourceSelection(cluster) {
-                        sourceSelectionCluster = cluster
-                    } else if let summary = cluster.primary {
-                        state.openSearchResult(summary)
-                    }
-                } onSelectSource: { summary in
-                    state.openSearchResult(summary)
-                }
-                .padding(.horizontal, HomeBrowseGridMetrics.contentPadding)
-                // Search has no permanent status/error row. Eight points from
-                // the card plus sixteen here create the approved 24-point gap
-                // between the navigation separator and visible posters.
-                .padding(.top, 16)
-                .padding(.bottom, HomeBrowseGridMetrics.contentPadding)
+    private var browserKey: String {
+        let source = state.selectedSearchSiteKey.map { "source:\($0)" } ?? "all"
+        return "\(state.searchBrowseSessionID)/\(source)/\(sortOrder.rawValue)/\(mergesDuplicateTitles)"
+    }
+
+    private var searchResults: some View {
+        let key = browserKey
+        let presentation = state.searchBrowseMemory.presentation(for: key)
+        let clusters = presentation.update(presentedClusters)
+        let summaries = clusters.compactMap(\.primary)
+        let sourceOptions = state.searchBrowseMemory.orderedSources(state.searchSiteOptions)
+        let navigation = [BrowseCategoryNavigationItem(id: "all",
+            title: L10n.string("search.filters.all", fallback: "All Results"), categoryID: nil)] +
+            sourceOptions.map { BrowseCategoryNavigationItem(id: "source:\($0.key)",
+                title: $0.name, selectionValue: $0.key,
+                help: L10n.string("search.browse.provider-count", fallback: "%@: %d results", $0.name, $0.resultCount)) }
+        let header = PosterNativeHeaderKey(categories: [], selectedCategoryID: nil,
+            showsRecommendations: false, filterSelection: [:], navigationItems: navigation,
+            navigationSelectedID: state.selectedSearchSiteKey.map { "source:\($0)" } ?? "all")
+        var footer = state.searchPaginationFooter
+        if presentation.hasPendingOrder {
+            footer.hasPendingUpdate = true
+            footer.statusText = nil
+            footer.actionTitle = nil
+        }
+        return PosterNativePage(items: summaries, headerKey: header,
+            headerHeight: HomeBrowseGridMetrics.headerHeight(hasFilters: false),
+            activeFilters: [], footerKey: footer, nextPage: state.searchPaging.revision,
+            initialAnchor: state.searchBrowseMemory.anchors[key],
+            presentationRevision: acceptedOrderRevision,
+            onCategorySelect: state.selectSearchSite, onFilterReset: { _ in }, onClearFilters: {},
+            onAcceptUpdate: {
+                presentation.acceptOrder()
+                acceptedOrderRevision &+= 1
+            },
+            onBrowse: { anchor, atTop, _ in
+                state.searchBrowseMemory.anchors[key] = anchor
+                presentation.atTop = atTop
+            },
+            onLoad: { await state.loadMoreSearchResults() },
+            onSelect: { summary in
+                guard let cluster = clusters.first(where: { $0.primary?.id == summary.id }) else { return }
+                if SearchClusterOpenPolicy.requiresSourceSelection(cluster) {
+                    sourceSelectionCluster = cluster
+                } else { state.openSearchResult(summary) }
+            },
+            cardPresentations: clusters.map {
+                PosterNativeCardPresentation(id: $0.id,
+                    subtitle: [$0.year, $0.sources.count == 1 ? $0.primary?.siteName : L10n.string("search.browse.sources", fallback: "%d sources", $0.sources.count)]
+                        .compactMap { $0 }.joined(separator: " · "), sources: $0.sources)
+            }, onSelectSource: state.openSearchResult,
+            onManualLoad: { await state.loadMoreSearchResults(retry: true) })
+        .id(key)
+        .overlay {
+            if summaries.isEmpty {
+                EmptyStateView(systemImage: "magnifyingglass", title: emptyStateTitle,
+                    message: state.selectedSearchSiteKey == nil ? emptyStateMessage :
+                        L10n.string("search.browse.source-empty", fallback: "This provider has no results yet. Check its search status or retry below."))
+                    .padding(.top, HomeBrowseGridMetrics.headerHeight(hasFilters: false))
+                    .allowsHitTesting(false)
             }
         }
-        .browserToolbarScrollSurface(named: resultsScrollCoordinateSpace)
         .background(AppSurfacePalette.background)
     }
 
@@ -218,13 +251,13 @@ struct SearchView: View {
         return state.searchResults.filter { $0.siteKey == selectedSiteKey }
     }
 
+    private var presentationInput: SearchPresentationInput {
+        SearchPresentationInput(key: browserKey, items: visibleRawResults,
+            keyword: state.activeSearchKeyword, mergesDuplicates: mergesDuplicateTitles, sortOrder: sortOrder)
+    }
+
     private var presentedClusters: [SearchResultCluster] {
-        presentationCache.clusters(
-            from: visibleRawResults,
-            keyword: state.activeSearchKeyword,
-            mergesDuplicates: mergesDuplicateTitles,
-            sortOrder: sortOrder
-        )
+        projectionKey == browserKey ? projection : state.searchBrowseMemory.presentation(for: browserKey).displayed
     }
 
     private func openSearchSource(_ summary: VideoSummary) {
@@ -416,141 +449,6 @@ enum SearchSourceNavigationLayoutPolicy {
                 visibleSet.contains($0.id) ? nil : $0.id
             }
         )
-    }
-}
-
-private struct SearchSourceNavigation: View {
-    private static let allResultsID = "__all-search-results__"
-
-    let options: [SearchSiteOption]
-    let selectedKey: String?
-    let totalCount: Int
-    let onSelect: (String?) -> Void
-
-    private var selectedID: String {
-        selectedKey ?? Self.allResultsID
-    }
-
-    private var items: [Item] {
-        [
-            Item(
-                id: Self.allResultsID,
-                key: nil,
-                title: L10n.string("search.filters.all-results", fallback: "All Results"),
-                count: totalCount
-            )
-        ] + options.map {
-            Item(id: $0.key, key: $0.key, title: $0.name, count: $0.resultCount)
-        }
-    }
-
-    var body: some View {
-        GeometryReader { proxy in
-            let currentItems = items
-            let partition = SearchSourceNavigationLayoutPolicy.partition(
-                candidates: currentItems.map {
-                    SearchSourceNavigationCandidate(
-                        id: $0.id,
-                        width: Self.measuredWidth(for: $0.title)
-                    )
-                },
-                selectedID: selectedID,
-                availableWidth: max(
-                    0,
-                    proxy.size.width
-                        - HomeBrowseGridMetrics.contentPadding * 2
-                        - HomeBrowseGridMetrics.categoryLeadingInset
-                )
-            )
-            let byID = Dictionary(uniqueKeysWithValues: currentItems.map {
-                ($0.id, $0)
-            })
-
-            HStack(spacing: 0) {
-                BrowseSegmentedNavigationContainer {
-                    ForEach(
-                        Array(partition.visibleIDs.enumerated()),
-                        id: \.element
-                    ) { index, id in
-                        if index > 0 {
-                            BrowseSegmentedNavigationDivider()
-                        }
-                        if let item = byID[id] {
-                            sourceButton(item)
-                        }
-                    }
-
-                    if !partition.hiddenIDs.isEmpty {
-                        BrowseSegmentedNavigationDivider()
-                        Menu {
-                            ForEach(partition.hiddenIDs, id: \.self) { id in
-                                if let item = byID[id] {
-                                    Button {
-                                        onSelect(item.key)
-                                    } label: {
-                                        HStack {
-                                            Text(item.title)
-                                            Spacer()
-                                            Text("\(item.count)")
-                                        }
-                                    }
-                                }
-                            }
-                        } label: {
-                            BrowseSegmentedMoreLabel()
-                        }
-                        .menuIndicator(.hidden)
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
-                        .help(L10n.string("search.filters.more-providers", fallback: "Show %d more result providers", partition.hiddenIDs.count))
-                    }
-                }
-
-                Spacer(minLength: 0)
-            }
-            .padding(.leading, HomeBrowseGridMetrics.contentPadding
-                + HomeBrowseGridMetrics.categoryLeadingInset)
-            .padding(.trailing, HomeBrowseGridMetrics.contentPadding)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .frame(height: BrowseSegmentedNavigationMetrics.rowHeight)
-        .overlay(alignment: .bottom) {
-            BrowseSegmentedNavigationBottomDivider()
-        }
-    }
-
-    private func sourceButton(_ item: Item) -> some View {
-        Button {
-            onSelect(item.key)
-        } label: {
-            BrowseSegmentedNavigationLabel(
-                title: item.title,
-                isSelected: item.id == selectedID
-            )
-        }
-        .buttonStyle(
-            BrowseSegmentedNavigationButtonStyle(
-                isSelected: item.id == selectedID
-            )
-        )
-        .help(L10n.string("search.filters.item-count", fallback: "%@, %d items", item.title, item.count))
-        .accessibilityLabel(L10n.string("search.filters.item-count", fallback: "%@, %d items", item.title, item.count))
-    }
-
-    private static func measuredWidth(for title: String) -> CGFloat {
-        let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        return BrowseSegmentedNavigationMetrics.segmentWidth(
-            textWidth: (title as NSString)
-                .size(withAttributes: [.font: font])
-                .width
-        )
-    }
-
-    private struct Item: Identifiable {
-        let id: String
-        let key: String?
-        let title: String
-        let count: Int
     }
 }
 
@@ -1119,9 +1017,7 @@ private struct SearchFolderBrowser: View {
                     title: L10n.string("search.folder.failed.title", fallback: "Cloud Folder Failed to Load"),
                     message: errorMessage
                 )
-                Button(L10n.string("common.retry", fallback: "Try Again")) {
-                    state.retryCurrentSearchFolder()
-                }
+
             }
         } else if page.isLoading, page.items.isEmpty {
             AppActivityLabel(L10n.string("search.folder.loading", fallback: "Opening cloud folder…"))
@@ -1133,81 +1029,27 @@ private struct SearchFolderBrowser: View {
                 message: L10n.string("search.folder.empty.message", fallback: "This search result did not return any browsable cloud items.")
             )
         } else {
-            GeometryReader { viewport in
-                ScrollView {
-                    VStack(spacing: 18) {
-                        SearchFolderGrid(items: page.items) { summary in
-                            state.openSearchFolderItem(summary)
-                        }
+            let key = "folder:\(page.id)"
+            PosterNativePage(items: page.items,
+                headerKey: PosterNativeHeaderKey(categories: [], selectedCategoryID: nil,
+                    showsRecommendations: false, filterSelection: [:]),
+                headerHeight: HomeBrowseGridMetrics.contentPadding, activeFilters: [],
+                footerKey: PosterNativeFooterKey(hasMore: page.pagination?.hasMore == true,
+                    isLoading: page.isLoading, isRefreshing: false, errorMessage: page.errorMessage,
+                    itemCount: page.items.count, hasPendingUpdate: false, issueKind: page.paginationIssueKind),
+                nextPage: (page.pagination?.page ?? 0) + 1,
+                initialAnchor: state.searchBrowseMemory.anchors[key], presentationRevision: 0,
+                onCategorySelect: { _ in }, onFilterReset: { _ in }, onClearFilters: {}, onAcceptUpdate: {},
+                onBrowse: { anchor, _, _ in state.searchBrowseMemory.anchors[key] = anchor },
+                onLoad: { await state.loadNextSearchFolderPageAndWait() },
+                onSelect: state.openSearchFolderItem,
+                cardPresentations: page.items.map {
+                    PosterNativeCardPresentation(id: $0.id,
+                        subtitle: $0.isFolder ? L10n.string("search.folder.title", fallback: "Folder") : ($0.remarks ?? $0.siteName),
+                        sources: [])
+                })
+                .id(page.id)
 
-                        if page.pagination?.hasMore == true {
-                            AutomaticPageLoader(
-                                isLoading: page.isLoading,
-                                errorMessage: page.errorMessage,
-                                viewportHeight: viewport.size.height,
-                                coordinateSpaceName: folderScrollCoordinateSpace
-                            ) {
-                                state.loadNextSearchFolderPage()
-                            }
-                            .id(page.pagination?.page ?? 0)
-                        } else {
-                            PaginationCompletionFooter(
-                                itemCount: page.items.count
-                            )
-                        }
-                    }
-                    .padding()
-                }
-                .coordinateSpace(name: folderScrollCoordinateSpace)
-            }
-        }
-    }
-}
-
-private struct SearchFolderGrid: View {
-    let items: [VideoSummary]
-    let onSelect: (VideoSummary) -> Void
-
-    private let columns = [
-        GridItem(.adaptive(minimum: 140, maximum: 190), spacing: 18)
-    ]
-
-    var body: some View {
-        LazyVGrid(columns: columns, alignment: .leading, spacing: 20) {
-            ForEach(items) { item in
-                Button {
-                    onSelect(item)
-                } label: {
-                    VStack(alignment: .leading, spacing: 7) {
-                        VideoPosterView(item: item)
-                        Text(item.title)
-                            .font(.headline)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                        if let remarks = VideoCardMetadata.secondaryText(
-                            from: item.remarks
-                        ) {
-                            Text(remarks)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
-                        }
-                        Label(
-                            item.isFolder
-                                ? L10n.string("common.folder", fallback: "Folder")
-                                : item.siteName,
-                            systemImage: item.isFolder
-                                ? "folder"
-                                : "play.rectangle"
-                        )
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .appInteractiveHover(cornerRadius: 10)
-            }
         }
     }
 }
@@ -1246,7 +1088,7 @@ private extension SearchFailure {
     }
 }
 
-enum SearchResultSortOrder: String, CaseIterable, Identifiable {
+enum SearchResultSortOrder: String, CaseIterable, Identifiable, Sendable {
     case relevance
     case sourceCount
     case newest
@@ -1398,83 +1240,6 @@ enum SearchResultPresentation {
     }
 }
 
-private struct SearchClusterGrid: View {
-    let clusters: [SearchResultCluster]
-    let onSelectCluster: (SearchResultCluster) -> Void
-    let onSelectSource: (VideoSummary) -> Void
-
-    private let columns = [
-        GridItem(.adaptive(minimum: 140, maximum: 190), spacing: 18)
-    ]
-
-    var body: some View {
-        LazyVGrid(columns: columns, alignment: .leading, spacing: 20) {
-            ForEach(clusters) { cluster in
-                SearchClusterCell(
-                    cluster: cluster,
-                    onSelectCluster: onSelectCluster,
-                    onSelectSource: onSelectSource
-                )
-            }
-        }
-    }
-}
-
-private struct SearchClusterCell: View {
-    let cluster: SearchResultCluster
-    let onSelectCluster: (SearchResultCluster) -> Void
-    let onSelectSource: (VideoSummary) -> Void
-
-    @ViewBuilder
-    var body: some View {
-        if let primary = cluster.primary {
-            Button {
-                onSelectCluster(cluster)
-            } label: {
-                clusterLabel(primary: primary)
-            }
-            .buttonStyle(.plain)
-            .appInteractiveHover(cornerRadius: 10)
-            .contextMenu {
-                ForEach(cluster.sources) { source in
-                    Button(L10n.string("search.source.open-from", fallback: "Open from %@", source.siteName)) {
-                        onSelectSource(source)
-                    }
-                }
-            }
-            .accessibilityLabel(
-                L10n.string("search.source.accessibility", fallback: "%@, %d providers", cluster.title, cluster.sources.count)
-            )
-        }
-    }
-
-    private func clusterLabel(primary: VideoSummary) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            VideoPosterView(item: primary)
-            Text(cluster.title)
-                .font(.headline)
-                .lineLimit(2)
-                .multilineTextAlignment(.leading)
-            if let year = cluster.year {
-                Text(year)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            Text(sourceDescription(primary: primary))
-                .font(.caption2)
-                .foregroundColor(.secondary)
-        }
-        .padding(8)
-        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-    }
-
-    private func sourceDescription(primary: VideoSummary) -> String {
-        cluster.sources.count == 1
-            ? primary.siteName
-            : L10n.string("search.source.count", fallback: "%d providers", cluster.sources.count)
-    }
-}
-
 private struct SearchSourcePicker: View {
     let cluster: SearchResultCluster
     let onSelect: (VideoSummary) -> Void
@@ -1511,6 +1276,7 @@ private struct SearchSourcePicker: View {
             .shadow(color: .black.opacity(0.22), radius: 26, y: 10)
         }
         .accessibilityAddTraits(.isModal)
+        .onExitCommand(perform: onDismiss)
     }
 
     private var header: some View {

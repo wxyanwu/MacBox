@@ -15,6 +15,9 @@ private final class AdmissionTransactionFixture {
         url = directory.appendingPathComponent("transaction.sqlite3")
         do { _ = try SQLiteStore(databaseURL: url) }
         db = try SQLiteConnection(url: url)
+        // AdmissionTransactionFixture represents the legacy schema-10 import
+        // contract; it must not inherit the application's current schema.
+        try db.execute("PRAGMA user_version=10")
         try db.execute("CREATE TABLE fixture_claims(source TEXT, kind TEXT, legacy TEXT, value BLOB, PRIMARY KEY(source,kind,legacy))")
         try db.execute("CREATE TABLE fixture_stable(source TEXT, local TEXT, kind TEXT, value BLOB, PRIMARY KEY(source,local,kind))")
         try db.execute("CREATE TABLE fixture_markers(plan TEXT PRIMARY KEY, receipt TEXT)")
@@ -191,7 +194,7 @@ final class AdmissionTransactionTests: XCTestCase {
         do {
             let c = try SQLiteConnection(url: original); defer { c.close() }
             try c.execute("INSERT INTO settings(key,value) VALUES ('postBackupChange',?)", bindings: [.blob(Data("true".utf8))])
-            XCTAssertEqual(try c.scalarInt("PRAGMA user_version"), 10)
+            XCTAssertEqual(try c.scalarInt("PRAGMA user_version"), SQLiteStore.currentSchemaVersion)
         }
         // Restore into a NEW temporary destination, never overwrite a user's DB.
         let restored = root.appendingPathComponent("restored-schema9.sqlite3")

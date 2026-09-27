@@ -3,19 +3,173 @@ import OKVideoCore
 import OKVideoPersistence
 import SwiftUI
 
+struct LiveBrowserPreferencePayload: Codable, Equatable {
+    var selectedSource: String?
+    var groups: [String: String] = [:]
+    var channels: [String: String] = [:]
+    var routes: [String: [String: String]] = [:]
+}
+
+struct LiveBrowserPreferenceStore {
+    static let storageKey = "OKVideoMac.LiveBrowserPreference.v1"
+    let defaults: UserDefaults
+    let storageKey: String
+
+    init(defaults: UserDefaults = .standard, storageKey: String = Self.storageKey) {
+        self.defaults = defaults
+        self.storageKey = storageKey
+    }
+
+    func selectedSource() -> LiveSourceID? {
+        load().selectedSource.flatMap(Self.decodeSource)
+    }
+
+    func setSelectedSource(_ source: LiveSourceID) {
+        update { $0.selectedSource = Self.encode(source) }
+    }
+
+    func group(for source: LiveSourceID) -> String? { load().groups[Self.encode(source)] }
+    func setGroup(_ group: String?, for source: LiveSourceID) {
+        update { payload in
+            let key = Self.encode(source)
+            if let group { payload.groups[key] = group } else { payload.groups[key] = nil }
+        }
+    }
+
+    func channel(for source: LiveSourceID) -> String? { load().channels[Self.encode(source)] }
+    func setChannel(_ channel: String, for source: LiveSourceID) {
+        update { $0.channels[Self.encode(source)] = channel }
+    }
+
+    func route(for source: LiveSourceID, channelID: String) -> String? {
+        load().routes[Self.encode(source)]?[channelID]
+    }
+    func setRoute(_ route: String?, for source: LiveSourceID, channelID: String) {
+        update { payload in
+            let key = Self.encode(source)
+            var sourceRoutes = payload.routes[key] ?? [:]
+            sourceRoutes[channelID] = route
+            payload.routes[key] = sourceRoutes.isEmpty ? nil : sourceRoutes
+        }
+    }
+
+    private func load() -> LiveBrowserPreferencePayload {
+        guard let data = defaults.data(forKey: storageKey),
+              let value = try? JSONDecoder().decode(LiveBrowserPreferencePayload.self, from: data) else {
+            return LiveBrowserPreferencePayload()
+        }
+        return value
+    }
+
+    private func update(_ mutation: (inout LiveBrowserPreferencePayload) -> Void) {
+        var payload = load()
+        mutation(&payload)
+        if let data = try? JSONEncoder().encode(payload) { defaults.set(data, forKey: storageKey) }
+    }
+
+    static func encode(_ source: LiveSourceID) -> String {
+        switch source {
+        case .imported(let id): return "imported:\(id.uuidString.lowercased())"
+        case .xtream(let id): return "xtream:\(id.uuidString.lowercased())"
+        }
+    }
+
+    static func decodeSource(_ value: String) -> LiveSourceID? {
+        let parts = value.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2, let id = UUID(uuidString: parts[1]) else { return nil }
+        switch parts[0] {
+        case "imported": return .imported(id)
+        case "xtream": return .xtream(id)
+        default: return nil
+        }
+    }
+}
+
+enum LiveDisplayMode { case channels, guide }
+
 @MainActor
 final class LiveBrowserSession: ObservableObject {
-    @Published var selectedSourceID: LiveSourceID?
+    private let preferences: LiveBrowserPreferenceStore
+    @Published var selectedSourceID: LiveSourceID? {
+        didSet {
+            guard selectedSourceID != oldValue, let selectedSourceID else { return }
+            preferences.setSelectedSource(selectedSourceID)
+            selectedGroupID = preferences.group(for: selectedSourceID)
+        }
+    }
+    var channelAnchors: [String: LiveChannelBrowseAnchor] = [:]
     @Published var searchText = ""
-    @Published var selectedGroupID: String?
+    @Published var selectedGroupID: String? {
+        didSet {
+            guard selectedGroupID != oldValue, let selectedSourceID else { return }
+            preferences.setGroup(selectedGroupID, for: selectedSourceID)
+        }
+    }
     @Published var showsFavoritesOnly = false
-    @Published var showsGuide = false
-    @Published var guideWindowStart = LiveBrowserSession.roundedGuideStart(Date())
+    @Published private(set) var displayMode: LiveDisplayMode = .channels
+    var showsGuide: Bool {
+        get { displayMode == .guide }
+        set { setDisplayMode(newValue ? .guide : .channels) }
+    }
+    func setDisplayMode(_ mode: LiveDisplayMode) {
+        guard displayMode != mode else { return }
+        displayMode = mode
+        BrowserInteractionTrace.record(mode == .guide ? "guide.mode.guide" : "guide.mode.channels")
+    }
+    @Published var guideWindowStart = LiveBrowserSession.roundedGuideStart(Date().addingTimeInterval(-3600))
     @Published var guideVisibleRange: Range<Int> = 0..<1
+    @Published private(set) var guideRefreshRequest = 0
+
+    func refresh(source: LiveSourceDescriptor, state: AppState) {
+        guard !state.isLiveCatalogLoading(source.id) else { return }
+        if showsGuide, state.presentedLiveCatalog(for: source.id) != nil {
+            guard !state.liveGuide.isRefreshing else { return }
+            guideRefreshRequest &+= 1
+        } else if source.canRefresh {
+            Task { await state.refreshLiveSource(source.id) }
+        }
+    }
 
     /// Deliberately not published: changing sections must not invalidate the
     /// mounted live grid. It only gates source-loading side effects.
-    var isActive = false
+    private(set) var isActive = false
+    private var activeOwner: UUID?
+    func activate(owner: UUID) { activeOwner = owner; isActive = true }
+    @discardableResult
+    func deactivate(owner: UUID) -> Bool {
+        guard activeOwner == owner else { return false }
+        activeOwner = nil
+        isActive = false
+        return true
+    }
+
+    init(preferences: LiveBrowserPreferenceStore = LiveBrowserPreferenceStore()) {
+        self.preferences = preferences
+        let source = preferences.selectedSource()
+        selectedSourceID = source
+        selectedGroupID = source.flatMap { preferences.group(for: $0) }
+    }
+
+    func playDefault(channel: LiveChannel, source: LiveSourceID, catalog: AcceptedImportedCatalog?,
+                     channels: [LiveChannel], state: AppState) {
+        let remembered = rememberedRoute(for: source, channel: channel)
+        if case .imported = source {
+            let choices = catalog?.selections(for: channel) ?? []
+            guard let selection = choices.first(where: {
+                importedRouteIdentity(for: $0.stream, in: channel) == remembered
+            }) ?? choices.first else { return }
+            remember(channel: channel, source: source,
+                     route: importedRouteIdentity(for: selection.stream, in: channel))
+            Task { await state.playImportedLive(selection, navigationChannels: channels) }
+        } else {
+            guard let stream = channel.streams.first(where: {
+                nativeRouteIdentity(for: $0) == remembered
+            }) ?? channel.streams.first else { return }
+            remember(channel: channel, source: source, route: nativeRouteIdentity(for: stream))
+            Task { await state.playLive(channel: channel, stream: stream, sourceID: source,
+                                       navigationChannels: channels) }
+        }
+    }
 
     static func roundedGuideStart(_ date: Date) -> Date {
         let interval: TimeInterval = 60 * 60
@@ -24,11 +178,36 @@ final class LiveBrowserSession: ObservableObject {
     }
 
     func reconcileSources(_ sources: [LiveSourceDescriptor]) {
+        guard !sources.isEmpty else { return }
         if let selectedSourceID,
            sources.contains(where: { $0.id == selectedSourceID }) {
             return
         }
         selectedSourceID = sources.first?.id
+    }
+
+    func remember(channel: LiveChannel, source: LiveSourceID, route: String?) {
+        preferences.setChannel(channel.id, for: source)
+        preferences.setRoute(route, for: source, channelID: channel.id)
+    }
+
+    func rememberedChannel(for source: LiveSourceID) -> String? {
+        preferences.channel(for: source)
+    }
+
+    func rememberedRoute(for source: LiveSourceID, channel: LiveChannel) -> String? {
+        preferences.route(for: source, channelID: channel.id)
+    }
+
+    func importedRouteIdentity(for stream: LiveStream, in channel: LiveChannel) -> String? {
+        let name = stream.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, channel.streams.filter({ $0.name == stream.name }).count == 1 else { return nil }
+        return "name:\(name)"
+    }
+
+    func nativeRouteIdentity(for stream: LiveStream) -> String? {
+        guard case .provider = stream.target else { return nil }
+        return "provider:\(stream.id)"
     }
 
     func reconcileGroups(_ groups: [LiveGroup]) {
@@ -45,6 +224,9 @@ struct LiveView: View {
     @EnvironmentObject private var navigation: AppNavigationState
     @ObservedObject var session: LiveBrowserSession
     @StateObject private var logoURLCache = LiveChannelLogoURLCache()
+    @State private var channelSelection = BrowserItemSelection()
+    @State private var activationOwner = UUID()
+    @State private var isMounted = false
     private let channelScrollCoordinateSpace = "live-channel-scroll"
 
     var body: some View {
@@ -57,20 +239,20 @@ struct LiveView: View {
             }
         }
         .onAppear {
+            isMounted = true
             updateActivation(for: navigation.selectedSection)
         }
         .onDisappear {
-            session.isActive = false
-            updateEPGDemand()
-            state.clearLiveGuideDemand()
+            isMounted = false
+            if session.deactivate(owner: activationOwner) { updateEPGDemand() }
         }
         .onChange(of: navigation.selectedSection) { section in
             updateActivation(for: section)
         }
         .onChange(of: session.selectedSourceID) { _ in
             state.selectImportedIdentitySource(session.selectedSourceID)
+            channelSelection = BrowserItemSelection()
             session.searchText = ""
-            session.selectedGroupID = nil
             session.showsFavoritesOnly = false
             updateEPGDemand()
             guard session.isActive else { return }
@@ -93,16 +275,13 @@ struct LiveView: View {
             }
         }
         .onChange(of: state.shortcutLiveRefreshRequest) { _ in
-            guard session.isActive,
-                  let source = selectedSource,
-                  source.canRefresh else { return }
-            Task { await state.refreshLiveSource(source.id) }
+            guard session.isActive, let source = selectedSource else { return }
+            session.refresh(source: source, state: state)
         }
         .onChange(of: session.selectedGroupID) { _ in updateEPGDemand() }
         .onChange(of: session.searchText) { _ in updateEPGDemand() }
         .onChange(of: session.showsFavoritesOnly) { _ in updateEPGDemand() }
         .onChange(of: session.showsGuide) { enabled in
-            if !enabled { state.clearLiveGuideDemand() }
             updateEPGDemand()
         }
         .onChange(of: state.liveEPGCatalogRevision) { _ in updateEPGDemand() }
@@ -142,7 +321,8 @@ struct LiveView: View {
                     sourceName: source.name
                 )
             } else if state.isLiveCatalogLoading(source.id) {
-                AppActivityLabel(L10n.string("live.loading-source", fallback: "Loading Live TV source…"))
+                Text(L10n.string("live.loading-source", fallback: "Loading Live TV source…"))
+                    .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack(spacing: 18) {
@@ -179,11 +359,6 @@ struct LiveView: View {
     ) -> some View {
         let importedCatalog = importedCatalog(for: sourceID)
         let visibleGroups = playlist.groups.filter { $0.password == nil }
-        let hiddenCount = playlist.groups.count - visibleGroups.count
-        let allowsLogoFallback: Bool = {
-            if case .imported = sourceID { return true }
-            return false
-        }()
         let channels = filteredChannels(
             visibleGroups.flatMap(\.channels),
             sourceID: sourceID
@@ -197,75 +372,22 @@ struct LiveView: View {
                 importedCatalog: importedCatalog
             )
             .environmentObject(state)
+            .id(sourceID)
+        } else if channels.isEmpty {
+            EmptyStateView(
+                systemImage: session.showsFavoritesOnly ? "star" : "magnifyingglass",
+                title: session.showsFavoritesOnly
+                    ? L10n.string("live.empty.favorites.title", fallback: "No Favorite Channels")
+                    : L10n.string("live.empty.filtered.title", fallback: "No Matching Channels"),
+                message: session.showsFavoritesOnly
+                    ? L10n.string("live.empty.favorites.message", fallback: "Use the star on a channel card to add it to Favorites.")
+                    : L10n.string("live.empty.filtered.message", fallback: "Choose another group or search term.")
+            ).frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-        GeometryReader { viewport in
-            ScrollView {
-                BrowserToolbarScrollMarker(
-                    coordinateSpaceName: channelScrollCoordinateSpace
-                )
-                VStack(spacing: 0) {
-                    if channels.isEmpty {
-                        EmptyStateView(
-                            systemImage: session.showsFavoritesOnly
-                                ? "star"
-                                : "magnifyingglass",
-                            title: session.showsFavoritesOnly
-                                ? L10n.string("live.empty.favorites.title", fallback: "No Favorite Channels")
-                                : L10n.string("live.empty.filtered.title", fallback: "No Matching Channels"),
-                            message: session.showsFavoritesOnly
-                                ? L10n.string("live.empty.favorites.message", fallback: "Use the star on a channel card to add it to Favorites.")
-                                : L10n.string("live.empty.filtered.message", fallback: "Choose another group or search term.")
-                        )
-                        .frame(
-                            maxWidth: .infinity,
-                            minHeight: max(0, viewport.size.height - 72)
-                        )
-                    } else {
-                        LazyVGrid(
-                            columns: [
-                                GridItem(
-                                    .adaptive(minimum: 238, maximum: 340),
-                                    spacing: 18,
-                                    alignment: .top
-                                )
-                            ],
-                            alignment: .leading,
-                            spacing: 20
-                        ) {
-                            ForEach(channels) { channel in
-                                LiveChannelCard(
-                                    channel: channel,
-                                    artworkURLs: logoURLCache.urls(
-                                        for: channel,
-                                        allowsFallback: allowsLogoFallback
-                                    ),
-                                    navigationChannels: channels,
-                                    sourceID: sourceID,
-                                    sourceName: sourceName,
-                                    importedCatalog: importedCatalog
-                                )
-                                .environmentObject(state)
-                            }
-                        }
-                        .padding(20)
-
-                        if hiddenCount > 0 {
-                            Label(
-                                L10n.string("live.protected-groups.hidden", fallback: "%d protected groups hidden", hiddenCount),
-                                systemImage: "lock"
-                            )
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .padding(.bottom, 20)
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity)
-            }
-            .browserToolbarScrollSurface(
-                named: channelScrollCoordinateSpace
-            )
-        }
+            NativeLiveChannelPage(channels: channels, source: sourceID, sourceName: sourceName,
+                catalog: importedCatalog, session: session,
+                browseKey: "\(LiveBrowserPreferenceStore.encode(sourceID))/\(session.selectedGroupID ?? "")/\(session.searchText)/\(session.showsFavoritesOnly)")
+                .environmentObject(state)
         }
     }
 
@@ -319,7 +441,9 @@ struct LiveView: View {
     }
 
     private func updateActivation(for section: AppSection) {
-        session.isActive = section == .live
+        guard isMounted else { return }
+        if section == .live { session.activate(owner: activationOwner) }
+        else if !session.deactivate(owner: activationOwner) { return }
         updateEPGDemand()
         guard session.isActive else { return }
 
@@ -359,6 +483,25 @@ private struct LiveGuideSelection: Equatable {
     let end: Date
 }
 
+struct LiveGuideChannelPager {
+    static let pageSize = EPGGuideLimits.maximumDesiredRows
+
+    static func pageCount(total: Int) -> Int {
+        max(1, Int(ceil(Double(max(0, total)) / Double(pageSize))))
+    }
+
+    static func clampedPage(_ page: Int, total: Int) -> Int {
+        min(max(0, page), pageCount(total: total) - 1)
+    }
+
+    static func range(page: Int, total: Int) -> Range<Int> {
+        let safePage = clampedPage(page, total: total)
+        let lower = min(max(0, total), safePage * pageSize)
+        let upper = min(max(0, total), lower + pageSize)
+        return lower..<upper
+    }
+}
+
 struct LiveGuideScreen: View {
     @EnvironmentObject private var state: AppState
     @ObservedObject var guide: LiveGuideState
@@ -367,11 +510,15 @@ struct LiveGuideScreen: View {
     let channels: [LiveChannel]
     let importedCatalog: AcceptedImportedCatalog?
     @State private var selection: LiveGuideSelection?
-    @State private var gridModel: LiveGuideGridModel?
-    @State private var gridModelRevision: UUID?
+    @StateObject private var modelPresenter = LiveGuideModelPresenter()
+    @State private var channelPage = 0
+    @State private var repositionRequest: LiveGuideRepositionRequest?
+    @State private var demandOwner: UUID?
+    @State private var recoveryAttempted = false
+    @State private var showsDatePicker = false
 
     private var boundedChannels: [LiveChannel] {
-        Array(channels.prefix(EPGGuideLimits.maximumDesiredRows))
+        Array(channels[LiveGuideChannelPager.range(page: channelPage, total: channels.count)])
     }
 
     private var windowEnd: Date {
@@ -382,168 +529,236 @@ struct LiveGuideScreen: View {
         VStack(spacing: 0) {
             navigationBar
             Divider()
-            content
+            LiveGuideViewportHost { content }
             if let selection {
                 Divider()
                 detailBar(selection)
             }
         }
-        .onAppear { requestGuide() }
-        .onDisappear { state.clearLiveGuideDemand() }
+        .background(Color(nsColor: .windowBackgroundColor))
+        .onAppear {
+            let owner = UUID()
+            if session.showsGuide, session.selectedSourceID == sourceID,
+               state.acquireLiveGuideDemand(owner: owner, navigation: state.navigation.selection) {
+                demandOwner = owner
+                requestGuide()
+            }
+            updateGridModel()
+        }
+        .onDisappear {
+            modelPresenter.invalidate()
+            if let owner = demandOwner { state.clearLiveGuideDemand(owner: owner) }
+            demandOwner = nil
+        }
+        .onChange(of: session.guideRefreshRequest) { _ in retryGuide() }
+        .onChange(of: guide.snapshot) { _ in updateGridModel() }
+        .onChange(of: modelPresenter.model) { model in
+            guard let selection else { return }
+            let retained = model?.rows.first { $0.id == selection.rowID }?.programmes.contains {
+                $0.title == selection.title && $0.start == selection.start && $0.end == selection.end
+            } == true
+            if !retained { self.selection = nil }
+        }
+        .onChange(of: guide.isRefreshing) { refreshing in
+            if !refreshing { updateGridModel() }
+        }
+        .onChange(of: viewScope) { _ in recoveryAttempted = false; updateGridModel() }
         .onChange(of: session.guideWindowStart) { _ in requestGuide() }
-        .onChange(of: channels.map(\.id)) { _ in requestGuide() }
+        .onChange(of: channels.map(\.id)) { _ in
+            let clamped = LiveGuideChannelPager.clampedPage(channelPage, total: channels.count)
+            if channelPage == clamped { requestGuide() } else { channelPage = clamped }
+        }
+        .onChange(of: channelPage) { _ in
+            session.guideVisibleRange = 0..<1
+            selection = nil
+            requestGuide()
+        }
+        .onChange(of: sourceID) { _ in
+            channelPage = 0
+            session.guideVisibleRange = 0..<1
+            selection = nil
+            requestGuide()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var navigationBar: some View {
-        HStack(spacing: 10) {
-            Button { moveWindow(-12 * 60 * 60) } label: {
-                Label(L10n.string("live.guide.previous", fallback: "Previous 12 Hours"),
-                      systemImage: "chevron.left")
-                    .labelStyle(.iconOnly)
+        GeometryReader { geometry in
+            HStack(spacing: 12) {
+                Button { showsDatePicker.toggle() } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: "calendar").foregroundColor(.secondary)
+                        Text(session.guideWindowStart, format: .dateTime.month().day().weekday(.abbreviated))
+                            .font(.system(size: 13, weight: .medium))
+                        Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundColor(.secondary)
+                    }
+                    .padding(.vertical, 6)
+                    .foregroundColor(.primary)
+                }
+                .buttonStyle(.borderless)
+                .fixedSize()
+                .help(L10n.string("live.guide.date", fallback: "Guide Date"))
+                .popover(isPresented: $showsDatePicker, arrowEdge: .bottom) {
+                    DatePicker(L10n.string("live.guide.date", fallback: "Guide Date"),
+                        selection: guideDateBinding, displayedComponents: .date)
+                        .datePickerStyle(.graphical)
+                        .labelsHidden()
+                        .padding(12)
+                        .onChange(of: session.guideWindowStart) { _ in showsDatePicker = false }
+                }
+                Divider().frame(height: 18)
+                HStack(spacing: 4) {
+                    Button { moveWindow(-12 * 60 * 60) } label: {
+                        Image(systemName: "chevron.left").frame(width: 26, height: 28)
+                    }
+                    .buttonStyle(.borderless)
+                    .help(L10n.string("live.guide.previous", fallback: "Previous 12 Hours"))
+                    .accessibilityLabel(L10n.string("live.guide.previous", fallback: "Previous 12 Hours"))
+                    Button(L10n.string("live.guide.now", fallback: "Now")) {
+                        let now = Date()
+                        session.guideWindowStart = LiveBrowserSession.roundedGuideStart(now.addingTimeInterval(-3600))
+                        repositionRequest = LiveGuideRepositionRequest(date: now)
+                    }
+                    .controlSize(.regular)
+                    Button { moveWindow(12 * 60 * 60) } label: {
+                        Image(systemName: "chevron.right").frame(width: 26, height: 28)
+                    }
+                    .buttonStyle(.borderless)
+                    .help(L10n.string("live.guide.next", fallback: "Next 12 Hours"))
+                    .accessibilityLabel(L10n.string("live.guide.next", fallback: "Next 12 Hours"))
+                }
+                if geometry.size.width >= 780 {
+                    (Text(session.guideWindowStart, format: .dateTime.hour().minute()) + Text(" – ")
+                        + Text(windowEnd, format: .dateTime.hour().minute()))
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundColor(.secondary)
+                        .help(session.guideWindowStart.formatted() + " – " + windowEnd.formatted())
+                }
+                Spacer(minLength: 8)
+                if channels.count > LiveGuideChannelPager.pageSize {
+                    HStack(spacing: 4) {
+                        Text(L10n.string("live.guide.channel-page", fallback: "Channels %d–%d of %d",
+                            LiveGuideChannelPager.range(page: channelPage, total: channels.count).lowerBound + 1,
+                            LiveGuideChannelPager.range(page: channelPage, total: channels.count).upperBound,
+                            channels.count))
+                            .font(.system(size: 11).monospacedDigit()).foregroundColor(.secondary)
+                            .lineLimit(1)
+                        Button { channelPage -= 1 } label: { Image(systemName: "chevron.up").frame(width: 24, height: 28) }
+                            .buttonStyle(.borderless).disabled(channelPage == 0)
+                            .help(L10n.string("live.guide.previous-channels", fallback: "Previous Channels"))
+                    .accessibilityLabel(L10n.string("live.guide.previous-channels", fallback: "Previous Channels"))
+                        Button { channelPage += 1 } label: { Image(systemName: "chevron.down").frame(width: 24, height: 28) }
+                            .buttonStyle(.borderless)
+                            .disabled(channelPage + 1 >= LiveGuideChannelPager.pageCount(total: channels.count))
+                            .help(L10n.string("live.guide.next-channels", fallback: "Next Channels"))
+                    .accessibilityLabel(L10n.string("live.guide.next-channels", fallback: "Next Channels"))
+                    }
+                }
+                if sourceID.isXtream {
+                    Image(systemName: "info.circle").foregroundColor(.secondary)
+                        .help(L10n.string("live.guide.xtream-nearby-only", fallback: "This source provides nearby programmes only"))
+                }
             }
-            DatePicker(
-                L10n.string("live.guide.date", fallback: "Guide Date"),
-                selection: guideDateBinding,
-                displayedComponents: .date
-            )
-            .labelsHidden()
-            Button(L10n.string("live.guide.now", fallback: "Now")) {
-                session.guideWindowStart = LiveBrowserSession.roundedGuideStart(Date())
-            }
-            Button { moveWindow(12 * 60 * 60) } label: {
-                Label(L10n.string("live.guide.next", fallback: "Next 12 Hours"),
-                      systemImage: "chevron.right")
-                    .labelStyle(.iconOnly)
-            }
-            Text(session.guideWindowStart, format: .dateTime.month().day().hour().minute())
-                .font(.subheadline.monospacedDigit())
-                .foregroundColor(.secondary)
-            Spacer()
-            if channels.count > boundedChannels.count {
-                Text(L10n.string("live.guide.filtered-limit",
-                                 fallback: "Showing the first %d matching channels",
-                                 boundedChannels.count))
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            if sourceID.isXtream {
-                Text(L10n.string("live.guide.xtream-nearby-only",
-                                 fallback: "This source provides nearby programmes only"))
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-            }
-            statusLabel
+            .padding(.horizontal, 16)
+            .frame(width: geometry.size.width, height: geometry.size.height)
         }
-        .padding(.horizontal, 14)
-        .frame(height: 46)
+        .frame(height: 52)
     }
 
-    @ViewBuilder
-    private var statusLabel: some View {
-        switch guide.lifecycle {
-        case .content(let value):
-            if !value.failures.isEmpty {
-                Label(L10n.string("live.guide.partial", fallback: "%d rows unavailable",
-                                  value.failures.count), systemImage: "exclamationmark.triangle")
-                    .foregroundColor(.orange)
-                    .font(.caption)
-            } else if value.refreshPhase == .loading {
-                AppActivityLabel(L10n.string("live.guide.refreshing", fallback: "Refreshing…"))
-                    .font(.caption)
-            } else if value.freshness == .stale {
-                Label(L10n.string("live.guide.stale", fallback: "Saved schedule"),
-                      systemImage: "clock.arrow.circlepath")
-                    .foregroundColor(.secondary)
-                    .font(.caption)
-            }
-        case .empty(let value) where value.refreshPhase == .loading:
-            AppActivityLabel(L10n.string("live.guide.refreshing", fallback: "Refreshing…"))
-                .font(.caption)
-        default:
-            EmptyView()
-        }
+    private var viewScope: LiveGuideViewScope {
+        LiveGuideViewScope(source: EPGSourceKey(sourceID), start: session.guideWindowStart,
+                          end: windowEnd, channelIDs: boundedChannels.map(\.id))
     }
 
-    @ViewBuilder
+    private func updateGridModel() {
+        let snapshot = guide.snapshot
+        let subtitles = Dictionary(uniqueKeysWithValues: snapshot?.rows.compactMap { row in
+            rowSubtitle(row.state).map { (row.id, $0) }
+        } ?? [])
+        if let snapshot, !viewScope.accepts(snapshot), !guide.isRefreshing {
+            if !recoveryAttempted {
+                recoveryAttempted = true
+                requestGuide(force: true)
+            } else {
+                modelPresenter.rejectScope()
+                return
+            }
+        }
+        modelPresenter.submit(snapshot, scope: viewScope, subtitles: subtitles)
+    }
+
     private var content: some View {
+        let scope = viewScope
+        let revision = modelPresenter.renderRevision
+        let model = modelPresenter.scope == scope ? modelPresenter.model : nil
+        return ZStack(alignment: .topTrailing) {
+            // This host stays at the same structural identity through all load states.
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                LiveGuideGridRepresentable(model: model, now: context.date, scope: scope, reposition: repositionRequest,
+                    onProgrammeSelected: { row, programme in
+                        guard modelPresenter.acceptsCallback(scope: scope, revision: revision) else { return }
+                        selection = LiveGuideSelection(rowID: row.id, title: programme.title,
+                            start: programme.start, end: programme.end)
+                    },
+                    onProgrammeActivated: { row, _ in
+                        guard modelPresenter.acceptsCallback(scope: scope, revision: revision) else { return }
+                        playChannel(row.id)
+                    },
+                    onChannelActivated: { row in
+                        guard modelPresenter.acceptsCallback(scope: scope, revision: revision) else { return }
+                        playChannel(row.id)
+                    },
+                    onVisibleRangeChanged: { range in
+                        guard range != session.guideVisibleRange else { return }
+                        DispatchQueue.main.async {
+                            guard modelPresenter.acceptsCallback(scope: scope, revision: revision),
+                                  session.guideWindowStart == scope.start,
+                                  session.selectedSourceID == sourceID else { return }
+                            session.guideVisibleRange = range
+                            requestGuide()
+                        }
+                    })
+            }
+            statusOverlay(hasModel: model != nil)
+        }
+    }
+
+    @ViewBuilder
+    private func statusOverlay(hasModel: Bool) -> some View {
         switch guide.lifecycle {
-        case .inactive, .loadingInitial:
-            AppActivityLabel(L10n.string("live.guide.loading", fallback: "Loading programme guide…"))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        case .content(let value):
-            grid(value.snapshot)
-        case .empty(let value):
-            ZStack(alignment: .topTrailing) {
-                grid(value.snapshot)
+        case .unsupported:
+            channelFallback(title: L10n.string("live.guide.short.unsupported", fallback: "This source does not provide a full schedule yet."),
+                            systemImage: "calendar.badge.exclamationmark")
+                .background(Color(nsColor: .windowBackgroundColor))
+        case .inactive:
+            VStack(spacing: 12) {
+                Text(L10n.string("live.guide.inactive", fallback: "Programme guide is not loading."))
+                Button(L10n.string("common.retry", fallback: "Retry")) { retryGuide() }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .failed:
+            VStack(spacing: 8) {
+            Button(L10n.string("common.retry", fallback: "Retry")) { retryGuide() }
+            channelFallback(title: L10n.string("live.guide.failed", fallback: "The programme guide could not be loaded. Channel playback is still available."),
+                            systemImage: "exclamationmark.triangle")
+                .background(Color(nsColor: .windowBackgroundColor))
+            }
+        default:
+            if modelPresenter.conversionFailed {
+                VStack(spacing: 12) {
+                    Label(L10n.string("live.guide.invalid", fallback: "The programme guide returned an invalid window."),
+                          systemImage: "exclamationmark.triangle")
+                    Button(L10n.string("common.retry", fallback: "Retry")) { retryGuide() }
+                }
+                .padding().background(.regularMaterial)
+            } else if !hasModel {
+                Color.clear.accessibilityHidden(true)
+            } else if case .empty = guide.lifecycle {
                 Label(L10n.string("live.guide.empty", fallback: "No programme entries in this window"),
                       systemImage: "calendar.badge.exclamationmark")
-                    .font(.caption)
-                    .padding(8)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
-                    .padding(10)
+                    .font(.caption).padding(8)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7)).padding(10)
             }
-        case .unsupported:
-            channelFallback(
-                title: L10n.string("live.guide.short.unsupported", fallback: "This source does not provide a full schedule yet."),
-                systemImage: "calendar.badge.exclamationmark"
-            )
-        case .failed:
-            channelFallback(
-                title: L10n.string("live.guide.failed", fallback: "The programme guide could not be loaded. Channel playback is still available."),
-                systemImage: "exclamationmark.triangle"
-            )
-        }
-    }
-
-    private func grid(_ snapshot: EPGGuideSnapshot) -> some View {
-        let revision = snapshot.demandRevision
-        let subtitles = Dictionary(uniqueKeysWithValues: snapshot.rows.compactMap { row in
-            rowSubtitle(row.state).map { (row.id, $0) }
-        })
-        let timeZone = TimeZone.current
-        return Group {
-            if gridModelRevision != revision {
-                AppActivityLabel(L10n.string("live.guide.loading", fallback: "Loading programme guide…"))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let gridModel {
-                TimelineView(.periodic(from: .now, by: 30)) { context in
-                    LiveGuideGridRepresentable(
-                        model: gridModel,
-                        now: context.date,
-                        onProgrammeSelected: { row, programme in
-                            selection = LiveGuideSelection(
-                                rowID: row.id, title: programme.title,
-                                start: programme.start, end: programme.end
-                            )
-                        },
-                        onProgrammeActivated: { row, _ in playChannel(row.id) },
-                        onChannelActivated: { row in playChannel(row.id) },
-                        onVisibleRangeChanged: { range in
-                            guard range != session.guideVisibleRange else { return }
-                            DispatchQueue.main.async {
-                                session.guideVisibleRange = range
-                                requestGuide()
-                            }
-                        }
-                    )
-                }
-            } else {
-                channelFallback(
-                    title: L10n.string("live.guide.invalid", fallback: "The programme guide returned an invalid window."),
-                    systemImage: "exclamationmark.triangle"
-                )
-            }
-        }
-        .task(id: revision) {
-            let candidate = await Task.detached(priority: .userInitiated) {
-                try? LiveGuideGridModel(snapshot: snapshot, timeZone: timeZone,
-                                        subtitles: subtitles)
-            }.value
-            guard !Task.isCancelled,
-                  guide.snapshot?.demandRevision == revision else { return }
-            gridModel = candidate
-            gridModelRevision = revision
         }
     }
 
@@ -575,10 +790,11 @@ struct LiveGuideScreen: View {
     private func detailBar(_ value: LiveGuideSelection) -> some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(value.title).font(.headline).lineLimit(1)
-                Text(value.start, format: .dateTime.hour().minute())
-                    + Text("–")
-                    + Text(value.end, format: .dateTime.hour().minute())
+                Text(value.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                (Text(boundedChannels.first(where: { $0.id == value.rowID })?.name ?? "")
+                    + Text("  ·  ") + Text(value.start, format: .dateTime.hour().minute())
+                    + Text("–") + Text(value.end, format: .dateTime.hour().minute()))
+                    .font(.system(size: 11).monospacedDigit()).foregroundColor(.secondary).lineLimit(1)
             }
             Spacer()
             Button {
@@ -590,7 +806,8 @@ struct LiveGuideScreen: View {
             .disabled(boundedChannels.first(where: { $0.id == value.rowID }).map(canPlay) != true)
         }
         .padding(.horizontal, 16)
-        .frame(height: 58)
+        .frame(height: 64)
+        .background(.regularMaterial)
     }
 
     private var guideDateBinding: Binding<Date> {
@@ -609,22 +826,28 @@ struct LiveGuideScreen: View {
         session.guideWindowStart = session.guideWindowStart.addingTimeInterval(seconds)
     }
 
-    private func requestGuide() {
+    private func retryGuide() {
+        guard session.showsGuide, session.selectedSourceID == sourceID else { return }
+        if demandOwner == nil {
+            let owner = UUID()
+            guard state.acquireLiveGuideDemand(owner: owner, navigation: state.navigation.selection) else { return }
+            demandOwner = owner
+        }
+        recoveryAttempted = false
+        requestGuide(force: true)
+    }
+
+    private func requestGuide(force: Bool = false) {
+        guard let owner = demandOwner, session.showsGuide,
+              session.selectedSourceID == sourceID else { return }
         let bounded = boundedChannels
         guard !bounded.isEmpty else {
-            state.clearLiveGuideDemand()
+            state.clearLiveGuideDemand(owner: owner)
             return
         }
-        let lower = min(max(0, session.guideVisibleRange.lowerBound), bounded.count - 1)
-        let upper = min(bounded.count, max(lower + 1, session.guideVisibleRange.upperBound))
-        state.setLiveGuideDemand(
-            source: sourceID,
-            channels: bounded,
-            windowStart: session.guideWindowStart,
-            windowEnd: windowEnd,
-            visibleRange: lower..<upper,
-            focusedChannelID: selection?.rowID
-        )
+        state.setLiveGuideDemand(owner: owner, source: sourceID, channels: bounded,
+            windowStart: session.guideWindowStart, windowEnd: windowEnd,
+            visibleRange: session.guideVisibleRange, force: force)
     }
 
     private func canPlay(_ channel: LiveChannel) -> Bool {
@@ -717,7 +940,6 @@ struct LiveToolbarView: View {
                         selectedColor: .yellow
                     )
                 guideModeButton
-                    .primaryToolbarIconControl(isSelected: session.showsGuide)
                 if !deletedChannels.isEmpty {
                     deletedChannelsMenu(
                         deletedChannels,
@@ -740,7 +962,6 @@ struct LiveToolbarView: View {
                         selectedColor: .yellow
                     )
                 guideModeButton
-                    .primaryToolbarIconControl(isSelected: session.showsGuide)
                 if !deletedChannels.isEmpty {
                     deletedChannelsMenu(
                         deletedChannels,
@@ -761,8 +982,7 @@ struct LiveToolbarView: View {
             PrimaryToolbarDivider()
             LiveBackgroundActivityControl(epgState: state.liveEPG,
                 validationToolbar: state.liveValidationActivity.toolbar, source: source)
-            refreshControl(sourceID: source.id)
-                .primaryToolbarIconControl()
+            LiveRefreshToolbarControl(guide: state.liveGuide, session: session, source: source)
         }
     }
 
@@ -856,7 +1076,7 @@ struct LiveToolbarView: View {
             groupMenu(groups, compact: false)
             Divider()
             favoritesButton
-            guideModeButton
+            guideModeMenuItem
             if !deletedChannels.isEmpty {
                 deletedChannelsMenu(
                     deletedChannels,
@@ -886,20 +1106,26 @@ struct LiveToolbarView: View {
         )
     }
 
-    private var guideModeButton: some View {
-        Button {
-            session.showsGuide.toggle()
-        } label: {
-            Label(
-                session.showsGuide
-                    ? L10n.string("live.channels", fallback: "Channels")
-                    : L10n.string("live.guide", fallback: "Programme Guide"),
-                systemImage: session.showsGuide ? "square.grid.2x2" : "calendar"
-            )
-        }
-        .help(session.showsGuide
+    private var guideModeHelp: String {
+        session.showsGuide
             ? L10n.string("live.channels.show", fallback: "Show channel cards")
-            : L10n.string("live.guide.show", fallback: "Show programme guide"))
+            : L10n.string("live.guide.show", fallback: "Show programme guide")
+    }
+
+    private func switchDisplayMode() {
+        session.setDisplayMode(session.showsGuide ? .channels : .guide)
+    }
+
+    private var guideModeButton: some View {
+        BrowserToolbarModeButton(selected: session.showsGuide, help: guideModeHelp,
+                                 action: switchDisplayMode)
+            .frame(width: PrimaryToolbarMetrics.iconControlSize, height: PrimaryToolbarMetrics.iconControlSize)
+    }
+
+    private var guideModeMenuItem: some View {
+        Button(action: switchDisplayMode) {
+            Label(guideModeHelp, systemImage: "calendar")
+        }
     }
 
     private func deletedChannelsMenu(
@@ -939,22 +1165,6 @@ struct LiveToolbarView: View {
             )
         }
         .help(L10n.string("live.deleted.help", fallback: "View or restore deleted channels"))
-    }
-
-    @ViewBuilder
-    private func refreshControl(sourceID: LiveSourceID) -> some View {
-        if state.isLiveCatalogLoading(sourceID) {
-            AppActivityIndicator(size: .small)
-                .help(L10n.string("live.refreshing", fallback: "Refreshing Live TV source"))
-        } else {
-            Button {
-                Task { await state.refreshLiveSource(sourceID) }
-            } label: {
-                Label(L10n.string("live.refresh", fallback: "Refresh Live TV Source"), systemImage: "arrow.clockwise")
-            }
-            .disabled(selectedSource?.canRefresh != true)
-            .help(L10n.string("live.refresh-current", fallback: "Refresh Current Live TV Source"))
-        }
     }
 
     @ViewBuilder
@@ -1203,8 +1413,11 @@ private struct LiveChannelCard: View {
     let sourceID: LiveSourceID
     let sourceName: String
     let importedCatalog: AcceptedImportedCatalog?
+    @ObservedObject var session: LiveBrowserSession
 
-    @State private var isHovering = false
+    let isHighlighted: Bool
+    let onHover: (Bool) -> Void
+    let onSelect: () -> Void
     @State private var showsDeleteConfirmation = false
 
     var body: some View {
@@ -1265,33 +1478,33 @@ private struct LiveChannelCard: View {
         .contentShape(Rectangle())
         .background {
             RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(Color.accentColor.opacity(isHovering ? 0.055 : 0))
+                .fill(Color.accentColor.opacity(isHighlighted ? 0.055 : 0))
                 .padding(-6)
         }
         .overlay {
             RoundedRectangle(cornerRadius: 13, style: .continuous)
                 .stroke(
-                    Color.accentColor.opacity(isHovering ? 0.30 : 0),
+                    Color.accentColor.opacity(isHighlighted ? 0.30 : 0),
                     lineWidth: 1
                 )
                 .padding(-6)
         }
-        .scaleEffect(isHovering ? 1.015 : 1)
-        .offset(y: isHovering ? -1 : 0)
+        .scaleEffect(isHighlighted ? 1.015 : 1)
+        .offset(y: isHighlighted ? -1 : 0)
         .shadow(
-            color: Color.black.opacity(isHovering ? 0.11 : 0),
-            radius: isHovering ? 8 : 0,
-            y: isHovering ? 4 : 0
+            color: Color.black.opacity(isHighlighted ? 0.11 : 0),
+            radius: isHighlighted ? 8 : 0,
+            y: isHighlighted ? 4 : 0
         )
-        .zIndex(isHovering ? 1 : 0)
-        .animation(.easeOut(duration: 0.14), value: isHovering)
+        .zIndex(isHighlighted ? 1 : 0)
+        .animation(.easeOut(duration: 0.14), value: isHighlighted)
         .onAppear {
             state.setEPGChannelVisibility(source: sourceID, channel: channel, visible: true)
         }
         .onDisappear {
             state.setEPGChannelVisibility(source: sourceID, channel: channel, visible: false)
         }
-        .onHover { isHovering = $0 }
+        .onHover(perform: onHover)
         .contextMenu {
             routeMenuItems
             Divider()
@@ -1380,8 +1593,8 @@ private struct LiveChannelCard: View {
             ]
         }
         return [
-            Color(red: 0.94, green: 0.95, blue: 0.97),
-            Color(red: 0.82, green: 0.85, blue: 0.90)
+            Color(red: 0.82, green: 0.85, blue: 0.90),
+            Color(red: 0.68, green: 0.73, blue: 0.81)
         ]
     }
 
@@ -1463,20 +1676,27 @@ private struct LiveChannelCard: View {
     }
 
     private func playDefaultRoute() {
-        if case .imported = sourceID {
-            guard let selection = importedCatalog?.selections(for: channel).first else { return }
-            play(selection)
-        } else {
-            playNative(channel.streams.first)
-        }
+        onSelect()
+        session.playDefault(channel: channel, source: sourceID, catalog: importedCatalog,
+                            channels: navigationChannels, state: state)
     }
 
     private func play(_ selection: ImportedRouteSelection) {
+        session.remember(
+            channel: channel,
+            source: sourceID,
+            route: session.importedRouteIdentity(for: selection.stream, in: channel)
+        )
         Task { await state.playImportedLive(selection, navigationChannels: navigationChannels) }
     }
 
     private func playNative(_ stream: LiveStream?) {
         guard let stream else { return }
+        session.remember(
+            channel: channel,
+            source: sourceID,
+            route: session.nativeRouteIdentity(for: stream)
+        )
         Task {
             await state.playLive(
                 channel: channel,
@@ -1771,5 +1991,42 @@ struct LiveSourceImportSheet: View {
                 importPhase = nil
             }
         }
+    }
+}
+
+/// The same native 32-point control remains mounted across all refresh phases.
+/// Observe the guide directly; its publications do not pass through AppState.
+private struct LiveRefreshToolbarControl: View {
+    @EnvironmentObject private var state: AppState
+    @ObservedObject var guide: LiveGuideState
+    @ObservedObject var session: LiveBrowserSession
+    let source: LiveSourceDescriptor
+
+    var body: some View {
+        BrowserRefreshToolbarControl(
+            isLoading: state.isLiveCatalogLoading(source.id) || (session.showsGuide && guide.isRefreshing),
+            error: refreshError,
+            title: L10n.string("common.refresh", fallback: "Refresh")
+        ) {
+            session.refresh(source: source, state: state)
+        }
+        .disabled(!source.canRefresh && !session.showsGuide)
+    }
+
+    private var refreshError: String? {
+        if session.showsGuide {
+            switch guide.lifecycle {
+            case .failed:
+                return L10n.string("live.guide.failed", fallback: "The programme guide could not be loaded. Channel playback is still available.")
+            case .content(let value) where !value.failures.isEmpty:
+                return L10n.string("live.guide.partial", fallback: "%d rows unavailable", value.failures.count)
+            case .content(let value) where value.refreshPhase == .backoff:
+                return L10n.string("live.guide.stale", fallback: "Saved schedule")
+            case .empty(let value) where value.refreshPhase == .backoff:
+                return L10n.string("live.guide.stale", fallback: "Saved schedule")
+            default: break
+            }
+        }
+        return state.liveCatalogError(for: source.id)
     }
 }

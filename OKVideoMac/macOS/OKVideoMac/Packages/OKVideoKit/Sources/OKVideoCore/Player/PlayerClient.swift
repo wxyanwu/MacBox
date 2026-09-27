@@ -46,6 +46,8 @@ public struct PlayerSnapshot: Equatable, Sendable {
     public var historyProgressIsReliable: Bool = true
     public var status: PlayerStatus
     public var position: TimeInterval
+    /// Monotonic time when the player observed position; independent of UI delivery.
+    public var positionSampleUptime: TimeInterval? = nil
     public var duration: TimeInterval
     public var bufferedPercent: Double
     public var networkSpeedBytesPerSecond: Int64

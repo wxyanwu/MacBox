@@ -646,8 +646,13 @@ int okmpv_render_skip(OKMPVRenderContext *render_context) {
         return MPV_ERROR_INVALID_PARAMETER;
     }
     int skip = 1;
+    // No frame is displayed on a suspended/hidden drawable. A skipped frame
+    // must still service advanced control, without blocking AppKit until its
+    // presentation deadline. Normal visible rendering keeps its timing.
+    int block_for_target_time = 0;
     mpv_render_param parameters[] = {
         {MPV_RENDER_PARAM_SKIP_RENDERING, &skip},
+        {MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, &block_for_target_time},
         {MPV_RENDER_PARAM_INVALID, NULL}
     };
     int result = mpv_render_context_render(render_context->context, parameters);

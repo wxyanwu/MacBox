@@ -125,7 +125,9 @@ enum PlayerLoadTimeoutPolicy {
 enum MPVTVBoxPlaybackPolicy {
     static func loadCommand(
         for media: ResolvedMedia,
-        omitFormatHint: Bool = false
+        omitFormatHint: Bool = false,
+        startPosition: TimeInterval? = nil,
+        networkOptions: [(String, String)] = []
     ) -> [String] {
         let source: String
         if media.compatibilityPolicy == .nativeXtreamLive, let selection = media.hlsStartupSelection {
@@ -135,6 +137,14 @@ enum MPVTVBoxPlaybackPolicy {
         var options = media.transportProfile == .tvBox
             ? fileOptions(for: media, omitFormatHint: omitFormatHint)
             : []
+        if media.transportProfile == .tvBox {
+            // File-local options cannot leak the prior episode's bookmark.
+            // Keep decoding paused until file-loaded; start is applied by mpv
+            // while opening the media, rather than by a second visible seek.
+            let position = startPosition.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? 0
+            options.append("start=" + String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), position))
+            options.append("pause=yes")
+        }
         if media.compatibilityPolicy == .nativeXtreamLive, media.hlsStartupSelection != nil {
             options.append("demuxer-lavf-format=hls")
         }
@@ -142,6 +152,7 @@ enum MPVTVBoxPlaybackPolicy {
            media.url.scheme?.lowercased() == "https" {
             options.append("tls-verify=yes")
         }
+        options += networkOptions.map { MPVFileOptionEncoder.encode(name: $0.0, value: $0.1) }
         guard !options.isEmpty else { return command }
         command.append("-1")
         command.append(options.joined(separator: ","))
@@ -470,10 +481,12 @@ final class PlayerPlaybackStartSignal {
     private var requestID: UUID?
     private var fileLoaded = false
     private var wasClaimed = false
+    private var requiresTimelineProgress = false
 
-    func reset(requestID: UUID) {
+    func reset(requestID: UUID, requiresTimelineProgress: Bool = false) {
         lock.lock()
         self.requestID = requestID
+        self.requiresTimelineProgress = requiresTimelineProgress
         fileLoaded = false
         wasClaimed = false
         lock.unlock()
@@ -485,10 +498,11 @@ final class PlayerPlaybackStartSignal {
         lock.unlock()
     }
 
-    func claimPlaybackStarted() -> UUID? {
+    func claimPlaybackStarted(fromRenderSwap: Bool = false) -> UUID? {
         lock.lock()
         defer { lock.unlock() }
-        guard fileLoaded, !wasClaimed, let requestID else { return nil }
+        guard fileLoaded, !wasClaimed, let requestID,
+              !(fromRenderSwap && requiresTimelineProgress) else { return nil }
         wasClaimed = true
         return requestID
     }
@@ -505,6 +519,17 @@ final class PlayerPlaybackStartSignal {
         fileLoaded = false
         wasClaimed = false
         lock.unlock()
+    }
+}
+
+enum PlayerSeekCompletionPolicy {
+    static func accepts(target: TimeInterval, position: TimeInterval,
+                        nativeSeeking: Bool, pausedForCache: Bool) -> Bool {
+        // Keyframe seeks may land before the requested time. The position is
+        // read synchronously from mpv after the command, never from an old
+        // queued time-pos notification. Cache/restart alone cannot confirm it.
+        target.isFinite && position.isFinite && target >= 0 && position >= 0
+            && !nativeSeeking && !pausedForCache && abs(position - target) <= 5
     }
 }
 
@@ -754,14 +779,15 @@ struct PlayerHistoryProgressCheckpoint {
     private var owner: UUID?
     private var progress: (position: TimeInterval, duration: TimeInterval)?
     mutating func reset(owner: UUID) { self.owner = owner; progress = nil }
+    mutating func transferOwnership(to owner: UUID) { self.owner = owner }
     static func isReliable(_ snapshot: PlayerSnapshot) -> Bool {
-        if case .failed = snapshot.status { return false }
+        guard snapshot.status == .playing || snapshot.status == .paused || snapshot.status == .ended else { return false }
         return snapshot.historyProgressIsReliable && !snapshot.isSeeking
     }
     mutating func observe(_ snapshot: PlayerSnapshot, owner: UUID?) {
         guard owner == self.owner, owner != nil, Self.isReliable(snapshot),
               snapshot.position.isFinite, snapshot.duration.isFinite,
-              snapshot.position >= 0, snapshot.duration > 0 else { return }
+              snapshot.position >= 0, snapshot.duration >= 0 else { return }
         switch snapshot.status {
         case .playing, .paused, .ended: progress = (snapshot.position, snapshot.duration)
         default: break
@@ -770,8 +796,9 @@ struct PlayerHistoryProgressCheckpoint {
     func resolve(position: TimeInterval, duration: TimeInterval, reliable: Bool,
                  owner: UUID) -> (position: TimeInterval, duration: TimeInterval)? {
         guard position.isFinite, duration.isFinite, position >= 0, duration >= 0 else { return nil }
+        guard owner == self.owner else { return nil }
         if reliable { return (position, duration) }
-        return owner == self.owner ? progress : nil
+        return progress
     }
 }
 
@@ -945,6 +972,8 @@ final class MPVPlayerClient: PlayerClient {
     private var seekReadWindow: PlayerSeekReadWindow?
     private var currentMediaTransportProfile: MediaTransportProfile = .standard
     private var currentMedia: ResolvedMedia?
+    private var currentNetworkOptions: [(String, String)] = []
+    private let mediaProxyResolver: @Sendable (ResolvedMedia) -> MediaProxyDecision?
     private var tvBoxFormatFallbackAvailable = false
     private var playbackRequestGeneration: UInt64 = 0
     private var postSeekEndGuard = PlayerPostSeekEndGuard()
@@ -956,6 +985,7 @@ final class MPVPlayerClient: PlayerClient {
     private var renderContextCount = 0
     private var pendingLoad: (
         identifier: UUID,
+        supportsCancellation: Bool,
         continuation: CheckedContinuation<Void, Error>
     )?
     private var lastEmittedSnapshot: PlayerSnapshot?
@@ -968,8 +998,14 @@ final class MPVPlayerClient: PlayerClient {
         teardownMode: PlayerTeardownMode = .warmStop,
         performanceProfile: MPVPlaybackPerformanceProfile = .configured(),
         renderControlMode: MPVRenderControlMode = .configured(),
-        compatibilityPolicy: PlaybackCompatibilityPolicy = .existing
+        compatibilityPolicy: PlaybackCompatibilityPolicy = .existing,
+        audioPreference: PlaybackAudioPreference = .init(),
+        mediaProxyResolver: @escaping @Sendable (ResolvedMedia) -> MediaProxyDecision? = {
+            PlayerMediaNetworkPolicy.decision(for: $0)
+        }
     ) throws {
+        snapshot = PlayerSnapshot(volume: audioPreference.volume, isMuted: audioPreference.muted)
+        self.mediaProxyResolver = mediaProxyResolver
         self.compatibilityPolicy = compatibilityPolicy
         self.teardownMode = teardownMode
         self.performanceProfile = performanceProfile
@@ -1027,6 +1063,9 @@ final class MPVPlayerClient: PlayerClient {
                 // decoders to allocate caller-compatible frame surfaces.
                 try setOption("vd-lavc-dr", value: "yes", client: created)
             }
+            try setOption("volume-max", value: "130", client: created)
+            try setOption("volume", value: String(audioPreference.volume), client: created)
+            try setOption("mute", value: audioPreference.muted ? "yes" : "no", client: created)
             try setOption("audio-client-name", value: "OKVideoMac", client: created)
             // Prefer full Chinese subtitles over the short English "forced"
             // track that many remuxes mark as the container default.
@@ -1107,15 +1146,16 @@ final class MPVPlayerClient: PlayerClient {
             throw AppError.playback("Playback policy requires a fresh player instance.")
         }
         try validate(media: media)
-        let proxyDecision = compatibilityPolicy == .nativeXtreamLive
-            ? SystemMediaProxyResolver.resolve(for: media.hlsStartupSelection?.routingURL ?? media.url) : nil
+        let proxyDecision = mediaProxyResolver(media)
+        let supportsCancellation = PlayerMediaNetworkPolicy.usesSystemProxy(media)
         let loadTimeoutSeconds = PlayerLoadTimeoutPolicy.seconds(for: media)
         let cancellation = NativeLoadCancellation()
+        let identifier = UUID()
         try await withTaskCancellationHandler {
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<Void, Error>) in
             queue.async {
-                if self.compatibilityPolicy == .nativeXtreamLive, cancellation.isCancelled {
+                if supportsCancellation, cancellation.isCancelled {
                     continuation.resume(throwing: CancellationError())
                     return
                 }
@@ -1125,7 +1165,6 @@ final class MPVPlayerClient: PlayerClient {
                     )
                     return
                 }
-                let identifier = UUID()
                 if let pending = self.pendingLoad {
                     self.pendingLoad = nil
                     pending.continuation.resume(
@@ -1134,6 +1173,7 @@ final class MPVPlayerClient: PlayerClient {
                 }
                 let previousRequestID = self.currentRequestID
                 let previousMedia = self.currentMedia
+                let previousNetworkOptions = self.currentNetworkOptions
                 let previousTransportProfile = self.currentMediaTransportProfile
                 let previousSnapshot = self.snapshot
                 let previousDidEmitEnded = self.didEmitEndedForCurrentMedia
@@ -1142,7 +1182,7 @@ final class MPVPlayerClient: PlayerClient {
                 self.playbackRequestGeneration &+= 1
                 self.replacingMediaRequestID = self.activeMediaRequestID
                 self.currentRequestID = requestID
-                self.pendingLoad = (identifier, continuation)
+                self.pendingLoad = (identifier, supportsCancellation, continuation)
                 do {
                     try self.applyViewport(
                         aspectRatio: aspectRatio,
@@ -1150,14 +1190,8 @@ final class MPVPlayerClient: PlayerClient {
                         client: client
                     )
                     if let proxyDecision {
-                        for option in proxyDecision.mpvOptions {
-                            try self.setPropertyString(
-                                option.0, value: option.1, client: client,
-                                operation: "Configure Native Xtream transport"
-                            )
-                        }
                         PlayerExperimentLogger.lifecycle(
-                            "xtream transport=\(proxyDecision.diagnosticMode)",
+                            "media transport=\(proxyDecision.diagnosticMode) scope=file",
                             playerID: self.renderOwnerID, requestID: requestID,
                             mode: self.teardownMode
                         )
@@ -1169,6 +1203,7 @@ final class MPVPlayerClient: PlayerClient {
                     self.pendingSubtitles = media.subtitles
                     self.currentMediaTransportProfile = media.transportProfile
                     self.currentMedia = media
+                    self.currentNetworkOptions = proxyDecision?.mpvOptions ?? []
                     self.tvBoxFormatFallbackAvailable = media.transportProfile == .tvBox
                         && MPVTVBoxPlaybackPolicy.formatHint(for: media) != nil
                     self.postSeekEndGuard.reset()
@@ -1179,8 +1214,9 @@ final class MPVPlayerClient: PlayerClient {
                     self.didEmitFileLoadedForCurrentMedia = false
                     self.startupTimelinePosition = nil
                     self.diagnosticsGeneration = UUID()
-                    self.playbackStartSignal.reset(requestID: requestID)
+                    self.playbackStartSignal.reset(requestID: requestID, requiresTimelineProgress: media.transportProfile == .tvBox)
                     self.snapshot.position = 0
+                    self.snapshot.positionSampleUptime = nil
                     self.snapshot.duration = 0
                     self.snapshot.bufferedPercent = 0
                     self.snapshot.networkSpeedBytesPerSecond = 0
@@ -1196,7 +1232,10 @@ final class MPVPlayerClient: PlayerClient {
                         playerID: self.renderOwnerID
                     )
                     try self.command(
-                        MPVTVBoxPlaybackPolicy.loadCommand(for: media),
+                        MPVTVBoxPlaybackPolicy.loadCommand(
+                            for: media, startPosition: self.pendingStartPosition,
+                            networkOptions: self.currentNetworkOptions
+                        ),
                         client: client
                     )
                 } catch {
@@ -1208,6 +1247,7 @@ final class MPVPlayerClient: PlayerClient {
                     // identity and snapshot so AppState can keep its lease.
                     self.currentRequestID = previousRequestID
                     self.currentMedia = previousMedia
+                    self.currentNetworkOptions = previousNetworkOptions
                     self.currentMediaTransportProfile = previousTransportProfile
                     self.snapshot = previousSnapshot
                     self.didEmitEndedForCurrentMedia = previousDidEmitEnded
@@ -1237,20 +1277,23 @@ final class MPVPlayerClient: PlayerClient {
             }
         }
         } onCancel: {
-            if self.compatibilityPolicy == .nativeXtreamLive {
+            if supportsCancellation {
                 cancellation.cancel()
-                self.cancelPendingNativeLoad(requestID: requestID)
+                self.cancelPendingMediaLoad(requestID: requestID, loadIdentifier: identifier)
             }
         }
     }
 
-    /// Breaks the lifecycle barrier only for the old Native Xtream request.
-    /// It cannot stop a successor or change ordinary VOD/Live cancellation.
-    func cancelPendingNativeLoad(requestID: UUID?) {
-        guard compatibilityPolicy == .nativeXtreamLive, let requestID else { return }
+    /// Lifecycle calls retire the owned request before its successor is queued.
+    /// Task cancellation additionally binds the exact load, since a retry may
+    /// reuse a request ID. Unmanaged providers keep their existing behavior.
+    func cancelPendingMediaLoad(requestID: UUID?, loadIdentifier: UUID? = nil) {
+        guard let requestID else { return }
         queue.async {
             guard self.currentRequestID == requestID,
-                  self.pendingLoad != nil, let client = self.client else { return }
+                  let pending = self.pendingLoad, pending.supportsCancellation,
+                  loadIdentifier == nil || pending.identifier == loadIdentifier,
+                  let client = self.client else { return }
             self.completeLoad(.failure(CancellationError()))
             _ = try? self.command(["stop"], client: client)
         }
@@ -1377,13 +1420,11 @@ final class MPVPlayerClient: PlayerClient {
                               self.completedTVBoxSeekGeneration
                                 != tvBoxGeneration,
                               self.snapshot.isSeeking else { return }
-                        // Do not issue a compensating seek. This is only a UI
-                        // state failsafe for relays that omit one mpv property
-                        // transition while video has already restarted.
+                        self.refreshTVBoxSeekCompletion()
+                        guard self.snapshot.seekTarget != nil else { return }
                         self.logSeekObservation(phase: "seek_ui_deadline")
-                        self.completedTVBoxSeekGeneration = tvBoxGeneration
                         self.snapshot.isSeeking = false
-                        self.snapshot.seekTarget = nil
+                        self.snapshot.status = .failed(L10n.string("player.seek.wait-timeout", fallback: "Seeking is taking too long. Retry this position or choose another position."))
                         self.emitSnapshot()
                     }
                 }
@@ -1552,6 +1593,12 @@ final class MPVPlayerClient: PlayerClient {
     }
 
 #if DEBUG || OKVIDEO_PERFORMANCE_TEST
+    /// Only invoked by the explicit local calibration test; never by playback.
+    func enableLocalRenderDiagnosticsForTesting() async throws {
+        try await setStringProperty("terminal", value: "yes", operation: "Enable local test diagnostics")
+        try await setStringProperty("msg-level", value: "all=warn", operation: "Enable local test warnings")
+    }
+
     func diagnosticPropertyForTesting(_ name: String) async -> String? {
         await withCheckedContinuation { continuation in
             queue.async {
@@ -1672,7 +1719,7 @@ final class MPVPlayerClient: PlayerClient {
 
     func reportSwap(_ renderContext: OpaquePointer) {
         library.renderReportSwap(renderContext)
-        if let requestID = playbackStartSignal.claimPlaybackStarted() {
+        if let requestID = playbackStartSignal.claimPlaybackStarted(fromRenderSwap: true) {
             PlayerStartupTraceStore.shared.markFirstRenderSwap(
                 playerID: renderOwnerID
             )
@@ -2197,17 +2244,17 @@ final class MPVPlayerClient: PlayerClient {
             }
             activeMediaRequestID = currentRequestID
             pendingEOFSignal = nil
-            // `keep-open=yes` can preserve a paused EOF state across a
-            // loadfile/replace transition. Clear it at the native boundary;
-            // AppState performs a second autoplay handshake after load returns.
+            // One native boundary owns autoplay. TVBox has already applied
+            // its start position while paused; there is no post-start seek.
             try? "pause".withCString { namePointer in
                 try library.checked(
                     library.setPropertyFlag(client, namePointer, 0),
                     operation: L10n.string("player.operation.start-new-media", fallback: "Start new media")
                 )
             }
-            snapshot.status = .playing
-            if let position = pendingStartPosition {
+            snapshot.status = currentMediaTransportProfile == .tvBox
+                ? (snapshot.isPausedForCache ? .buffering : .loading) : .playing
+            if currentMediaTransportProfile != .tvBox, let position = pendingStartPosition {
                 // History restore and quality switching are timeline seeks too.
                 // Keep them on the remote-friendly keyframe path instead of
                 // silently reintroducing an exact `time-pos` property seek.
@@ -2294,7 +2341,9 @@ final class MPVPlayerClient: PlayerClient {
                         try command(
                             MPVTVBoxPlaybackPolicy.loadCommand(
                                 for: currentMedia,
-                                omitFormatHint: true
+                                omitFormatHint: true,
+                                startPosition: pendingStartPosition,
+                                networkOptions: currentNetworkOptions
                             ),
                             client: client
                         )
@@ -2418,12 +2467,12 @@ final class MPVPlayerClient: PlayerClient {
         case NativeEvent.propertyChange:
             processProperty(event)
         case NativeEvent.seek:
-            if currentMediaTransportProfile == .tvBox,
-               completedTVBoxSeekGeneration
-                == postSeekEndGuard.latestSeekGeneration {
-                break
-            }
-            snapshot.isSeeking = true
+            if currentMediaTransportProfile == .tvBox {
+                refreshTVBoxSeekCompletion()
+                if snapshot.seekTarget == nil, let client {
+                    snapshot.isSeeking = propertyString("seeking", client: client) == "yes"
+                }
+            } else { snapshot.isSeeking = true }
             emitSnapshot()
         case NativeEvent.playbackRestart:
             let activeSeekGeneration = postSeekEndGuard
@@ -2441,10 +2490,11 @@ final class MPVPlayerClient: PlayerClient {
             logSeekObservation(phase: "seek_playback_restart")
             logSeekReadState(phase: "seek_read_restart")
             if currentMediaTransportProfile == .tvBox {
-                completedTVBoxSeekGeneration = activeSeekGeneration
+                refreshTVBoxSeekCompletion()
+            } else {
+                snapshot.isSeeking = false
+                snapshot.seekTarget = nil
             }
-            snapshot.isSeeking = false
-            snapshot.seekTarget = nil
             emitSnapshot()
         case NativeEvent.queueOverflow:
             continuation.yield(
@@ -2476,6 +2526,24 @@ final class MPVPlayerClient: PlayerClient {
         waiters.forEach { $0.resume() }
     }
 
+    private func refreshTVBoxSeekCompletion() {
+        guard currentMediaTransportProfile == .tvBox, !isReplacingMedia,
+              let client, let target = snapshot.seekTarget,
+              let generation = postSeekEndGuard.activeSeekGeneration(requestGeneration: playbackRequestGeneration),
+              let position = propertyString("time-pos", client: client).flatMap(Double.init),
+              let seeking = propertyString("seeking", client: client),
+              let cachePause = propertyString("paused-for-cache", client: client),
+              PlayerSeekCompletionPolicy.accepts(target: target, position: position,
+                nativeSeeking: seeking != "no", pausedForCache: cachePause != "no") else { return }
+        snapshot.position = position
+        snapshot.positionSampleUptime = ProcessInfo.processInfo.systemUptime
+        snapshot.isSeeking = false
+        snapshot.seekTarget = nil
+        completedTVBoxSeekGeneration = generation
+        snapshot.status = propertyString("pause", client: client) == "yes" ? .paused : .playing
+        logSeekObservation(phase: "seek_position_confirmed")
+    }
+
     private func processProperty(_ event: NativeMPVEvent) {
         guard let propertyName = event.propertyName else { return }
         let name = String(cString: propertyName)
@@ -2483,6 +2551,8 @@ final class MPVPlayerClient: PlayerClient {
         case "time-pos":
             let position = max(0, event.doubleValue)
             snapshot.position = position
+            snapshot.positionSampleUptime = ProcessInfo.processInfo.systemUptime
+            if currentMediaTransportProfile == .tvBox { refreshTVBoxSeekCompletion() }
             let wasProtectingSeek = postSeekEndGuard.isProtecting(requestGeneration: playbackRequestGeneration)
             postSeekEndGuard.observePosition(
                 position,
@@ -2494,8 +2564,12 @@ final class MPVPlayerClient: PlayerClient {
             }
             if let previous = startupTimelinePosition {
                 if abs(position - previous) >= 0.05,
+                   !snapshot.isSeeking, !snapshot.isPausedForCache,
                    let requestID = playbackStartSignal
                     .claimPlaybackStarted() {
+                    if snapshot.status == .loading || snapshot.status == .buffering {
+                        snapshot.status = .playing
+                    }
                     PlayerStartupTraceStore.shared.markTimelineProgress(
                         playerID: renderOwnerID
                     )
@@ -2540,25 +2614,18 @@ final class MPVPlayerClient: PlayerClient {
             } else if snapshot.status == .buffering {
                 snapshot.status = .playing
             }
+            if currentMediaTransportProfile == .tvBox { refreshTVBoxSeekCompletion() }
         case "seeking":
-            let isSeeking = event.flagValue != 0
-            if currentMediaTransportProfile == .tvBox,
-               isSeeking,
-               completedTVBoxSeekGeneration
-                == postSeekEndGuard.latestSeekGeneration {
-                // mpv can deliver the observed `seeking=yes` property after
-                // PLAYBACK_RESTART. Reopening the state here made the host's
-                // 10-second watchdog report a false timeout even though video
-                // was already running.
-                break
-            }
-            snapshot.isSeeking = isSeeking
-            if !isSeeking {
-                if currentMediaTransportProfile == .tvBox {
-                    completedTVBoxSeekGeneration = postSeekEndGuard
-                        .latestSeekGeneration
+            if currentMediaTransportProfile == .tvBox {
+                if snapshot.seekTarget != nil { refreshTVBoxSeekCompletion() }
+                else if let client {
+                    // Read current native state instead of trusting a queued
+                    // property notification from the preceding seek.
+                    snapshot.isSeeking = propertyString("seeking", client: client) == "yes"
                 }
-                snapshot.seekTarget = nil
+            } else {
+                snapshot.isSeeking = event.flagValue != 0
+                if !snapshot.isSeeking { snapshot.seekTarget = nil }
             }
         case "cache-buffering-state":
             snapshot.bufferedPercent = min(max(event.doubleValue, 0), 100)
@@ -2974,8 +3041,12 @@ final class PlayerLifecycleController {
     var transitionSuspensionForTesting:
         ((PlayerLifecycleTransitionKind) async -> Void)?
 
-    private var rememberedVolume: Double = 100
-    private var rememberedMuted = false
+    private let audioPreferences: PlaybackAudioPreferenceStore
+    private var audioApplication: Task<Void, Error>?
+    private var audioApplicationID: UUID?
+    var audioCommandSuspensionForTesting: (() async throws -> Void)?
+    var audioPreference: PlaybackAudioPreference { audioPreferences.value }
+    var audioPreferenceRevision: UInt64 { audioPreferences.revision }
     private var rememberedSpeed: Double = 1
     private var rememberedSubtitleDelay: TimeInterval = 0
     private var rememberedSubtitleScale: Double = 1
@@ -2985,8 +3056,9 @@ final class PlayerLifecycleController {
     private var rememberedAspectRatio: String?
     private var rememberedHardwareDecoding = true
 
-    init(mode: PlayerTeardownMode = .configured()) {
+    init(mode: PlayerTeardownMode = .configured(), audioPreferences: PlaybackAudioPreferenceStore? = nil) {
         self.mode = mode
+        self.audioPreferences = audioPreferences ?? PlaybackAudioPreferenceStore()
         var captured: AsyncStream<PlayerEvent>.Continuation!
         events = AsyncStream(bufferingPolicy: .bufferingNewest(64)) {
             captured = $0
@@ -2994,7 +3066,7 @@ final class PlayerLifecycleController {
         continuation = captured
 
         do {
-            let player = try MPVPlayerClient(teardownMode: mode)
+            let player = try MPVPlayerClient(teardownMode: mode, audioPreference: self.audioPreference)
             currentClient = player
             startForwardingEvents(from: player)
         } catch {
@@ -3087,7 +3159,7 @@ final class PlayerLifecycleController {
                 requestID: requestID,
                 mode: self.mode
             )
-            let player = try MPVPlayerClient(teardownMode: self.mode, compatibilityPolicy: compatibilityPolicy)
+            let player = try MPVPlayerClient(teardownMode: self.mode, compatibilityPolicy: compatibilityPolicy, audioPreference: self.audioPreference)
             do {
                 try await self.applyRememberedSettings(to: player)
                 guard self.ownsPlaybackIntent(
@@ -3123,7 +3195,7 @@ final class PlayerLifecycleController {
     ) async {
         let ownership = ownershipForRelease(requestID: requestID)
         guard let ownership else { return }
-        renderPlayer?.cancelPendingNativeLoad(requestID: ownership.requestID)
+        renderPlayer?.cancelPendingMediaLoad(requestID: ownership.requestID)
         let retention = max(0, warmRetentionSeconds)
         do {
             try await serializeLifecycleTransition { [weak self] in
@@ -3174,7 +3246,7 @@ final class PlayerLifecycleController {
         guard let ownership = ownershipForRelease(requestID: requestID) else {
             return
         }
-        renderPlayer?.cancelPendingNativeLoad(requestID: ownership.requestID)
+        renderPlayer?.cancelPendingMediaLoad(requestID: ownership.requestID)
         _ = try? await serializeLifecycleTransition { [weak self] in
             guard let self,
                   self.ownsPlaybackIntent(
@@ -3224,6 +3296,9 @@ final class PlayerLifecycleController {
                     throw CancellationError()
                 }
             }
+            try await self.applyAudioPreference()
+            guard self.ownsPlaybackIntent(requestID: requestID, generation: generation),
+                  self.renderPlayer === player else { throw CancellationError() }
             try await player.load(
                 media,
                 startPosition: startPosition,
@@ -3238,6 +3313,7 @@ final class PlayerLifecycleController {
     }
 
     func play() async throws {
+        try await applyAudioPreference()
         try await requireClient().play()
     }
 
@@ -3246,11 +3322,11 @@ final class PlayerLifecycleController {
     }
 
     func stop(ifOwnedBy requestID: UUID) async {
-        if playbackIntentRequestID == requestID { renderPlayer?.cancelPendingNativeLoad(requestID: requestID) }
+        if playbackIntentRequestID == requestID { renderPlayer?.cancelPendingMediaLoad(requestID: requestID) }
         guard let ownership = ownershipForRelease(requestID: requestID) else {
             return
         }
-        renderPlayer?.cancelPendingNativeLoad(requestID: ownership.requestID)
+        renderPlayer?.cancelPendingMediaLoad(requestID: ownership.requestID)
         _ = try? await serializeLifecycleTransition { [weak self] in
             guard let self else { return }
             await self.transitionSuspensionForTesting?(.stop)
@@ -3271,14 +3347,69 @@ final class PlayerLifecycleController {
         try await requireClient().seek(to: position)
     }
 
+    func rememberVolume(_ volume: Double) { audioPreferences.setVolume(volume) }
+    func rememberMuted(_ muted: Bool) { audioPreferences.setMuted(muted) }
+
     func setVolume(_ volume: Double) async throws {
-        rememberedVolume = volume
-        try await requireClient().setVolume(volume)
+        rememberVolume(volume)
+        try await applyAudioPreference()
     }
 
     func setMuted(_ muted: Bool) async throws {
-        rememberedMuted = muted
-        try await requireClient().setMuted(muted)
+        rememberMuted(muted)
+        try await applyAudioPreference()
+    }
+
+    /// One app-owned worker coalesces commands. Closing a slider cannot cancel persistence.
+    func applyAudioPreference() async throws {
+        if let audioApplication { try await audioApplication.value; return }
+        let identifier = UUID()
+        audioApplicationID = identifier
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            // Retire the worker before completing its Task. A new intent can
+            // then never join an already-completed worker while its caller resumes.
+            defer {
+                if self.audioApplicationID == identifier {
+                    self.audioApplication = nil
+                    self.audioApplicationID = nil
+                }
+            }
+            try await Task.sleep(nanoseconds: 40_000_000)
+            while !self.isShuttingDown {
+                let revision = self.audioPreferenceRevision
+                let preference = self.audioPreference
+                guard let player = self.currentClient else { return }
+                do {
+                    try await self.audioCommandSuspensionForTesting?()
+                    if preference.muted { try await player.setMuted(true) }
+                    try await player.setVolume(preference.volume)
+                    try await player.setMuted(preference.muted)
+                } catch {
+                    if self.isShuttingDown { return }
+                    if self.currentClient !== player || self.audioPreferenceRevision != revision { continue }
+                    throw error
+                }
+                if self.currentClient === player && self.audioPreferenceRevision == revision { return }
+                try await Task.sleep(nanoseconds: 40_000_000)
+            }
+        }
+        audioApplication = task
+        defer {
+            if audioApplicationID == identifier { audioApplication = nil; audioApplicationID = nil }
+        }
+        try await task.value
+    }
+
+    private func restoreAudio(to player: MPVPlayerClient) async throws {
+        // A user can move the slider while an engine is being created.
+        while true {
+            let revision = audioPreferenceRevision, preference = audioPreference
+            if preference.muted { try await player.setMuted(true) }
+            try await player.setVolume(preference.volume)
+            try await player.setMuted(preference.muted)
+            if revision == audioPreferenceRevision { return }
+        }
     }
 
     func setSpeed(_ speed: Double) async throws {
@@ -3335,7 +3466,7 @@ final class PlayerLifecycleController {
 
     func shutdown() async {
         guard !isShuttingDown else { await lifecycleBarrier?.value; return }
-        renderPlayer?.cancelPendingNativeLoad(requestID: playbackIntentRequestID)
+        renderPlayer?.cancelPendingMediaLoad(requestID: playbackIntentRequestID)
         isShuttingDown = true
         playbackIntentGeneration &+= 1
         playbackIntentRequestID = nil
@@ -3360,7 +3491,7 @@ final class PlayerLifecycleController {
         guard playbackIntentRequestID != requestID else {
             return playbackIntentGeneration
         }
-        renderPlayer?.cancelPendingNativeLoad(requestID: playbackIntentRequestID)
+        renderPlayer?.cancelPendingMediaLoad(requestID: playbackIntentRequestID)
         playbackIntentGeneration &+= 1
         playbackIntentRequestID = requestID
         return playbackIntentGeneration
@@ -3425,7 +3556,7 @@ final class PlayerLifecycleController {
                 requestID: requestID, generation: generation
             ) else { throw CancellationError() }
         }
-        let player = try MPVPlayerClient(teardownMode: mode, compatibilityPolicy: compatibilityPolicy)
+        let player = try MPVPlayerClient(teardownMode: mode, compatibilityPolicy: compatibilityPolicy, audioPreference: audioPreference)
         do {
             try await applyRememberedSettings(to: player)
             guard ownsPlaybackIntent(
@@ -3467,7 +3598,8 @@ final class PlayerLifecycleController {
         eventForwardingTask = Task { [weak self, player] in
             for await event in player.events {
                 guard !Task.isCancelled else { return }
-                self?.continuation.yield(event)
+                guard let self, self.currentClient === player else { return }
+                self.continuation.yield(event)
             }
         }
     }
@@ -3475,8 +3607,7 @@ final class PlayerLifecycleController {
     private func applyRememberedSettings(
         to player: MPVPlayerClient
     ) async throws {
-        try await player.setVolume(rememberedVolume)
-        try await player.setMuted(rememberedMuted)
+        try await restoreAudio(to: player)
         try await player.setSpeed(rememberedSpeed)
         try await player.setSubtitleDelay(rememberedSubtitleDelay)
         try await player.setSubtitleScale(rememberedSubtitleScale)

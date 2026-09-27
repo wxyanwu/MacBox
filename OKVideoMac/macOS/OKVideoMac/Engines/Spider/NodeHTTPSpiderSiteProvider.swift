@@ -37,6 +37,35 @@ struct NodeTransferPlaybackContext: Equatable, Sendable {
     var authorizationChallengeID: UUID { requestID }
 }
 
+struct NodeCloudMediaFailure: Decodable, Equatable, Sendable {
+    let provider: String
+    let status: Int
+    let phase: String
+    let contentType: String
+    let reason: String
+
+    var isValid: Bool {
+        provider == "quark" && (0...599).contains(status)
+            && ["media", "probe"].contains(phase)
+            && ["upstreamDenied", "nonMediaResponse"].contains(reason)
+    }
+
+    var message: String {
+        if status == 429 {
+            return L10n.string("player.quark.rate-limited", fallback: "Quark is limiting requests. Wait a moment before trying again.")
+        }
+        if status >= 500 {
+            return L10n.string("player.quark.server-unavailable", fallback: "The Quark media server is temporarily unavailable (HTTP %lld). Try again later.", status)
+        }
+        if status == 404 || status == 410 {
+            return L10n.string("player.quark.resource-unavailable", fallback: "The Quark video resource is unavailable (HTTP %lld). Check whether the share or file still exists.", status)
+        }
+        return L10n.string("player.quark.media-rejected", fallback: "Quark rejected a video request (HTTP %lld). This does not by itself mean your account authorization has expired. Retry or check authorization.", status)
+    }
+
+    var allowsAutomaticRecovery: Bool { ![404, 410, 429].contains(status) && status < 500 }
+}
+
 private enum NodeTransferPlaybackTaskContext {
     @TaskLocal static var current: NodeTransferPlaybackContext?
 }
@@ -647,6 +676,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
     private let capturedPlaybackReferenceLock = NSLock()
     private var capturedPlaybackReferences: [String: PlaybackResourceReference] = [:]
     private let pushedDanmakuLock = NSLock()
+    private var danmakuMonitor: Task<Void, Never>?
     private var pushedDanmakuByPlaybackRequest: [UUID: JSONValue] = [:]
     private let routeClient: CatPawRouteClient
     private let hostMessageBridge: CatPawHostMessageBridge
@@ -654,6 +684,28 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
 
     var configurationWebsiteURL: URL {
         baseURL.appendingPathComponent("website")
+    }
+
+    /// Read bounded, credential-free evidence only after media loading fails.
+    /// A failed preparation probe must never independently block playback.
+    func consumeLatePlaybackFailure(
+        transferContext: NodeTransferPlaybackContext
+    ) async -> NodeCloudMediaFailure? {
+        guard let endpoint = try? await runtimeBaseURL() else { return nil }
+        struct Envelope: Decodable { let failure: NodeCloudMediaFailure? }
+        guard let response = try? await httpClient.send(HTTPRequest(
+            url: endpoint.appendingPathComponent("__okvideo/quark/media-failure"),
+            headers: [
+                "X-OKVideo-Transfer-Request-ID": transferContext.requestID.uuidString.lowercased(),
+                "X-OKVideo-Transfer-Generation": String(transferContext.requestGeneration)
+            ],
+            timeout: 2,
+            maximumResponseBytes: 4096,
+            retryPolicy: .none
+        )), response.statusCode == 200,
+              let envelope = try? JSONDecoder().decode(Envelope.self, from: response.body),
+              let failure = envelope.failure, failure.isValid else { return nil }
+        return failure
     }
 
     /// Consumes a credential failure emitted while libmpv was reading a
@@ -1107,7 +1159,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             throw error
         }
         let result = Self.normalizingRuntimePosterURLs(
-            try SpiderResponseMapper.page(
+            try SpiderResponseMapper.searchPage(
                 invocation.value,
                 site: site,
                 baseURL: invocation.baseURL,
@@ -1356,6 +1408,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         flag: String,
         episodeURL: String
     ) async throws -> SitePlaybackResult {
+        pushedDanmakuLock.lock(); danmakuMonitor?.cancel(); danmakuMonitor = nil; pushedDanmakuLock.unlock()
         if let context = NodeTransferPlaybackTaskContext.current {
             discardPushedDanmaku(for: context.requestID)
         }
@@ -1403,7 +1456,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         )
         if let hostMessage = invocation.hostMessage {
             if hostMessage.action == "danmuPush" {
-                capturePushedDanmaku(hostMessage)
+                capturePushedDanmaku(hostMessage, baseURL: invocation.baseURL)
             }
             if hostMessage.action == "openInternalWebview" {
                 throw try await webAuthorizationRequired(
@@ -1562,6 +1615,37 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                 return nil
             }
             return url
+        }
+        result.danmakuSearchCapabilities = [.providerWebPage(url: invocation.baseURL.appendingPathComponent("website/danmu/fe"), headers: [:])]
+        if let payload = result.danmaku {
+            let resources = DanmakuSourceNormalizer.sources(from: payload, provider: site.key,
+                baseURL: invocation.baseURL, inheritedHeaders: result.headers, runtimeGeneration: 1)
+            if !resources.isEmpty {
+                result.danmaku = .array(resources.map { resource in
+                    if let data = resource.runtime.inlineData { return .string(String(decoding: data, as: UTF8.self)) }
+                    return .object(["url": .string(resource.runtime.url.absoluteString),
+                        "name": .string(resource.stable.displayName), "default": .bool(resource.isPreferred),
+                        "headers": .object(resource.runtime.headers.dictionary.mapValues(JSONValue.string))])
+                })
+            }
+        }
+        if NodeTransferPlaybackTaskContext.current != nil, site.extra["okNodeHostMessageBridge"] == .bool(true) {
+            let task = Task { [weak self] in
+                // Bounded post-response channel; never invoke /play again to obtain danmaku.
+                for _ in 0..<20 {
+                    guard !Task.isCancelled, let self else { return }
+                    do {
+                        if let message = try await self.awaitHostMessage(invocationID: invocation.invocationID,
+                            baseURL: invocation.baseURL, waitMilliseconds: 1_000) {
+                            if message.action == "danmuPush" {
+                                self.capturePushedDanmaku(message, baseURL: invocation.baseURL)
+                            }
+                        }
+                        try await Task.sleep(nanoseconds: 100_000_000)
+                    } catch { return }
+                }
+            }
+            pushedDanmakuLock.lock(); danmakuMonitor = task; pushedDanmakuLock.unlock()
         }
         // Media-session identity is runtime-only. Generic Node playback still
         // needs transport/range metadata even when there is no safe durable
@@ -2380,7 +2464,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
                 waitMilliseconds: 1_000
             ) {
                 if message.action == "danmuPush" {
-                    capturePushedDanmaku(message)
+                    capturePushedDanmaku(message, baseURL: baseURL)
                     continue
                 }
                 if message.action == "sniff" {
@@ -2412,7 +2496,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         throw CancellationError()
     }
 
-    private func capturePushedDanmaku(_ message: HostMessage) {
+    private func capturePushedDanmaku(_ message: HostMessage, baseURL: URL) {
         guard message.action == "danmuPush",
               let context = NodeTransferPlaybackTaskContext.current,
               var options = message.opt.objectValue,
@@ -2443,6 +2527,8 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             ]
         }
         pushedDanmakuLock.unlock()
+        let event = DanmakuPushEvent(requestID: context.requestID, siteKey: site.key, baseURL: baseURL, payload: .object(options))
+        Task { @MainActor in DanmakuPushEvent.publish(event) }
     }
 
     private func takePushedDanmaku(for requestID: UUID) -> JSONValue? {

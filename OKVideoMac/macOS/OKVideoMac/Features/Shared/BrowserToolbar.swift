@@ -114,6 +114,61 @@ final class BrowserToolbarBackNSButton: NSButton {
     @objc private func goBack() { onBack() }
 }
 
+/// A stable native hit target, including the transparent padding around the
+/// symbol. Mode changes happen in the action, independently of data loading.
+struct BrowserToolbarModeButton: NSViewRepresentable {
+    @Environment(\.isEnabled) private var isEnabled
+    let selected: Bool
+    let help: String
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> BrowserToolbarModeNSButton {
+        let button = BrowserToolbarModeNSButton()
+        updateNSView(button, context: context)
+        return button
+    }
+
+    func updateNSView(_ view: BrowserToolbarModeNSButton, context: Context) {
+        view.configure(selected: selected, enabled: isEnabled, help: help, action: action)
+    }
+}
+
+final class BrowserToolbarModeNSButton: NSButton {
+    private var onActivate: () -> Void = {}
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: 32, height: 32))
+        title = ""
+        setButtonType(.momentaryPushIn)
+        bezelStyle = .texturedRounded
+        isBordered = false
+        imagePosition = .imageOnly
+        image = NSImage(systemSymbolName: "calendar", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: PrimaryToolbarMetrics.iconFontSize, weight: .medium))
+        target = self
+        action = #selector(activateMode)
+        setAccessibilityIdentifier("live.guide.mode")
+    }
+    required init?(coder: NSCoder) { nil }
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: PrimaryToolbarMetrics.iconControlSize, height: PrimaryToolbarMetrics.iconControlSize)
+    }
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    func configure(selected: Bool, enabled: Bool, help: String, action: @escaping () -> Void) {
+        isEnabled = enabled
+        state = selected ? .on : .off
+        contentTintColor = selected ? .systemBlue : .secondaryLabelColor
+        toolTip = help
+        setAccessibilityLabel(help)
+        setAccessibilityValue(selected ? 1 : 0)
+        onActivate = action
+    }
+    @objc private func activateMode() {
+        BrowserInteractionTrace.record("guide.modeAction")
+        onActivate()
+    }
+}
+
 enum PrimaryToolbarLayout: Equatable, Sendable {
     case expanded
     case compact
@@ -164,70 +219,43 @@ extension EnvironmentValues {
     }
 }
 
-private struct BrowserToolbarScrollOffsetPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
 /// Place this as the first child of a browser ScrollView. The marker and the
 /// scroll-surface modifier below let the shared parent own toolbar chrome,
 /// without coupling an individual page to the window toolbar implementation.
 struct BrowserToolbarScrollMarker: View {
+    @Environment(\.browserToolbarScrollReporter) private var reportScroll
+    @State private var lastReportedScrollState = false
     let coordinateSpaceName: String
 
     var body: some View {
-        GeometryReader { proxy in
-            Color.clear.preference(
-                key: BrowserToolbarScrollOffsetPreferenceKey.self,
-                value: proxy.frame(in: .named(coordinateSpaceName)).minY
-            )
+        PosterScrollObserver { metrics in
+            let isScrolled = metrics.offset > 0.5
+            guard isScrolled != lastReportedScrollState else { return }
+            lastReportedScrollState = isScrolled
+            reportScroll(isScrolled)
         }
         .frame(height: 0)
         .accessibilityHidden(true)
+        .onDisappear {
+            if lastReportedScrollState {
+                lastReportedScrollState = false
+                reportScroll(false)
+            }
+        }
     }
 }
 
 private struct BrowserToolbarScrollSurfaceModifier: ViewModifier {
-    @Environment(\.browserToolbarScrollReporter) private var reportScroll
-    @State private var lastReportedScrollState = false
-
     let coordinateSpaceName: String
 
     func body(content: Content) -> some View {
         content
             .coordinateSpace(name: coordinateSpaceName)
-            .onAppear {
-                reportScrollStateIfChanged(false)
-            }
-            .onPreferenceChange(BrowserToolbarScrollOffsetPreferenceKey.self) {
-                reportScrollStateIfChanged($0 < -0.5)
-            }
-            .onDisappear {
-                if lastReportedScrollState {
-                    lastReportedScrollState = false
-                    reportScroll(false)
-                }
-            }
-    }
-
-    private func reportScrollStateIfChanged(_ isScrolled: Bool) {
-        guard isScrolled != lastReportedScrollState else { return }
-        // Preference delivery can happen inside SwiftUI's layout update.
-        // Defer the state mutation so it cannot recursively invalidate the
-        // AppKit hosting view's constraints in the same display cycle.
-        DispatchQueue.main.async {
-            guard isScrolled != lastReportedScrollState else { return }
-            lastReportedScrollState = isScrolled
-            reportScroll(isScrolled)
-        }
     }
 }
 
-/// `List` owns an AppKit NSScrollView and cannot host the geometry marker used
-/// by a normal SwiftUI ScrollView without changing row layout. This bridge
+/// `List` owns an AppKit NSScrollView and cannot host the zero-height marker
+/// used by a normal SwiftUI ScrollView without changing row layout. This bridge
 /// observes only the native clip-view bounds and preserves List behavior.
 private struct BrowserListToolbarScrollObserver: NSViewRepresentable {
     let reportScroll: (Bool) -> Void
@@ -366,6 +394,7 @@ struct BrowserToolbarChromeModifier: ViewModifier {
 
     let isScrolled: Bool
     let isWindowActive: Bool
+    var usesSystemChrome = false
 
     private var appearance: BrowserToolbarChromeAppearance {
         BrowserToolbarChromePolicy.appearance(
@@ -377,7 +406,9 @@ struct BrowserToolbarChromeModifier: ViewModifier {
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if #available(macOS 13.0, *) {
+        if usesSystemChrome {
+            content
+        } else if #available(macOS 13.0, *) {
             chrome(content)
                 .toolbarBackground(.visible, for: .windowToolbar)
         } else {
@@ -565,5 +596,47 @@ extension View {
 
     func primaryToolbarTextControl() -> some View {
         modifier(PrimaryToolbarTextControlModifier())
+    }
+}
+
+
+struct BrowserRefreshToolbarControl: View {
+    let isLoading: Bool
+    var error: String? = nil
+    var status: String? = nil
+    var title: String = L10n.string("common.refresh", fallback: "Refresh")
+    var cancel: (() -> Void)? = nil
+    var restart: (() -> Void)? = nil
+    let action: () -> Void
+    @State private var showsError = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            DetailRefreshButton(isLoading: isLoading, title: title, action: action)
+                .frame(width: PrimaryToolbarMetrics.iconControlSize, height: PrimaryToolbarMetrics.iconControlSize)
+            if let cancel {
+                Button(action: cancel) { Image(systemName: "stop.circle") }
+                    .buttonStyle(.borderless)
+                    .help(L10n.string("search.stop", fallback: "Stop Search"))
+                    .opacity(isLoading ? 1 : 0)
+                    .allowsHitTesting(isLoading)
+                    .accessibilityHidden(!isLoading)
+                    .frame(width: 20)
+            }
+        }
+        .help(error.map { title + " — " + $0 } ?? title)
+        .contextMenu {
+            Button(title, action: action).disabled(isLoading)
+            if let restart {
+                Button(L10n.string("browser.refresh.again", fallback: "Refresh All in This Scope"), action: restart)
+                    .disabled(isLoading)
+            }
+            if error != nil || status != nil {
+                Button(L10n.string("settings.common.details", fallback: "Details")) { showsError = true }
+            }
+        }
+        .popover(isPresented: $showsError) {
+            Text([status, error].compactMap { $0 }.joined(separator: "\n\n")).textSelection(.enabled).padding().frame(width: 360)
+        }
     }
 }

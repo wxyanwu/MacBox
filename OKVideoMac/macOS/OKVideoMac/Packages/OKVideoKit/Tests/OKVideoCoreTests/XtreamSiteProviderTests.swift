@@ -149,6 +149,7 @@ final class XtreamSiteProviderTests: XCTestCase {
         XCTAssertEqual(detail.playSources[0].episodes.count, 1)
 
         let episode = detail.playSources[0].episodes[0]
+        XCTAssertEqual(episode.metadata?.form, .movie)
         let reference = try XCTUnwrap(episode.providerResourceReference)
         let persistedJSON = String(
             decoding: try JSONEncoder().encode(detail),
@@ -173,6 +174,7 @@ final class XtreamSiteProviderTests: XCTestCase {
             "https://example.invalid:8443/iptv/movie/user%20name/p%2Fword/1001.mkv"
         )
         XCTAssertFalse(result.needsParsing)
+        XCTAssertEqual(result.networkPolicy, .systemHTTPProxy)
         XCTAssertEqual(result.validationPolicy, .playerAuthoritative)
         XCTAssertEqual(result.resourceReference, reference)
         XCTAssertEqual(result.headers["User-Agent"], "OKVideoMac/XtreamTests")
@@ -244,6 +246,7 @@ final class XtreamSiteProviderTests: XCTestCase {
 
         XCTAssertEqual(refreshed.episode.url, reference.stableResourceLocator)
         XCTAssertEqual(refreshed.playbackResult.resourceReference, reference)
+        XCTAssertEqual(refreshed.playbackResult.networkPolicy, .systemHTTPProxy)
         XCTAssertEqual(
             refreshed.playbackResult.url,
             "https://example.invalid:8443/iptv/movie/user%20name/p%2Fword/1001.mkv"
@@ -311,6 +314,7 @@ final class XtreamSiteProviderTests: XCTestCase {
         })
 
         let episode = detail.playSources[1].episodes[0]
+        XCTAssertEqual(episode.metadata, .init(form: .series, season: 2, episode: 1))
         let reference = try XCTUnwrap(episode.providerResourceReference)
         XCTAssertTrue(provider.acceptsPlaybackResourceReference(reference))
         XCTAssertEqual(
@@ -325,6 +329,7 @@ final class XtreamSiteProviderTests: XCTestCase {
             result.url,
             "https://example.invalid:8443/iptv/series/user%20name/p%2Fword/7101.mp4"
         )
+        XCTAssertEqual(result.networkPolicy, .systemHTTPProxy)
         XCTAssertEqual(result.resourceReference, reference)
     }
 

@@ -1,27 +1,61 @@
 # Changelog
 
-## [0.7.0] - 2026-09-19
+## [0.7.3] - 2026-09-27
 
 ### Added
 
-- Native danmaku playback for TVBox, CatPawOpen and Xtream sessions through one
-  shared AppKit overlay, player-authoritative clock and lane scheduler.
-- Bilibili XML import, source-provided danmaku loading, manual service search,
-  explicit candidate selection, per-episode/edition binding and time calibration.
-- Stable danmaku bindings in portable backups without runtime URLs, request headers,
-  cookies or local proxy leases.
+- Added a bounded native Full Guide for XMLTV and Native Xtream live sources. It
+  uses virtualized rows, fixed time geometry, date navigation, Now repositioning,
+  current-programme progress and independent channel/time-axis clipping.
+- Added native danmaku playback for supported TVBox/CatPaw-style and Xtream
+  sessions, including Bilibili XML import, XML/JSON payload parsing, source-provided
+  services, automatic episode matching, explicit candidate selection and timing
+  calibration.
+- Added source-aware native History and Favorites lists. Portable backup schema v4
+  carries stable favorite and danmaku identities without exporting runtime URLs,
+  request headers, cookies, proxy leases or account credentials.
 
-### Safety / Changed
+### Changed
 
-- Bind CatPaw `danmuPush` messages to the exact playback request and generation so
-  late results cannot cross episode boundaries.
-- Keep danmaku download, parsing and failures independent of media startup. Manual
-  selection outranks saved/provider/automatic results, and ambiguous provider lists
-  require user selection.
-- Portable backup schema is now version 3 and remains compatible with older backups.
+- Reworked browsing, search, detail and long-series navigation around explicit
+  request ownership, resumable pagination, bounded caches and source-preserving
+  route state. Native lists and poster grids now share consistent hover, selection,
+  keyboard and scrolling behavior.
+- Refined the live and Guide interface with native date controls, programme detail,
+  predictable source/group/channel restoration, row progress and content-only
+  separators.
+- Unified media identity, season/episode naming and continuation rules across
+  details, history and playback. Volume and mute preferences are shared between VOD
+  and live playback and restored before a new player becomes audible.
+- Native Xtream VOD and live requests now honor the current system HTTP/HTTPS proxy
+  within the media session. Short EPG is supported; catch-up/timeshift and
+  `direct_source` remain outside the supported subset.
+- Android Dex Bridge is now 0.3.45 (57), with provider lifecycle/epoch isolation and
+  verified Dex/JAR caching. Quark authorization and transfer state use stricter
+  request ownership and media-failure classification.
 
-This source build is a locally verified ad-hoc Release package. It is not the latest
-Developer ID signed and Apple-notarized public release.
+### Fixed
+
+- Fixed stale detail/search/category responses, cancelled pagination work and late
+  provider callbacks replacing a newer page or playback request.
+- Fixed history resume selecting a resource by list position, stale cached episode
+  metadata or an ambiguous movie/series match. Deleting or completing an entry is
+  transactional and cannot be recreated by a late write from the same session.
+- Fixed live logo reuse crashes, source restoration, full-screen aspect handling and
+  cases where video/audio continued but the window could not leave full screen.
+- Fixed danmaku animation jitter by driving motion from the display refresh,
+  smoothing the player clock and caching rendered text bitmaps. Pause, buffering,
+  seek and episode changes now have separate synchronization paths.
+- Restored separators only between populated History and Favorites rows, while
+  keeping empty-list regions free of grid lines.
+
+### Compatibility and release
+
+- Apple Silicon (`arm64`) and macOS 12.0 or later remain required.
+- The latest notarized public release remains 0.6.1 until 0.7.3 completes the
+  Developer ID, notarization, staple, Gatekeeper and installation gates.
+- See `Docs/RELEASE_NOTES_0.7.3.md` and the release-readiness record for the final
+  validation results and known limitations.
 
 ## [0.6.1] - 2026-09-09
 
@@ -84,7 +118,7 @@ stapling, Gatekeeper and installation smoke tests; see the
 
 - Existing TVBox/CatVod, CatPaw-style Node, QuickJS, Android csp_, direct/local media
   and imported Live retain their documented scope.
-- Native Xtream EPG, catch-up/timeshift and direct_source remain unsupported; proxy
+- Native Xtream EPG, catch-up/timeshift and direct_source were unsupported in 0.6.0; proxy
   and HLS support is deliberately bounded, not universal.
 - Apple Silicon / arm64, macOS 12.0+. See Docs/RELEASE_NOTES_0.6.0.md for details.
 

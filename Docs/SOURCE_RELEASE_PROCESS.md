@@ -1,9 +1,8 @@
 # Immutable Corresponding-Source Release Process
 
-The current 0.7.0 (Build 102) local acceptance workflow uses
-`OKVideoMac-0.7.0-macOS-arm64.zip` and `OKVideoMac-0.7.0.dmg`. These locally
-verified ad-hoc artifacts do not replace the notarized public 0.6.1 release or
-create a public tag.
+The 0.7.3 (Build 129) release candidate uses
+`OKVideoMac-0.7.3-macOS-arm64.zip` and `OKVideoMac-0.7.3.dmg`. Local ad-hoc
+verification does not replace the notarized public 0.6.1 release or create a tag.
 
 > The 0.6.1 DMG passed Developer ID signing, Apple notarization, stapling, Gatekeeper
 > and installation smoke tests. Tag `v0.6.1` pins release commit
@@ -15,24 +14,24 @@ Each formal OKVideoMac binary must be published with a source set produced by
 `macOS/OKVideoMac/Scripts/create-source-release.sh` from the exact release Git
 commit. Moving branches and `latest` URLs are not corresponding-source links.
 
-For the formal 0.6.1 release (Build 101), the required public artifact set is:
+For the formal 0.7.3 release (Build 129), the required public artifact set is:
 
-- `OKVideoMac-0.6.1-build101-source.tar.gz`
-- `OKVideoMac-0.6.1-build101-third-party-source.tar.gz`
-- `OKVideoMac-0.6.1-build101-licenses.tar.gz`
-- `OKVideoMac-0.6.1-build101-SOURCE_RELEASE_INDEX.json`
-- `OKVideoMac-0.6.1-build101-SOURCE_RELEASE_MANIFEST.json`
-- `OKVideoMac-0.6.1-build101-SHA256SUMS`
-- `OKVideoMac-0.6.1-macOS-arm64.zip` (internal identity/archive carrier)
-- `OKVideoMac-0.6.1.dmg` (the public binary bound by the final manifest)
-- `OKVideoMac-0.6.1-AndroidDexBridge-release.apk`
+- `OKVideoMac-0.7.3-build129-source.tar.gz`
+- `OKVideoMac-0.7.3-build129-third-party-source.tar.gz`
+- `OKVideoMac-0.7.3-build129-licenses.tar.gz`
+- `OKVideoMac-0.7.3-build129-SOURCE_RELEASE_INDEX.json`
+- `OKVideoMac-0.7.3-build129-SOURCE_RELEASE_MANIFEST.json`
+- `OKVideoMac-0.7.3-build129-SHA256SUMS`
+- `OKVideoMac-0.7.3-macOS-arm64.zip` (internal identity/archive carrier)
+- `OKVideoMac-0.7.3.dmg` (the public binary bound by the final manifest)
+- `OKVideoMac-0.7.3-AndroidDexBridge-release.apk`
 - `THIRD_PARTY_NOTICES.md`
-- `RELEASE_NOTES_0.6.1.md`
+- `RELEASE_NOTES_0.7.3.md`
 
-The Build 101 release set must also include the macOS and Android SPDX/CycloneDX
+The Build 129 release set must also include the macOS and Android SPDX/CycloneDX
 files (`OKVideoMac-macOS.spdx.json`, `OKVideoMac-macOS.cdx.json`,
 `OKVideoMac-Android.spdx.json`, and `OKVideoMac-Android.cdx.json`), and the
-release-specific `OKVideoMac-0.6.1-build101-SHA256SUMS` that binds the release
+release-specific `OKVideoMac-0.7.3-build129-SHA256SUMS` that binds the release
 asset set. The ZIP remains the established internal `binary` identity carrier;
 it is not the public user download. The DMG is recorded separately as the
 public release artifact.
@@ -90,8 +89,8 @@ OKVideoMac/macOS/OKVideoMac/Scripts/create-source-release.sh \
   --output-dir /path/to/release \
   --cache-dir /path/to/verified-source-cache \
   --commit HEAD \
-  --binary /path/to/OKVideoMac-0.6.1-macOS-arm64.zip \
-  --release-artifact /path/to/OKVideoMac-0.6.1.dmg
+  --binary /path/to/OKVideoMac-0.7.3-macOS-arm64.zip \
+  --release-artifact /path/to/OKVideoMac-0.7.3.dmg
 ```
 
 Use `--offline` for the second run or for an air-gapped release after every
@@ -99,8 +98,9 @@ locked input is present in the cache. The script fails on a dirty worktree,
 unknown commit, binary/version mismatch, unavailable input, or any checksum
 mismatch.
 
-The public Build 101 set must be generated from the exact clean commit tagged
-`v0.6.1`. The notarized and stapled DMG, checksum, source archives, manifests,
-and SBOMs must be published together on the GitHub Release. Historical
+The public Build 129 set must be generated from the exact clean commit selected
+for `v0.7.3`. After all distribution gates pass, the tag must point to that same
+commit. The notarized and stapled DMG, checksum, source archives, manifests, and
+SBOMs must be published together on the GitHub Release. Historical
 Build 62/63/64/65/94 records remain historical facts and must not be presented
 as the current release.

@@ -772,13 +772,13 @@ test('missing Quark credentials publish a structured authorization event', async
   assert.equal(callsAt(harness, 'post', 'file').length, 0);
 });
 
-test('only account API 401 and 403 become authorization events', async (t) => {
+test('account API 401 and explicit expired-login 403 become authorization events', async (t) => {
   for (const status of [401, 403]) {
     await t.test(String(status), async (subtest) => {
       const harness = createHarness(subtest, {
         apiOverride: async (apiRequest) =>
           apiRequest.method === 'get' && apiRequest.path.startsWith('file/sort?')
-            ? { status, data: { message: 'account rejected' } }
+            ? { status, data: { message: 'login expired' } }
             : null
       });
       const lifecycle = harness.makeLifecycle();
@@ -789,6 +789,36 @@ test('only account API 401 and 403 become authorization events', async (t) => {
       assert.equal(harness.authorizationEvents[0].reasonCode, 'unauthorizedHTTP');
       assert.equal(harness.authorizationEvents[0].upstreamStatus, status);
     });
+  }
+});
+
+test('proxy account failures publish proxy-phase evidence without inventing a transfer', async (t) => {
+  const harness = createHarness(t);
+  const lifecycle = harness.makeLifecycle();
+  const proxy = lifecycle.wrapProxy(async () => {
+    lifecycle.validateAccountResponse({ status: 401, data: {} }, 'quark account authorization required');
+  });
+  await assert.rejects(proxy({ query: {} }, {}), { code: 'OKVIDEO_CLOUD_AUTHORIZATION_REQUIRED' });
+  assert.equal(harness.authorizationEvents.length, 1);
+  assert.equal(harness.authorizationEvents[0].phase, 'proxy');
+  assert.equal(harness.authorizationEvents[0].upstreamStatus, 401);
+  assert.equal(harness.calls.length, 0);
+});
+
+test('own-drive account guards reject missing credentials before an account API call', async (t) => {
+  const harness = createHarness(t);
+  harness.setCookie('');
+  const lifecycle = harness.makeLifecycle();
+  assert.throws(() => lifecycle.requireAccount(), { code: 'OKVIDEO_CLOUD_AUTHORIZATION_REQUIRED' });
+  assert.equal(harness.calls.length, 0);
+});
+
+test('bare account 403 and media-like 412 do not force reauthorization', async (t) => {
+  for (const status of [403, 412, 429, 500]) {
+    const harness = createHarness(t, { apiOverride: async (request) =>
+      request.path.startsWith('file/sort?') ? { status, data: { message: 'access denied' } } : null });
+    await assert.rejects(resolveEpisode(harness.makeLifecycle(), `denied-${status}`, 1));
+    assert.equal(harness.authorizationEvents.length, 0);
   }
 });
 

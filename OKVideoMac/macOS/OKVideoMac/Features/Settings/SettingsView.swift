@@ -40,6 +40,7 @@ private enum SettingsLanguageAlert: String, Identifiable {
 
 struct SettingsView: View {
     @EnvironmentObject private var state: AppState
+    @ObservedObject private var navigation: SettingsNavigationState
     @State private var posterCacheSize = SettingsL10n.string(
         "settings.cache.calculating",
         "Calculating…"
@@ -49,6 +50,10 @@ struct SettingsView: View {
     @State private var backupOperationMessage: String?
     @State private var languageMode = AppLanguagePreferenceStore().load()
     @State private var languageAlert: SettingsLanguageAlert?
+
+    init(navigation: SettingsNavigationState) {
+        self.navigation = navigation
+    }
 
     var body: some View {
         ZStack {
@@ -114,9 +119,9 @@ struct SettingsView: View {
     }
 
     private func settingsSidebarButton(_ pane: SettingsPane) -> some View {
-        let isSelected = state.selectedSettingsPane == pane
+        let isSelected = navigation.selectedPane == pane
         return Button {
-            state.selectedSettingsPane = pane
+            navigation.select(pane)
         } label: {
             HStack(spacing: 10) {
                 ZStack {
@@ -172,7 +177,7 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var detailContent: some View {
-        switch state.selectedSettingsPane {
+        switch navigation.selectedPane {
         case .general:
             generalSettings
         case .configurations:
@@ -519,6 +524,10 @@ struct SettingsView: View {
                     subtitle: SettingsL10n.string("settings.backup.history.detail", "Includes source, episode, playback position, and watch time"),
                     value: SettingsL10n.string("settings.common.item-count", "%d items", state.history.count)
                 )
+                SettingsDivider()
+                SettingsInfoRow(icon: "star", color: .blue, title: L10n.string(.sectionFavorites),
+                    subtitle: L10n.string("favorites.backup.scope", fallback: "Includes favorites owned by this configuration. Unconfirmed sources and other configurations are excluded."),
+                    value: String(state.favorites.filter { $0.configurationID != nil && $0.configurationID == state.activeConfigurationRecord?.id }.count))
             }
 
             SettingsSectionTitle(SettingsL10n.string("settings.backup.manual.section", "Manual Backup"))
@@ -1084,7 +1093,7 @@ struct SettingsView: View {
                     "Exported “%@” with %d history items.",
                     preview.configurationName,
                     preview.historyCount
-                )
+                ) + " · " + L10n.string("favorites.backup.count", fallback: "%d favorites", preview.favoriteCount)
             } catch {
                 state.presentedError = UserFacingError(
                     title: SettingsL10n.string("settings.backup.export.failed", "Backup Export Failed"),
@@ -1185,6 +1194,8 @@ private struct PortableBackupImportPreviewSheet: View {
                     SettingsL10n.string("settings.backup.preview.history", "Watch History"),
                     value: SettingsL10n.string("settings.common.item-count", "%d items", preview.historyCount)
                 )
+                Divider()
+                previewRow(L10n.string(.sectionFavorites), value: String(preview.favoriteCount))
                 Divider()
                 previewRow(
                     SettingsL10n.string("settings.backup.preview.version", "Export Version"),
@@ -1865,7 +1876,7 @@ private struct SettingsPage<Content: View>: View {
             BrowserToolbarScrollMarker(
                 coordinateSpaceName: scrollCoordinateSpace
             )
-            VStack(alignment: .leading, spacing: 14) {
+            LazyVStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)
                         .font(.largeTitle.bold())
@@ -1907,7 +1918,7 @@ struct SettingsCard<Content: View>: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        LazyVStack(spacing: 0) {
             content
         }
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.84))

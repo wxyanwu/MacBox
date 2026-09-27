@@ -135,6 +135,7 @@ public struct RuntimeDanmakuLocator: Equatable, Sendable {
     public var headers: HTTPHeaders
     public var runtimeGeneration: UInt64
     public var leaseID: UUID?
+    public var inlineData: Data?
 
     public init(
         url: URL,
@@ -154,6 +155,7 @@ public struct DanmakuSourceDescriptor: Equatable, Identifiable, Sendable {
     public var stable: StableDanmakuLocator
     public var runtime: RuntimeDanmakuLocator
     public var isPreferred: Bool
+    public var match: DanmakuMatchMetadata?
 
     public init(
         stable: StableDanmakuLocator,
@@ -183,6 +185,8 @@ public struct DanmakuPlaybackContext: Equatable, Sendable {
     public var editionIdentity: DanmakuEditionIdentity
     public var providedSources: [DanmakuSourceDescriptor]
     public var searchCapabilities: [DanmakuSearchCapability]
+    public var matchRequest: DanmakuMatchRequest?
+    public var upstreamRequestID: UUID?
     public var runtimeGeneration: UInt64
 
     public init(
@@ -275,6 +279,10 @@ public struct DanmakuBinding: Codable, Equatable, Sendable {
     public var locator: StableDanmakuLocator
     public var offset: TimeInterval
     public var updatedAt: Date
+    public var verificationVersion: Int?
+    public var authority: DanmakuSelectionAuthority?
+    public var match: DanmakuMatchMetadata?
+    public var previousLocator: StableDanmakuLocator?
 
     public init(
         editionIdentity: DanmakuEditionIdentity,

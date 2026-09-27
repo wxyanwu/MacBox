@@ -7,10 +7,902 @@ import CryptoKit
 import SwiftUI
 import XCTest
 import IOKit.pwr_mgt
+import ImageIO
 import AndroidRuntimeKit
 import OKVideoCore
 import OKVideoPersistence
 @testable import OKVideoMac
+
+final class QuarkMediaFailurePolicyTests: XCTestCase {
+    func testAutomaticRecoveryIsConsumedOncePerPlaybackAndResetForUserRetry() {
+        var gate = NodePlaybackRecoveryGate()
+        let first = UUID()
+        XCTAssertTrue(gate.claim(first))
+        XCTAssertFalse(gate.claim(first))
+        gate.reset()
+        XCTAssertTrue(gate.claim(first))
+        XCTAssertTrue(gate.claim(UUID()))
+    }
+    func testRecoveryCheckpointKeepsPauseAndSanitizesInvalidPositions() {
+        XCTAssertEqual(NodePlaybackRecoveryCheckpoint(position: 342.5, paused: true).position, 342.5)
+        XCTAssertTrue(NodePlaybackRecoveryCheckpoint(position: 342.5, paused: true).paused)
+        for invalid in [-1.0, .infinity, .nan] {
+            XCTAssertEqual(NodePlaybackRecoveryCheckpoint(position: invalid, paused: false).position, 0)
+        }
+    }
+    func testMediaRejectionDoesNotDeclareAuthorizationExpired() {
+        for status in [401, 403, 412] {
+            let failure = NodeCloudMediaFailure(provider: "quark", status: status, phase: "media", contentType: "text/html", reason: "upstreamDenied")
+            XCTAssertTrue(failure.isValid)
+            XCTAssertTrue(failure.allowsAutomaticRecovery)
+            XCTAssertTrue(failure.message.contains(String(status)))
+        }
+    }
+    func testRateLimitMissingResourceAndServerFailureDoNotRetryImmediately() {
+        for status in [404, 410, 429, 500, 503] {
+            let failure = NodeCloudMediaFailure(provider: "quark", status: status, phase: "media", contentType: "text/html", reason: "upstreamDenied")
+            XCTAssertFalse(failure.allowsAutomaticRecovery)
+        }
+    }
+    func testRejectsUnrecognizedProviderOrPhase() {
+        XCTAssertFalse(NodeCloudMediaFailure(provider: "other", status: 412, phase: "media", contentType: "", reason: "upstreamDenied").isValid)
+        XCTAssertFalse(NodeCloudMediaFailure(provider: "quark", status: 412, phase: "account", contentType: "", reason: "upstreamDenied").isValid)
+    }
+}
+
+@MainActor
+private final class PosterLayoutFixture: ObservableObject {
+    @Published var items: [VideoSummary]
+    var anchor: PosterBrowseAnchor?
+    init(count: Int) {
+        items = (0..<count).map { .init(siteKey: "fixture", siteName: "Fixture", videoID: "\($0)", title: $0 % 3 == 0 ? "较长的节目标题用于布局验证 \($0)" : "节目 \($0)") }
+    }
+}
+
+private struct PosterLayoutFixtureView: View {
+    @ObservedObject var model: PosterLayoutFixture
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                Text("Poster browsing fixture").frame(height: 60)
+                VideoGrid(items: model.items, onBrowse: { anchor, _, _ in model.anchor = anchor }, onSelect: { _ in })
+            }.padding(.horizontal, 16)
+        }
+    }
+}
+
+@MainActor
+final class PosterNativeGridTests: XCTestCase {
+    func testRealLazyGridKeepsAnchorWhenAppendingAndReflowsAroundSameItem() async throws {
+        for count in [100, 500, 2000] {
+            let model = PosterLayoutFixture(count: count)
+            let host = NSHostingView(rootView: PosterLayoutFixtureView(model: model))
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 680), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            window.makeKeyAndOrderFront(nil)
+            defer { window.close() }
+            try await Task.sleep(nanoseconds: 80_000_000)
+            let scroll = try XCTUnwrap(BrowserKeyboardView.descendants(of: host).compactMap { $0 as? NSScrollView }.first)
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: 1200))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            try await Task.sleep(nanoseconds: 80_000_000)
+            let anchor = try XCTUnwrap(model.anchor)
+            let offset = scroll.contentView.bounds.minY
+            model.items += (count..<(count + 23)).map { .init(siteKey: "fixture", siteName: "Fixture", videoID: "\($0)", title: "新增节目 \($0)") }
+            try await Task.sleep(nanoseconds: 100_000_000)
+            XCTAssertEqual(scroll.contentView.bounds.minY, offset, accuracy: 1, "append at \(count) items")
+            XCTAssertEqual(model.anchor?.itemID, anchor.itemID)
+            XCTAssertEqual(try XCTUnwrap(model.anchor?.offset), anchor.offset, accuracy: 1)
+            window.setContentSize(NSSize(width: 1100, height: 680))
+            try await Task.sleep(nanoseconds: 100_000_000)
+            let resized = try XCTUnwrap(model.anchor)
+            let oldIndex = try XCTUnwrap(model.items.firstIndex { $0.id == anchor.itemID })
+            let newIndex = try XCTUnwrap(model.items.firstIndex { $0.id == resized.itemID })
+            let columns = PosterGridMetrics.columnCount(width: 1100 - 32)
+            XCTAssertTrue(newIndex <= oldIndex && oldIndex < newIndex + columns, "reflow must retain the original item's row")
+        }
+    }
+}
+
+@MainActor
+final class PosterImagePipelineTests: XCTestCase {
+    func testLayerPosterCarrierKeepsGeometryAndReleasesImage() throws {
+        let view = PosterLayerImageView(frame: NSRect(x: 0, y: 0, width: 140, height: 210))
+        let context = try XCTUnwrap(CGContext(data: nil, width: 280, height: 420,
+            bitsPerComponent: 8, bytesPerRow: 280 * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let image = NSImage(cgImage: try XCTUnwrap(context.makeImage()),
+            size: NSSize(width: 280, height: 420))
+
+        XCTAssertEqual(view.intrinsicContentSize.width, NSView.noIntrinsicMetric)
+        XCTAssertEqual(view.intrinsicContentSize.height, NSView.noIntrinsicMetric)
+        XCTAssertNil(view.hitTest(NSPoint(x: 70, y: 100)))
+        view.show(image)
+        XCTAssertNotNil(view.layer?.contents)
+        XCTAssertEqual(view.frame.size, NSSize(width: 140, height: 210))
+        view.show(nil)
+        XCTAssertNil(view.layer?.contents)
+    }
+
+    func testLeavingVisibleAreaRetainsPrefetchConsumerButAdmitsNewVisibleImage() async throws {
+        let client = PosterAdmissionProbe(body: try imageData(width: 32, height: 48), oldDelayNanoseconds: 5_000_000_000)
+        let (repository, directory) = try repository(client)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let requests = (0..<6).map { PosterImageRequest(url: URL(string: "https://fixture.invalid/old-\($0).png")!, pixels: 256) }
+        let visible = requests.map { request in Task { _ = try? await repository.posterImage(for: request, priority: .visible) } }
+        for _ in 0..<100 {
+            if await client.oldStarts() == 6 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let speculative = requests.map { request in Task { _ = try? await repository.posterImage(for: request, priority: .reverse) } }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        visible.forEach { $0.cancel() }
+        for task in visible { await task.value }
+        let start = ProcessInfo.processInfo.systemUptime
+        let newcomer = Task { _ = try? await repository.posterImage(for:
+            .init(url: URL(string: "https://fixture.invalid/new-visible.png")!, pixels: 256)) }
+        for _ in 0..<30 {
+            if await client.newStarts() > 0 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let admissionMS = Int((ProcessInfo.processInfo.systemUptime - start) * 1_000)
+        let startedNew = await client.newStarts()
+        let stats = await repository.posterPipelineStats()
+        print("POSTER_STAGE1 retained_prefetch=true old_started=\(await client.oldStarts()) new_visible_started=\(startedNew) admission_ms=\(admissionMS) active=\(stats.active) queued=\(stats.queued) maximum_active=\(stats.maximumActive)")
+        XCTAssertEqual(startedNew, 1)
+        XCTAssertLessThanOrEqual(stats.maximumActive, 6)
+        speculative.forEach { $0.cancel() }
+        newcomer.cancel()
+        for task in speculative { await task.value }
+        await newcomer.value
+        await repository.cancelInFlightLoads()
+    }
+
+    func testDemotedVisibleRequestsReleaseSlotsWhilePrefetchConsumersRemain() async throws {
+        let client = PosterAdmissionProbe(body: try imageData(width: 32, height: 48), oldDelayNanoseconds: 5_000_000_000)
+        let (repository, directory) = try repository(client)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let requests = (0..<6).map { PosterImageRequest(url: URL(string: "https://fixture.invalid/old-\($0).png")!, pixels: 256) }
+        let consumers = requests.map { _ in UUID() }
+        let old = zip(requests, consumers).map { request, consumer in Task {
+            _ = try? await repository.posterImage(for: request, priority: .visible, consumer: consumer)
+        } }
+        for _ in 0..<100 {
+            if await client.oldStarts() == 6 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let startedOld = await client.oldStarts()
+        XCTAssertEqual(startedOld, 6)
+        for (request, consumer) in zip(requests, consumers) {
+            repository.updatePosterPriority(for: request, consumer: consumer,
+                priority: .reverse, distance: 10, revision: 1)
+        }
+        let newcomer = Task { _ = try? await repository.posterImage(for:
+            .init(url: URL(string: "https://fixture.invalid/new-visible.png")!, pixels: 256)) }
+        for _ in 0..<30 {
+            if await client.newStarts() > 0 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let startedNew = await client.newStarts()
+        let stats = await repository.posterPipelineStats()
+        let cancelledOld = await client.oldCancellations()
+        print("POSTER_STAGE1 demoted_prefetch=true old_started=\(startedOld) old_cancelled_to_yield=\(cancelledOld) new_visible_started=\(startedNew) active=\(stats.active) queued=\(stats.queued) maximum_active=\(stats.maximumActive)")
+        XCTAssertEqual(startedNew, 1, "a new visible request must not wait for old prefetch downloads")
+        XCTAssertLessThanOrEqual(stats.maximumActive, 6)
+        XCTAssertGreaterThanOrEqual(cancelledOld, 4,
+            "demoted old requests must yield the four visible-reserved slots")
+        old.forEach { $0.cancel() }
+        newcomer.cancel()
+        for task in old { await task.value }
+        await newcomer.value
+        await repository.cancelInFlightLoads()
+    }
+
+    func testVisibleConsumerProtectsSharedRequestWhenOtherConsumerDemotes() async throws {
+        let client = PosterAdmissionProbe(body: try imageData(width: 32, height: 48), oldDelayNanoseconds: 120_000_000)
+        let (repository, directory) = try repository(client)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let request = PosterImageRequest(url: URL(string: "https://fixture.invalid/old-shared.png")!, pixels: 256)
+        let prefetchID = UUID()
+        let prefetch = Task { _ = try await repository.posterImage(for: request, priority: .visible, consumer: prefetchID) }
+        let visible = Task { _ = try await repository.posterImage(for: request, priority: .visible) }
+        for _ in 0..<30 {
+            if await client.oldStarts() == 1 { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        repository.updatePosterPriority(for: request, consumer: prefetchID,
+            priority: .reverse, distance: 10, revision: 1)
+        try await prefetch.value
+        try await visible.value
+        let sharedStarts = await client.oldStarts()
+        let sharedCancellations = await client.oldCancellations()
+        XCTAssertEqual(sharedStarts, 1, "same URL/rendition still has one shared request")
+        XCTAssertEqual(sharedCancellations, 0, "the remaining visible consumer protects the load")
+    }
+
+    func testRapidPriorityReversalDoesNotCancelAnInBudgetSharedRequest() async throws {
+        let client = PosterAdmissionProbe(body: try imageData(width: 32, height: 48), oldDelayNanoseconds: 180_000_000)
+        let (repository, directory) = try repository(client)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let request = PosterImageRequest(url: URL(string: "https://fixture.invalid/old-reverse.png")!, pixels: 256)
+        let consumer = UUID()
+        let task = Task { _ = try await repository.posterImage(for: request, priority: .forward, consumer: consumer) }
+        for _ in 0..<30 {
+            if await client.oldStarts() == 1 { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        for revision in UInt64(1)...40 {
+            repository.updatePosterPriority(for: request, consumer: consumer,
+                priority: revision.isMultiple(of: 2) ? .forward : .reverse,
+                distance: Int(40 - revision), revision: revision)
+        }
+        try await task.value
+        let reversalStarts = await client.oldStarts()
+        let reversalCancellations = await client.oldCancellations()
+        let reversalMaximumActive = await repository.posterPipelineStats().maximumActive
+        XCTAssertEqual(reversalStarts, 1)
+        XCTAssertEqual(reversalCancellations, 0)
+        XCTAssertLessThanOrEqual(reversalMaximumActive, 6)
+    }
+
+    func testPreheaterDirectionUpdatesReuseItsExistingConsumer() async throws {
+        let client = PosterAdmissionProbe(body: try imageData(width: 32, height: 48), oldDelayNanoseconds: 180_000_000)
+        let (repository, directory) = try repository(client)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let request = PosterImageRequest(url: URL(string: "https://fixture.invalid/old-preheat.png")!, pixels: 256)
+        let preheater = PosterPreheater()
+        preheater.update([.init(request: request, demand: .init(priority: .forward, distance: 0))], repository: repository)
+        for _ in 0..<30 {
+            if await client.oldStarts() == 1 { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        for revision in 0..<40 {
+            preheater.update([.init(request: request, demand: .init(
+                priority: revision.isMultiple(of: 2) ? .reverse : .forward,
+                distance: revision))], repository: repository)
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let starts = await client.oldStarts()
+        let cancellations = await client.oldCancellations()
+        XCTAssertEqual(starts, 1)
+        XCTAssertEqual(cancellations, 0)
+        XCTAssertNotNil(repository.cachedPoster(for: request))
+        preheater.cancel()
+    }
+
+    func testLastConsumerCancellationReleasesAllNetworkSlotsPromptly() async throws {
+        let client = ImageRepositoryHTTPClientProbe(body: try imageData(width: 32, height: 48), delayNanoseconds: 5_000_000_000)
+        let (repository, directory) = try repository(client)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let tasks = (0..<6).map { index in Task {
+            _ = try? await repository.posterImage(for: .init(url: URL(string: "https://fixture.invalid/cancel-\(index).png")!, pixels: 256))
+        } }
+        try await Task.sleep(nanoseconds: 40_000_000)
+        tasks.forEach { $0.cancel() }
+        for task in tasks { await task.value }
+        for _ in 0..<20 {
+            if await repository.posterPipelineStats().active == 0 { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let stats = await repository.posterPipelineStats()
+        XCTAssertEqual(stats.active, 0, "cancelled downloads must not hold visible-image capacity until timeout")
+        XCTAssertEqual(stats.queued, 0)
+    }
+    private func imageData(width: Int = 800, height: Int = 1200) throws -> Data {
+        let context = try XCTUnwrap(CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+            bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(red: 0.3, green: 0.4, blue: 0.8, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let image = try XCTUnwrap(context.makeImage())
+        let bytes = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(bytes, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        return bytes as Data
+    }
+    private func repository(_ client: HTTPClient) throws -> (ImageRepository, URL) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("poster-tests-\(UUID().uuidString)")
+        return (ImageRepository(dataRepository: try ImageDataRepository(cacheDirectory: directory, httpClient: client)), directory)
+    }
+    func testLargePosterDownsamplesOffMainAndSeparatesRenditions() async throws {
+        let client = ImageRepositoryHTTPClientProbe(body: try imageData(width: 2000, height: 3000), delayNanoseconds: 40_000_000)
+        let (repository, directory) = try repository(client)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = URL(string: "https://fixture.invalid/large.png")!
+        let small = PosterImageRequest(url: url, pixels: 300)
+        let large = PosterImageRequest(url: url, pixels: 900)
+        async let first = repository.posterImage(for: small)
+        async let second = repository.posterImage(for: large)
+        let (a, b) = try await (first, second)
+        let aCG = try XCTUnwrap(a.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        let bCG = try XCTUnwrap(b.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        XCTAssertLessThanOrEqual(max(aCG.width, aCG.height), 384)
+        XCTAssertLessThanOrEqual(max(bCG.width, bCG.height), 1024)
+        XCTAssertGreaterThan(bCG.height, aCG.height)
+        XCTAssertTrue(a === repository.cachedPoster(for: small))
+        XCTAssertFalse(a === b)
+        let stats = await repository.posterPipelineStats()
+        XCTAssertEqual(stats.decoded, 2)
+        XCTAssertEqual(stats.decodedOnMain, 0)
+        let count = await client.requestCount()
+        XCTAssertEqual(count, 1)
+    }
+    func testCancelOneConsumerDoesNotCancelSharedVisibleImage() async throws {
+        let client = ImageRepositoryHTTPClientProbe(body: try imageData(), delayNanoseconds: 100_000_000)
+        let (repository, directory) = try repository(client)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let request = PosterImageRequest(url: URL(string: "https://fixture.invalid/shared.png")!, pixels: 512)
+        let first = Task { try await repository.posterImage(for: request, priority: .forward) }
+        let second = Task { try await repository.posterImage(for: request) }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        first.cancel()
+        do { _ = try await first.value; XCTFail("cancelled consumer must stop") } catch { XCTAssertTrue(AsyncCancellationPolicy.isCancellation(error)) }
+        _ = try await second.value
+        let count = await client.requestCount()
+        XCTAssertEqual(count, 1)
+    }
+    func testQueueAndActiveLoadsStayBoundedUnderRapidDemand() async throws {
+        let client = ImageRepositoryHTTPClientProbe(body: try imageData(width: 32, height: 48), delayNanoseconds: 70_000_000)
+        let (repository, directory) = try repository(client)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await withTaskGroup(of: Void.self) { group in
+            for index in 0..<250 {
+                group.addTask {
+                    _ = try? await repository.posterImage(for: .init(url: URL(string: "https://fixture.invalid/\(index).png")!, pixels: 256))
+                }
+            }
+        }
+        let stats = await repository.posterPipelineStats()
+        XCTAssertLessThanOrEqual(stats.maximumActive, 6)
+        XCTAssertLessThanOrEqual(stats.maximumQueued, 96)
+        XCTAssertEqual(stats.active, 0)
+        XCTAssertEqual(stats.queued, 0)
+        XCTAssertEqual(stats.decodedOnMain, 0)
+    }
+    func testSpeculativeLoadsLeaveCapacityForVisibleImages() async throws {
+        let client = ImageRepositoryHTTPClientProbe(body: try imageData(width: 32, height: 48), delayNanoseconds: 150_000_000)
+        let (repository, directory) = try repository(client)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let tasks = (0..<12).map { index in Task {
+            _ = try? await repository.posterImage(for: .init(url: URL(string: "https://fixture.invalid/prefetch-\(index).png")!, pixels: 256), priority: .forward)
+        } }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        let stats = await repository.posterPipelineStats()
+        XCTAssertLessThanOrEqual(stats.active, 2)
+        let visible = Task { try await repository.posterImage(for: .init(url: URL(string: "https://fixture.invalid/visible.png")!, pixels: 256)) }
+        _ = try await visible.value
+        tasks.forEach { $0.cancel() }
+        for task in tasks { await task.value }
+        await repository.cancelInFlightLoads()
+    }
+    func testInvalidImageIsNotCachedAndDiskSurvivesRenditionChange() async throws {
+        let invalidClient = ImageRepositoryHTTPClientProbe(body: Data("invalid".utf8))
+        let (invalid, invalidDirectory) = try repository(invalidClient)
+        defer { try? FileManager.default.removeItem(at: invalidDirectory) }
+        let request = PosterImageRequest(url: URL(string: "https://fixture.invalid/poster.png")!, pixels: 256)
+        for _ in 0..<2 { do { _ = try await invalid.posterImage(for: request); XCTFail() } catch {} }
+        XCTAssertNil(invalid.cachedPoster(for: request))
+        let invalidRequests = await invalidClient.requestCount()
+        XCTAssertEqual(invalidRequests, 2)
+        let client = ImageRepositoryHTTPClientProbe(body: try imageData())
+        let (first, directory) = try repository(client)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        _ = try await first.posterImage(for: request)
+        let offline = ImageRepositoryHTTPClientProbe(error: .statusCode(500))
+        let restored = ImageRepository(dataRepository: try ImageDataRepository(cacheDirectory: directory, httpClient: offline))
+        _ = try await restored.posterImage(for: .init(url: request.url, pixels: 768))
+        let networkRequests = await offline.requestCount()
+        XCTAssertEqual(networkRequests, 0)
+    }
+    func testRenditionIdentityKeepsProxyHeaderIsolationAndScreenScaleBuckets() {
+        XCTAssertEqual(PosterImageRequest.bucket(522), 640)
+        XCTAssertEqual(PosterImageRequest.bucket(9000), 2048)
+        let a = URL(string: "http://127.0.0.1:1000/imageProxy?url=https%3A%2F%2Ffixture.invalid%2Fp.png&customHeaders=%7B%22Cookie%22%3A%22a%22%7D")!
+        let b = URL(string: "http://127.0.0.1:2000/imageProxy?url=https%3A%2F%2Ffixture.invalid%2Fp.png&customHeaders=%7B%22Cookie%22%3A%22a%22%7D")!
+        let c = URL(string: "http://127.0.0.1:2000/imageProxy?url=https%3A%2F%2Ffixture.invalid%2Fp.png&customHeaders=%7B%22Cookie%22%3A%22b%22%7D")!
+        XCTAssertEqual(ImageCacheIdentity(url: a, posterPixels: 512), ImageCacheIdentity(url: b, posterPixels: 512))
+        XCTAssertNotEqual(ImageCacheIdentity(url: a, posterPixels: 512), ImageCacheIdentity(url: c, posterPixels: 512))
+        XCTAssertNotEqual(ImageCacheIdentity(url: a, posterPixels: 512), ImageCacheIdentity(url: a, posterPixels: 768))
+    }
+    func testPosterMemoryCacheReusesProxyIdentityAcrossPorts() async throws {
+        let client = ImageRepositoryHTTPClientProbe(body: try imageData(width: 32, height: 48))
+        let (repository, directory) = try repository(client)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let a = URL(string: "http://127.0.0.1:1000/imageProxy?url=https%3A%2F%2Ffixture.invalid%2Fp.png&customHeaders=%7B%22Cookie%22%3A%22a%22%7D")!
+        let b = URL(string: "http://127.0.0.1:2000/imageProxy?url=https%3A%2F%2Ffixture.invalid%2Fp.png&customHeaders=%7B%22Cookie%22%3A%22a%22%7D")!
+        let c = URL(string: "http://127.0.0.1:2000/imageProxy?url=https%3A%2F%2Ffixture.invalid%2Fp.png&customHeaders=%7B%22Cookie%22%3A%22b%22%7D")!
+        let first = try await repository.posterImage(for: .init(url: a, pixels: 512))
+        XCTAssertTrue(first === repository.cachedPoster(for: .init(url: b, pixels: 512)))
+        XCTAssertNil(repository.cachedPoster(for: .init(url: c, pixels: 512)))
+        XCTAssertNil(repository.cachedPoster(for: .init(url: b, pixels: 768)))
+    }
+    func testHoverUpdatesOnlyOldAndNewCardsInLargeGrid() {
+        let model = PosterSelectionModel()
+        let states = (0..<2000).map { model.highlight(for: "\($0)") }
+        model.hover("100", inside: true)
+        model.hover("101", inside: true)
+        model.hover("100", inside: false)
+        XCTAssertEqual(model.highlightedID, "101")
+        XCTAssertEqual(states.reduce(0) { $0 + $1.changes }, 3)
+        XCTAssertEqual(states.filter(\.isHighlighted).count, 1)
+        model.select("102")
+        XCTAssertEqual(states.filter(\.isHighlighted).count, 1)
+        XCTAssertTrue(states[102].isHighlighted)
+    }
+}
+
+@MainActor
+final class PosterBrowseRestorationTests: XCTestCase {
+    func testTopRestorationPreservesNativeToolbarInsets() async throws {
+        final class Document: NSView { override var isFlipped: Bool { true } }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        scroll.automaticallyAdjustsContentInsets = false
+        scroll.contentInsets = NSEdgeInsets(top: 64, left: 0, bottom: 12, right: 0)
+        let document = Document(frame: NSRect(x: 0, y: 0, width: 900, height: 5000))
+        scroll.documentView = document
+        let probe = PosterScrollProbe(frame: NSRect(x: 0, y: 80, width: 900, height: 4800))
+        probe.itemIDs = (0..<100).map(String.init)
+        document.addSubview(probe)
+        window.contentView = scroll
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 400))
+        var latest: PosterScrollMetrics?
+        probe.onUpdate = { latest = $0 }
+        probe.receive(.init(id: UUID(), anchor: nil))
+        try await Task.sleep(nanoseconds: 40_000_000)
+        XCTAssertEqual(scroll.contentView.bounds.minY, -64, accuracy: 1)
+        XCTAssertEqual(try XCTUnwrap(latest?.offset), 0, accuracy: 1)
+        XCTAssertEqual(try XCTUnwrap(latest?.regionTop), 144, accuracy: 1)
+        XCTAssertEqual(PosterBrowseAnchor.capture(ids: probe.itemIDs, metrics: try XCTUnwrap(latest))?.atTop, true)
+        probe.stop()
+    }
+    private let namespace = CategoryTabNamespace(configurationID: UUID(), configurationRevision: "fixture", siteKey: "fixture")
+    private func page(_ title: String, count: Int = 1) -> VideoPage {
+        .init(items: (0..<count).map { .init(siteKey: "fixture", siteName: "Fixture", videoID: "\(title)-\($0)", title: title) }, pagination: .init(page: 1, pageCount: 20))
+    }
+    private func load(_ id: String, into store: inout CategoryTabSessionStore) -> CategoryQueryKey {
+        let key = store.queryKey(namespace: namespace, category: .init(id: id, name: id), requestedFilters: nil)
+        if case .start(let generation) = store.beginRequest(for: key, page: 1, forceRefresh: false) {
+            store.completeRequest(for: key, page: 1, generation: generation, loaded: page(id))
+        }
+        return key
+    }
+    func testRefreshWhileReadingStagesAndAcceptanceAtomicallyResetsPagination() {
+        var store = CategoryTabSessionStore()
+        let key = load("old", into: &store)
+        let old = store.state(for: key)?.page
+        let anchor = PosterBrowseAnchor(itemID: old!.items[0].id, offset: 20, atTop: false)
+        store.recordViewport(for: key, anchor: anchor, atTop: false, interacted: true)
+        guard case .start(let generation) = store.beginRequest(for: key, page: 1, forceRefresh: true) else { return XCTFail() }
+        let staged = store.completeRequest(for: key, page: 1, generation: generation, loaded: page("new"))
+        XCTAssertEqual(staged?.page, old)
+        XCTAssertEqual(staged?.browseAnchor, anchor)
+        XCTAssertEqual(staged?.pendingRefreshPage, page("new"))
+        XCTAssertEqual(store.beginRequest(for: key, page: 2, forceRefresh: false), .rejected)
+        let accepted = store.acceptRefresh(for: key)
+        XCTAssertEqual(accepted?.page, page("new"))
+        XCTAssertNil(accepted?.browseAnchor)
+        XCTAssertNil(accepted?.pendingRefreshPage)
+        XCTAssertEqual(accepted?.presentationRevision, 1)
+    }
+    func testInteractionDuringTopRefreshPreventsSurpriseReplacement() {
+        var store = CategoryTabSessionStore()
+        let key = load("old", into: &store)
+        guard case .start(let generation) = store.beginRequest(for: key, page: 1, forceRefresh: true) else { return XCTFail() }
+        store.recordViewport(for: key, anchor: .init(itemID: "fixture", offset: 0, atTop: true), atTop: true, interacted: true)
+        let result = store.completeRequest(for: key, page: 1, generation: generation, loaded: page("new"))
+        XCTAssertNotNil(result?.pendingRefreshPage)
+        XCTAssertEqual(result?.page, page("old"))
+    }
+    func testUnchangedTopRefreshCommitsAndFailureKeepsOldPagination() {
+        var store = CategoryTabSessionStore()
+        let key = load("old", into: &store)
+        guard case .start(let generation) = store.beginRequest(for: key, page: 1, forceRefresh: true) else { return XCTFail() }
+        let result = store.completeRequest(for: key, page: 1, generation: generation, loaded: page("new"))
+        XCTAssertEqual(result?.page, page("new"))
+        XCTAssertNil(result?.pendingRefreshPage)
+        guard case .start(let retry) = store.beginRequest(for: key, page: 1, forceRefresh: true) else { return XCTFail() }
+        store.failRequest(for: key, page: 1, generation: retry, message: "offline", isCancellation: false)
+        XCTAssertEqual(store.state(for: key)?.page, page("new"))
+        guard case .start = store.beginRequest(for: key, page: 2, forceRefresh: false) else { return XCTFail("failed refresh must restore append") }
+    }
+    func testLRUBoundsIncludeInactiveFilterVariantsAndPreserveActiveQuery() {
+        var store = CategoryTabSessionStore()
+        var keys: [CategoryQueryKey] = []
+        for index in 0..<12 {
+            let key = store.queryKey(namespace: namespace, category: .init(id: "one-category", name: "One"), requestedFilters: ["year": "\(index)"])
+            keys.append(key)
+            if case .start(let generation) = store.beginRequest(for: key, page: 1, forceRefresh: false) {
+                store.completeRequest(for: key, page: 1, generation: generation, loaded: page("\(index)"))
+            }
+            store.trim(keeping: key)
+        }
+        XCTAssertEqual(store.queryStates.count, 7)
+        XCTAssertNil(store.state(for: keys[0]))
+        XCTAssertNotNil(store.state(for: keys.last!))
+        store.trim(keeping: keys.last!, maximumInactive: 6, maximumInactiveItems: 2)
+        XCTAssertEqual(store.queryStates.count, 3)
+    }
+    func testEvictedInflightQueryCannotPublishLateResponse() {
+        var store = CategoryTabSessionStore()
+        let key = store.queryKey(namespace: namespace, category: .init(id: "slow", name: "Slow"), requestedFilters: nil)
+        guard case .start(let generation) = store.beginRequest(for: key, page: 1, forceRefresh: false) else { return XCTFail() }
+        let active = load("active", into: &store)
+        store.trim(keeping: active, maximumInactive: 0)
+        XCTAssertNil(store.completeRequest(for: key, page: 1, generation: generation, loaded: page("late")))
+    }
+    func testAnchorRoundTripsAtDifferentWidthsAndSurvivesAppend() throws {
+        let ids = (0..<2000).map(String.init)
+        for width: CGFloat in [460, 900, 1440] {
+            let metrics = PosterScrollMetrics(offset: 1850, viewport: .init(width: width, height: 600), regionTop: 80, regionSize: .init(width: width, height: 5000))
+            let anchor = try XCTUnwrap(PosterBrowseAnchor.capture(ids: ids, metrics: metrics))
+            XCTAssertEqual(try XCTUnwrap(anchor.targetOffset(ids: ids, width: width, regionTop: 80)), 1850, accuracy: 1)
+            XCTAssertEqual(anchor.targetOffset(ids: ids + ["new"], width: width, regionTop: 80), anchor.targetOffset(ids: ids, width: width, regionTop: 80))
+            XCTAssertNotNil(anchor.targetOffset(ids: ids, width: width + 230, regionTop: 80))
+        }
+    }
+    func testNativeRestorationRunsOnceAndDoesNotFightSubsequentScroll() async throws {
+        final class Document: NSView { override var isFlipped: Bool { true } }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        let document = Document(frame: NSRect(x: 0, y: 0, width: 900, height: 10000))
+        scroll.documentView = document
+        let probe = PosterScrollProbe(frame: NSRect(x: 0, y: 80, width: 900, height: 9000))
+        probe.itemIDs = (0..<100).map(String.init)
+        document.addSubview(probe)
+        window.contentView = scroll
+        let anchor = PosterBrowseAnchor(itemID: "20", offset: 17, atTop: false)
+        let request = PosterScrollRestoration(id: UUID(), anchor: anchor)
+        probe.receive(request)
+        try await Task.sleep(nanoseconds: 40_000_000)
+        let target = try XCTUnwrap(anchor.targetOffset(ids: probe.itemIDs, width: 900, regionTop: 80))
+        XCTAssertEqual(scroll.contentView.bounds.minY, target, accuracy: 1)
+        scroll.contentView.scroll(to: .init(x: 0, y: target + 100))
+        probe.receive(request)
+        probe.scheduleUpdate()
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(scroll.contentView.bounds.minY, target + 100, accuracy: 1)
+        probe.stop()
+    }
+}
+
+@MainActor
+final class BrowserToolbarNativeScrollTests: XCTestCase {
+    func testToolbarReportsOnlyTopBoundaryChanges() async throws {
+        var states: [Bool] = []
+        let content = ScrollView {
+            VStack(spacing: 0) {
+                BrowserToolbarScrollMarker(coordinateSpaceName: "toolbar-test")
+                Color.clear.frame(height: 2_400)
+            }
+        }
+        .browserToolbarScrollSurface(named: "toolbar-test")
+        .environment(\.browserToolbarScrollReporter) { states.append($0) }
+        let host = NSHostingView(rootView: content)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 500),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        try await Task.sleep(nanoseconds: 80_000_000)
+        let scroll = try XCTUnwrap(BrowserKeyboardView.descendants(of: host)
+            .compactMap { $0 as? NSScrollView }.first)
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 700))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        try await Task.sleep(nanoseconds: 40_000_000)
+        XCTAssertEqual(states.last, true)
+        let count = states.count
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 800))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        try await Task.sleep(nanoseconds: 40_000_000)
+        XCTAssertEqual(states.count, count)
+        scroll.contentView.scroll(to: .zero)
+        scroll.reflectScrolledClipView(scroll.contentView)
+        try await Task.sleep(nanoseconds: 40_000_000)
+        XCTAssertEqual(states.last, false)
+    }
+}
+
+@MainActor
+final class PosterPaginationTests: XCTestCase {
+    private func metrics(_ offset: CGFloat = 0, top: CGFloat = 1500, width: CGFloat = 900) -> PosterScrollMetrics {
+        .init(offset: offset, viewport: CGSize(width: width, height: 600), regionTop: top, regionSize: CGSize(width: width, height: 44))
+    }
+    func testPrefetchReservesOneRequestAndCompletionReevaluatesShortPage() {
+        var demand = PosterPaginationDemand()
+        XCTAssertFalse(demand.requestIfNeeded(metrics: metrics(top: 1900), nextPage: 2, eligible: true))
+        XCTAssertTrue(demand.requestIfNeeded(metrics: metrics(top: 1800), nextPage: 2, eligible: true))
+        XCTAssertFalse(demand.requestIfNeeded(metrics: metrics(top: 1800), nextPage: 2, eligible: true))
+        XCTAssertFalse(demand.requestIfNeeded(metrics: metrics(top: 1800), nextPage: 3, eligible: true))
+        demand.finish(page: 2)
+        XCTAssertTrue(demand.requestIfNeeded(metrics: metrics(top: 1800), nextPage: 3, eligible: true))
+    }
+    func testShortPagesFillViewportBeyondTwoRequests() {
+        var demand = PosterPaginationDemand()
+        for page in 2...6 {
+            XCTAssertTrue(demand.requestIfNeeded(metrics: metrics(top: CGFloat(page) * 250), nextPage: page, eligible: true))
+            demand.finish(page: page)
+        }
+        XCTAssertFalse(demand.requestIfNeeded(metrics: metrics(top: 1900), nextPage: 7, eligible: true))
+    }
+    func testNewBottomLoadsAtBothOrdinaryAndFullscreenHeights() {
+        for height: CGFloat in [600, 1200] {
+            var demand = PosterPaginationDemand()
+            let oldTop = height + 1000 - 60
+            XCTAssertTrue(demand.requestIfNeeded(metrics: .init(offset: 1000, viewport: .init(width: 900, height: height), regionTop: oldTop, regionSize: .zero), nextPage: 2, eligible: true))
+            demand.finish(page: 2)
+            XCTAssertTrue(demand.requestIfNeeded(metrics: .init(offset: 1340, viewport: .init(width: 900, height: height), regionTop: oldTop + 340, regionSize: .zero), nextPage: 3, eligible: true))
+        }
+    }
+    func testResizeClampDoesNotLatchBackwardDirection() {
+        var demand = PosterPaginationDemand()
+        XCTAssertTrue(demand.requestIfNeeded(metrics: metrics(1200, top: 3000), nextPage: 2, eligible: true))
+        demand.finish(page: 2)
+        XCTAssertTrue(demand.requestIfNeeded(metrics: .init(offset: 800, viewport: .init(width: 1200, height: 1000), regionTop: 1740, regionSize: .zero), nextPage: 3, eligible: true))
+    }
+    func testCancelledOrRejectedRequestReleasesSamePageWithoutAdvancing() {
+        var demand = PosterPaginationDemand()
+        XCTAssertTrue(demand.requestIfNeeded(metrics: metrics(), nextPage: 2, eligible: true))
+        demand.finish(page: 99)
+        XCTAssertFalse(demand.requestIfNeeded(metrics: metrics(), nextPage: 2, eligible: true))
+        demand.finish(page: 2)
+        XCTAssertTrue(demand.requestIfNeeded(metrics: metrics(), nextPage: 2, eligible: true))
+    }
+    func testLoadingOrErrorNeverConsumesDemand() {
+        var demand = PosterPaginationDemand()
+        XCTAssertFalse(demand.requestIfNeeded(metrics: metrics(), nextPage: 2, eligible: false))
+        XCTAssertTrue(demand.requestIfNeeded(metrics: metrics(), nextPage: 2, eligible: true))
+    }
+    private func fixture() -> (CategoryTabSessionStore, CategoryQueryKey, VideoPage) {
+        var store = CategoryTabSessionStore()
+        let key = store.queryKey(namespace: .init(configurationID: UUID(), configurationRevision: "a", siteKey: "fixture"), category: .init(id: "a", name: "A"), requestedFilters: nil)
+        let page = VideoPage(items: [.init(siteKey: "fixture", siteName: "Fixture", videoID: "1", title: "One")], pagination: .init(page: 1, pageCount: 99))
+        if case .start(let generation) = store.beginRequest(for: key, page: 1, forceRefresh: false) {
+            store.completeRequest(for: key, page: 1, generation: generation, loaded: page)
+        }
+        return (store, key, page)
+    }
+    func testDuplicateAndContradictoryEmptyPauseWithoutFalseEndOrPageAdvance() {
+        for empty in [false, true] {
+            var (store, key, page) = fixture()
+            guard case .start(let generation) = store.beginRequest(for: key, page: 2, forceRefresh: false) else { return XCTFail() }
+            let response = VideoPage(items: empty ? [] : page.items, pagination: .init(page: 2, pageCount: 99))
+            let result = store.completeRequest(for: key, page: 2, generation: generation, loaded: response)
+            XCTAssertEqual(result?.page, page)
+            XCTAssertNotNil(result?.paginationError)
+            XCTAssertEqual(result?.isLoadingNextPage, false)
+            XCTAssertEqual(result?.hasMore, true)
+            guard case .start = store.beginRequest(for: key, page: 2, forceRefresh: false) else { return XCTFail("same page must remain retryable") }
+        }
+    }
+    func testAuthoritativeEmptyEndsAndRefreshBlocksOldAppend() {
+        var (store, key, _) = fixture()
+        guard case .start(let generation) = store.beginRequest(for: key, page: 2, forceRefresh: false) else { return XCTFail() }
+        let result = store.completeRequest(for: key, page: 2, generation: generation, loaded: .init(items: [], pagination: .init(page: 2, pageCount: 2)))
+        XCTAssertEqual(result?.hasMore, false)
+        var (other, otherKey, _) = fixture()
+        guard case .start = other.beginRequest(for: otherKey, page: 1, forceRefresh: true) else { return XCTFail() }
+        XCTAssertEqual(other.beginRequest(for: otherKey, page: 2, forceRefresh: false), .rejected)
+    }
+    func testDuplicateTerminalPageCommitsEndWithoutFailure() {
+        var (store, key, first) = fixture()
+        guard case .start(let generation) = store.beginRequest(for: key, page: 2, forceRefresh: false) else { return XCTFail() }
+        var pagination = Pagination(page: 2, pageCount: 2)
+        pagination.continuation = .end
+        let result = store.completeRequest(for: key, page: 2, generation: generation, loaded: .init(items: first.items, pagination: pagination))
+        XCTAssertNil(result?.paginationError)
+        XCTAssertEqual(result?.page?.pagination.page, 2)
+        XCTAssertEqual(result?.page?.items, first.items)
+        XCTAssertEqual(result?.hasMore, false)
+    }
+    func testNoProgressIsUncertainAndCancellationPreservesCursor() {
+        var (store, key, first) = fixture()
+        guard case .start(let generation) = store.beginRequest(for: key, page: 2, forceRefresh: false) else { return XCTFail() }
+        let result = store.completeRequest(for: key, page: 2, generation: generation, loaded: first)
+        XCTAssertEqual(result?.paginationIssueKind, .uncertain)
+        XCTAssertEqual(HomePaginationPhase.resolve(hasMore: true, loading: false, refreshing: false, error: result?.paginationError, issueKind: .uncertain), .uncertain)
+        guard case .start(let retry) = store.beginRequest(for: key, page: 2, forceRefresh: false) else { return XCTFail() }
+        let cancelled = store.failRequest(for: key, page: 2, generation: retry, message: nil, isCancellation: true)
+        XCTAssertEqual(cancelled?.page, first)
+        XCTAssertNil(cancelled?.paginationError)
+        guard case .start = store.beginRequest(for: key, page: 2, forceRefresh: false) else { return XCTFail() }
+    }
+
+    func testNativeGridFillsShortPagesAndReevaluatesLargerViewport() async throws {
+        final class Model: ObservableObject {
+            @Published var count = 1
+            @Published var allowsLoad = false
+            var requests = 0
+            var inFlight = 0
+            var maximumInFlight = 0
+        }
+        struct Fixture: View {
+            @ObservedObject var model: Model
+            var body: some View {
+                PosterNativePage(
+                    items: (0..<model.count).map { .init(siteKey: "fixture", siteName: "Fixture", videoID: "\($0)", title: "\($0)") },
+                    headerKey: .init(categories: [], selectedCategoryID: "a", showsRecommendations: false, filterSelection: [:]),
+                    headerHeight: 84.5, activeFilters: [],
+                    footerKey: .init(hasMore: model.allowsLoad && model.count < 60, isLoading: false, isRefreshing: false, errorMessage: nil, itemCount: model.count, hasPendingUpdate: false),
+                    nextPage: model.count + 1, initialAnchor: nil, presentationRevision: 0,
+                    onCategorySelect: { _ in }, onFilterReset: { _ in }, onClearFilters: {}, onAcceptUpdate: {}, onBrowse: { _, _, _ in },
+                    onLoad: {
+                        model.inFlight += 1
+                        model.maximumInFlight = max(model.maximumInFlight, model.inFlight)
+                        try? await Task.sleep(nanoseconds: 1_000_000)
+                        model.count += 1
+                        model.requests += 1
+                        model.inFlight -= 1
+                        return true
+                    }, onSelect: { _ in })
+            }
+        }
+        let model = Model()
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 900, height: 1000), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = NSHostingView(rootView: Fixture(model: model))
+        window.contentView?.layoutSubtreeIfNeeded()
+        try await Task.sleep(nanoseconds: 80_000_000)
+        let collection = try XCTUnwrap(BrowserKeyboardView.descendants(of: window.contentView!).compactMap { $0 as? PosterNativePageCollectionView }.first)
+        let footer = try XCTUnwrap(collection.extraAccessibilityChildren.last)
+        let initialFooterY = footer.frame.minY
+        let initialDocumentHeight = collection.frame.height
+        model.count = 6 // Two rows, still shorter than this tall viewport.
+        try await Task.sleep(nanoseconds: 80_000_000)
+        XCTAssertEqual(collection.frame.height, initialDocumentHeight, accuracy: 1)
+        XCTAssertGreaterThan(footer.frame.minY, initialFooterY, "Footer must move when rows change even if minimum document height does not")
+        window.setContentSize(.init(width: 900, height: 500))
+        model.allowsLoad = true
+        // Allow the real SwiftUI/AppKit bridge to commit successive pages.
+        for _ in 0..<100 { try await Task.sleep(nanoseconds: 20_000_000) }
+        let beforeResize = model.count
+        XCTAssertGreaterThan(model.requests, 2)
+        XCTAssertLessThan(beforeResize, 60, "Prefetch must stop outside the finite viewport buffer")
+        window.setContentSize(.init(width: 1200, height: 1000))
+        window.contentView?.layoutSubtreeIfNeeded()
+        for _ in 0..<100 { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertGreaterThan(model.count, beforeResize, "A larger viewport creates demand without a wheel event")
+        XCTAssertEqual(model.maximumInFlight, 1)
+    }
+
+    func testNativeObserverUsesOnlyItsEnclosingScrollView() async throws {
+        final class Document: NSView { override var isFlipped: Bool { true } }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        let document = Document(frame: NSRect(x: 0, y: 0, width: 900, height: 3000))
+        scroll.documentView = document
+        let probe = PosterScrollProbe(frame: NSRect(x: 0, y: 2600, width: 900, height: 44))
+        document.addSubview(probe)
+        window.contentView = scroll
+        var samples: [PosterScrollMetrics] = []
+        probe.onUpdate = { samples.append($0) }
+        probe.scheduleUpdate()
+        try await Task.sleep(nanoseconds: 30_000_000)
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 1500))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        let last = try XCTUnwrap(samples.last)
+        XCTAssertEqual(last.offset, 1500, accuracy: 1)
+        XCTAssertEqual(last.remaining, 500, accuracy: 1)
+        probe.stop()
+    }
+}
+
+@MainActor
+final class PosterBrowseLayoutTests: XCTestCase {
+    func testPrefetchPlanFlipsWithScrollDirectionAndKeepsNearestFirst() {
+        let items = (0..<45).map { index in VideoSummary(siteKey: "fixture", siteName: "Fixture",
+            videoID: "\(index)", title: "\(index)",
+            posterURL: URL(string: "https://fixture.invalid/\(index).png")!) }
+        let down = PosterPrefetchBand(firstRow: 4, lastRow: 5, columns: 3, pixels: 256,
+            count: items.count, direction: .down, hasVisibleRows: true).plan(items: items)
+        let up = PosterPrefetchBand(firstRow: 4, lastRow: 5, columns: 3, pixels: 256,
+            count: items.count, direction: .up, hasVisibleRows: true).plan(items: items)
+        XCTAssertEqual(Array(down.prefix(9).map { $0.request.url.lastPathComponent }),
+            ["15.png", "16.png", "17.png", "12.png", "13.png", "14.png", "18.png", "19.png", "20.png"])
+        XCTAssertEqual(Array(up.prefix(9).map { $0.request.url.lastPathComponent }),
+            ["12.png", "13.png", "14.png", "15.png", "16.png", "17.png", "9.png", "10.png", "11.png"])
+        XCTAssertEqual(down[6].demand, .init(priority: .forward, distance: 0))
+        XCTAssertEqual(up[6].demand, .init(priority: .forward, distance: 0))
+        XCTAssertEqual(down[9].demand, .init(priority: .reverse, distance: 0))
+        XCTAssertEqual(up[9].demand, .init(priority: .reverse, distance: 0))
+        XCTAssertEqual(down[12].demand, .init(priority: .forward, distance: 1))
+        XCTAssertLessThan(PosterImageDemand(priority: .forward, distance: 0),
+            PosterImageDemand(priority: .reverse, distance: 0))
+        XCTAssertLessThan(PosterImageDemand(priority: .reverse, distance: 0),
+            PosterImageDemand(priority: .forward, distance: 1))
+        XCTAssertEqual(Set(down.map(\.request)).count, down.count)
+        XCTAssertEqual(Set(up.map(\.request)).count, up.count)
+        XCTAssertTrue(PosterPrefetchBand(firstRow: 0, lastRow: 0, columns: 3, pixels: 256,
+            count: items.count, direction: .down, hasVisibleRows: false).plan(items: items).isEmpty)
+    }
+    func testPrefetchGateSkipsUnchangedViewportAndInvalidatesChangedContent() {
+        let gate = PosterPrefetchPlanGate()
+        let firstSource = PosterPrefetchSource()
+        let band = PosterPrefetchBand(firstRow: 4, lastRow: 5, columns: 3,
+            pixels: 256, count: 45, direction: .down, hasVisibleRows: true)
+        XCTAssertTrue(gate.shouldUpdate(band: band, source: firstSource))
+        XCTAssertFalse(gate.shouldUpdate(band: band, source: firstSource))
+        let changedSourceWithSameCount = PosterPrefetchSource()
+        XCTAssertTrue(gate.shouldUpdate(band: band, source: changedSourceWithSameCount))
+        XCTAssertFalse(gate.shouldUpdate(band: band, source: changedSourceWithSameCount))
+        let reversed = PosterPrefetchBand(firstRow: 4, lastRow: 5, columns: 3,
+            pixels: 256, count: 45, direction: .up, hasVisibleRows: true)
+        XCTAssertTrue(gate.shouldUpdate(band: reversed, source: changedSourceWithSameCount))
+        gate.reset()
+        XCTAssertTrue(gate.shouldUpdate(band: reversed, source: changedSourceWithSameCount))
+    }
+    func testSkeletonCoversViewportAndUsesRealColumnCount() {
+        for width: CGFloat in [140, 460, 920, 1440] {
+            let columns = PosterGridMetrics.columnCount(width: width)
+            let count = PosterGridMetrics.skeletonCount(width: width, height: 700)
+            XCTAssertEqual(count % columns, 0)
+            XCTAssertGreaterThanOrEqual(CGFloat(count / columns) * (PosterGridMetrics.cardHeight(width: PosterGridMetrics.cardWidth(width: width)) + PosterGridMetrics.rowSpacing), 700)
+        }
+    }
+
+    func testRefreshNeverReportsPaginationComplete() {
+        XCTAssertEqual(HomePaginationPhase.resolve(hasMore: false, loading: false, refreshing: true, error: nil), .refreshing)
+        XCTAssertEqual(HomePaginationPhase.resolve(hasMore: true, loading: true, refreshing: false, error: nil), .loading)
+        XCTAssertEqual(HomePaginationPhase.resolve(hasMore: true, loading: false, refreshing: false, error: "offline"), .failed)
+        XCTAssertEqual(HomePaginationPhase.resolve(hasMore: false, loading: false, refreshing: false, error: nil), .complete)
+    }
+
+    func testRealCardsAndSkeletonHaveIdenticalMeasuredHeight() {
+        for width: CGFloat in [140, 170, 190] {
+            var heights: [CGFloat] = []
+            for (title, remark) in [("短标题", nil as String?), (String(repeating: "很长的标题", count: 10), "更新至第 12 集")] {
+                let item = VideoSummary(siteKey: "fixture", siteName: "Fixture", videoID: title, title: title, remarks: remark)
+                let host = NSHostingView(rootView: VideoCard(item: item, isHighlighted: false, onHover: { _ in }, onSelect: {}).frame(width: width))
+                heights.append(host.fittingSize.height)
+            }
+            let skeleton = NSHostingView(rootView: PosterSkeletonCard().frame(width: width))
+            XCTAssertEqual(heights[0], heights[1], accuracy: 1)
+            XCTAssertEqual(heights[0], skeleton.fittingSize.height, accuracy: 1)
+            XCTAssertEqual(heights[0], PosterGridMetrics.cardHeight(width: width), accuracy: 1)
+        }
+    }
+
+    func testGridProvidedPosterGeometryKeepsCardHeightAndPixelBucket() {
+        let item = VideoSummary(siteKey: "fixture", siteName: "Fixture",
+            videoID: "poster", title: "Poster",
+            posterURL: URL(string: "https://fixture.invalid/poster.png"))
+        for width: CGFloat in [460, 920, 1_100] {
+            let geometry = PosterGridImageGeometry(gridWidth: width, displayScale: 2)
+            let cardWidth = PosterGridMetrics.cardWidth(width: width)
+            let host = NSHostingView(rootView: VideoCard(item: item,
+                isHighlighted: false, onHover: { _ in }, onSelect: {})
+                .environment(\.posterCardGeometry, geometry)
+                .frame(width: cardWidth))
+            XCTAssertEqual(geometry.posterWidth,
+                cardWidth - 2 * PosterGridMetrics.inset, accuracy: 1)
+            XCTAssertEqual(geometry.pixels,
+                PosterImageRequest.bucket(geometry.posterWidth * 1.5 * 2))
+            XCTAssertEqual(host.fittingSize.height,
+                PosterGridMetrics.cardHeight(width: cardWidth), accuracy: 1)
+        }
+    }
+
+    func testPaginationProbeHasNoVisibleStatusRowInAnyPhase() {
+        for phase in [HomePaginationPhase.idle, .loading, .refreshing, .failed, .uncertain, .complete] {
+            let host = NSHostingView(rootView: HomePaginationFooter(
+                hasMore: phase != .complete, isLoading: phase == .loading,
+                isRefreshing: phase == .refreshing, errorMessage: phase == .failed || phase == .uncertain ? "fixture failure" : nil,
+                itemCount: 23, viewportHeight: 600, coordinateSpaceName: "fixture", issueKind: phase == .uncertain ? .uncertain : .failed, onLoad: { true }).frame(width: 800))
+            XCTAssertLessThanOrEqual(host.fittingSize.height, 1, "Pagination must not reserve a visible footer row")
+        }
+    }
+}
 
 @MainActor
 final class ImportedRouteWiringTests: XCTestCase {
@@ -1249,6 +2141,111 @@ final class PlayerSeekBoundaryRegressionTests: XCTestCase {
 }
 
 @MainActor
+final class SettingsNavigationIsolationTests: XCTestCase {
+    func testPaneSelectionPublishesOnlyLightweightSettingsNavigation() {
+        let state = AppState(environment: nil)
+        var appStateUpdates = 0
+        var navigationUpdates = 0
+        let appObserver = state.objectWillChange.sink { appStateUpdates += 1 }
+        let navigationObserver = state.settingsNavigation.objectWillChange.sink {
+            navigationUpdates += 1
+        }
+
+        state.selectedSettingsPane = .liveSources
+
+        XCTAssertEqual(state.selectedSettingsPane, .liveSources)
+        XCTAssertEqual(state.settingsNavigation.selectedPane, .liveSources)
+        XCTAssertEqual(navigationUpdates, 1)
+        XCTAssertEqual(appStateUpdates, 0)
+        withExtendedLifetime((appObserver, navigationObserver)) {}
+    }
+
+    func testRepeatedPaneSelectionDoesNotPublishAgain() {
+        let navigation = SettingsNavigationState()
+        navigation.select(.configurations)
+        var updates = 0
+        let observer = navigation.objectWillChange.sink { updates += 1 }
+
+        navigation.select(.configurations)
+
+        XCTAssertEqual(updates, 0)
+        withExtendedLifetime(observer) {}
+    }
+}
+
+@MainActor
+final class LiveValidationFreshnessTests: XCTestCase {
+    private var defaults: UserDefaults!
+    private var store: LiveValidationFreshnessStore!
+    private var suiteName: String!
+
+    override func setUp() {
+        super.setUp()
+        suiteName = "OKVideoMac.LiveValidationFreshnessTests.\(UUID())"
+        defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        store = LiveValidationFreshnessStore(defaults: defaults)
+    }
+
+    override func tearDown() {
+        if let suiteName { defaults?.removePersistentDomain(forName: suiteName) }
+        store = nil
+        defaults = nil
+        suiteName = nil
+        super.tearDown()
+    }
+
+    func testSuccessfulRevisionIsFreshForOneDayOnly() {
+        let source = fixture()
+        let completed = Date(timeIntervalSince1970: 2_000_000_000)
+        store.markCompleted(source, at: completed)
+
+        XCTAssertTrue(store.isFresh(source, now: completed.addingTimeInterval(23 * 60 * 60)))
+        XCTAssertFalse(store.isFresh(source, now: completed.addingTimeInterval(24 * 60 * 60)))
+        XCTAssertFalse(store.isFresh(source, now: completed.addingTimeInterval(-1)))
+    }
+
+    func testContentBaseURLAndKindChangesInvalidateResult() {
+        let source = fixture()
+        store.markCompleted(source)
+
+        var changedBytes = source
+        changedBytes.rawData.append(0x0A)
+        var changedBaseURL = source
+        changedBaseURL.baseURL = URL(string: "https://other.invalid/root/")
+        var changedKind = source
+        changedKind.sourceKind = .pasted
+
+        XCTAssertFalse(store.isFresh(changedBytes))
+        XCTAssertFalse(store.isFresh(changedBaseURL))
+        XCTAssertFalse(store.isFresh(changedKind))
+    }
+
+    func testRemoveInvalidatesAndPersistenceContainsDigestInsteadOfSourceData() throws {
+        let source = fixture()
+        store.markCompleted(source)
+        let persisted = try XCTUnwrap(defaults.data(forKey: LiveValidationFreshnessStore.storageKey))
+        let text = String(decoding: persisted, as: UTF8.self)
+
+        XCTAssertFalse(text.contains("TOP_SECRET_PLAYLIST_TOKEN"))
+        XCTAssertFalse(text.contains("fixture.invalid"))
+        XCTAssertTrue(store.isFresh(source))
+        store.remove(source.id)
+        XCTAssertFalse(store.isFresh(source))
+    }
+
+    private func fixture() -> StoredLiveSource {
+        StoredLiveSource(
+            name: "Fixture",
+            sourceKind: .remote,
+            sourceValue: "https://fixture.invalid/list?token=TOP_SECRET_SOURCE_VALUE",
+            baseURL: URL(string: "https://fixture.invalid/root/"),
+            rawData: Data("#EXTM3U\nhttps://cdn.invalid/TOP_SECRET_PLAYLIST_TOKEN\n".utf8)
+        )
+    }
+}
+
+@MainActor
 final class LiveValidationAppTests: XCTestCase {
     func testProductionProgressCallbackRunsBeforeMainActorCanResume() async throws {
         let (state, _, source, playlist) = try await fixture()
@@ -2251,6 +3248,526 @@ private final class AppTerminationRequestSchedulerSpy:
         guard !scheduledRequests.isEmpty else { return }
         scheduledRequests.removeFirst()()
     }
+}
+
+@MainActor
+final class WindowTransitionRegressionTests: XCTestCase {
+    private final class ToggleWindow: NSWindow {
+        var toggles = 0
+        override func toggleFullScreen(_ sender: Any?) { toggles += 1 }
+    }
+    private final class Window: NSWindow {
+        var styleWrites = 0
+        override var styleMask: NSWindow.StyleMask {
+            get { super.styleMask }
+            set { styleWrites += 1; super.styleMask = newValue }
+        }
+    }
+    private func makeWindow() -> Window {
+        let window = Window(contentRect: NSRect(x: 100, y: 100, width: 900, height: 600),
+                            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        return window
+    }
+    private func drain() async {
+        for _ in 0..<3 {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.main.async { continuation.resume() }
+            }
+        }
+    }
+
+    func testChromeDefersThroughoutBothFullScreenTransitions() async {
+        let window = makeWindow()
+        let chrome = PlayerWindowConfigurator.Coordinator(onRestore: {})
+        chrome.attach(to: window)
+        await drain()
+        let writes = window.styleWrites
+        let originalTitle = window.title
+        let transition = WindowTransitionCoordinator.state(for: window)
+        transition.beginFullScreen(entering: true)
+        XCTAssertFalse(window.inLiveResize) // The gap missed by the old guard.
+        chrome.configure(isLivePlayback: false, controlsVisible: false, title: "Entering")
+        await drain()
+        XCTAssertEqual(window.title, originalTitle)
+        XCTAssertEqual(window.styleWrites, writes)
+        transition.completeFullScreen(isFullScreen: true)
+        await drain()
+        XCTAssertEqual(window.title, "Entering")
+        transition.beginFullScreen(entering: false)
+        chrome.configure(isLivePlayback: false, controlsVisible: true, title: "Exiting")
+        await drain()
+        XCTAssertEqual(window.title, "Entering")
+        transition.completeFullScreen(isFullScreen: false)
+        await drain()
+        XCTAssertEqual(window.title, "Exiting")
+        XCTAssertEqual(window.styleWrites, writes, "Control visibility must not rewrite static chrome")
+        chrome.restore()
+        await drain()
+    }
+
+    func testFailureReleasesOnlyLatestDeferredConfiguration() async {
+        let window = makeWindow()
+        let chrome = PlayerWindowConfigurator.Coordinator(onRestore: {})
+        chrome.attach(to: window)
+        await drain()
+        let transition = WindowTransitionCoordinator.state(for: window)
+        transition.beginFullScreen(entering: true)
+        chrome.configure(isLivePlayback: false, controlsVisible: false, title: "Obsolete")
+        chrome.configure(isLivePlayback: false, controlsVisible: true, title: "Latest")
+        transition.fullScreenDidFail()
+        await drain()
+        XCTAssertTrue(transition.canChangeGeometry)
+        XCTAssertEqual(window.title, "Latest")
+        chrome.restore()
+        await drain()
+    }
+
+    func testClosingCompletesDeferredRestoreWithoutWindowMutation() async {
+        let window = makeWindow()
+        var restored = false
+        let chrome = PlayerWindowConfigurator.Coordinator(onRestore: { restored = true })
+        chrome.attach(to: window)
+        await drain()
+        let writes = window.styleWrites
+        WindowTransitionCoordinator.state(for: window).beginFullScreen(entering: true)
+        chrome.restore()
+        await drain()
+        XCTAssertFalse(restored)
+        NotificationCenter.default.post(name: NSWindow.willCloseNotification, object: window)
+        await drain()
+        XCTAssertTrue(restored)
+        XCTAssertEqual(window.styleWrites, writes)
+    }
+
+    func testNewChromeOwnerRejectsOldPendingRestore() async {
+        let window = makeWindow()
+        let old = PlayerWindowConfigurator.Coordinator(onRestore: {})
+        old.attach(to: window)
+        await drain()
+        old.restore()
+        let new = PlayerWindowConfigurator.Coordinator(onRestore: {})
+        new.attach(to: window)
+        new.configure(isLivePlayback: false, controlsVisible: true, title: "New Owner")
+        await drain()
+        XCTAssertEqual(window.title, "New Owner")
+        XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
+        new.restore()
+        await drain()
+    }
+
+    func testPendingGeometryWaitsForWindowedModeAndActionsRecheckState() async {
+        let window = makeWindow()
+        let transition = WindowTransitionCoordinator.state(for: window)
+        transition.completeFullScreen(isFullScreen: true)
+        var mutations = 0
+        transition.whenStable(key: UUID(), windowedOnly: true) { _ in mutations += 1 }
+        await drain()
+        XCTAssertEqual(mutations, 0)
+        transition.completeFullScreen(isFullScreen: false)
+        await drain()
+        XCTAssertEqual(mutations, 1)
+        transition.whenStable(key: UUID()) { _ in transition.beginFullScreen(entering: true) }
+        transition.whenStable(key: UUID()) { _ in mutations += 1 }
+        await drain()
+        XCTAssertEqual(mutations, 1)
+        transition.fullScreenDidFail()
+        await drain()
+        XCTAssertEqual(mutations, 2)
+    }
+
+    func testLiveResizeBlocksConfigurationUntilNativeEndNotification() async {
+        let window = makeWindow()
+        let transition = WindowTransitionCoordinator.state(for: window)
+        NotificationCenter.default.post(name: NSWindow.willStartLiveResizeNotification, object: window)
+        var mutations = 0
+        transition.whenStable(key: UUID()) { _ in mutations += 1 }
+        await drain()
+        XCTAssertEqual(mutations, 0)
+        NotificationCenter.default.post(name: NSWindow.didEndLiveResizeNotification, object: window)
+        await drain()
+        XCTAssertEqual(mutations, 1)
+    }
+
+    func testBrowserRemountDoesNotRestoreOrRewriteWindowFrame() {
+        let window = makeWindow()
+        window.identifier = AppWindowLayoutPolicy.descriptor(for: .mainWindow).identifier
+        AppWindowLayoutPolicy.configure(window, target: .mainWindow)
+        BrowserWindowChromeController.configure(window)
+        let writes = window.styleWrites
+        let userFrame = NSRect(x: 20, y: 60, width: 960, height: 660)
+        window.setFrame(userFrame, display: false)
+        AppWindowLayoutPolicy.configure(window, target: .mainWindow)
+        BrowserWindowChromeController.configure(window)
+        XCTAssertEqual(window.frame, userFrame)
+        XCTAssertEqual(window.styleWrites, writes)
+        window.setFrameAutosaveName("")
+    }
+
+    func testRapidFullScreenCommandsAreCoalescedUntilCompletion() async {
+        let window = ToggleWindow(contentRect: .zero, styleMask: [.titled, .resizable],
+                                  backing: .buffered, defer: false)
+        let transition = WindowTransitionCoordinator.state(for: window)
+        transition.requestFullScreenToggle()
+        transition.requestFullScreenToggle()
+        await drain()
+        XCTAssertEqual(window.toggles, 0)
+        transition.requestFullScreenToggle()
+        await drain()
+        XCTAssertEqual(window.toggles, 1)
+        transition.requestFullScreenToggle()
+        transition.requestFullScreenToggle()
+        await drain()
+        XCTAssertEqual(window.toggles, 1, "Requests must not overlap the native transition")
+        transition.fullScreenDidFail()
+        await drain()
+        XCTAssertTrue(transition.canChangeGeometry)
+        XCTAssertEqual(window.toggles, 1, "Failure must not create an automatic retry loop")
+    }
+
+    func testPlayerAcceptsUserResizeAndSystemFullScreenRestoredFrame() async throws {
+        let app = AppState(environment: nil)
+        let controller = PlayerPlaybackWindowController(appState: app)
+        controller.prewarm()
+        defer { controller.dismiss() }
+        let window = try XCTUnwrap(controller.windowForTesting)
+        let userFrame = NSRect(x: 25, y: 70, width: 900, height: 520)
+        NotificationCenter.default.post(name: NSWindow.willStartLiveResizeNotification, object: window)
+        controller.windowWillStartLiveResize(Notification(name: NSWindow.willStartLiveResizeNotification, object: window))
+        window.setFrame(userFrame, display: false)
+        // Simulate the delegate arriving before the notification observer.
+        controller.windowDidEndLiveResize(Notification(name: NSWindow.didEndLiveResizeNotification, object: window))
+        NotificationCenter.default.post(name: NSWindow.didEndLiveResizeNotification, object: window)
+        await drain()
+        XCTAssertEqual(window.frame, userFrame)
+        let transition = WindowTransitionCoordinator.state(for: window)
+        transition.beginFullScreen(entering: false)
+        let restoredFrame = NSRect(x: 40, y: 80, width: 940, height: 550)
+        window.setFrame(restoredFrame, display: false)
+        controller.windowDidExitFullScreen(Notification(name: NSWindow.didExitFullScreenNotification, object: window))
+        await drain()
+        XCTAssertEqual(window.frame, restoredFrame)
+    }
+
+    /// Opt-in native animation diagnosis. This uses the production render view
+    /// inside SwiftUI, with real window notifications rather than posted mocks.
+    func testNativeFullscreenAspectBaseline() async throws {
+        let configURL = URL(fileURLWithPath: "/private/tmp/ok-fullscreen-baseline-request.json")
+        guard let bytes = try? Data(contentsOf: configURL),
+              let config = try JSONSerialization.jsonObject(with: bytes) as? [String: String],
+              let fixture = config["fixture"], let output = config["output"],
+              let recorderPath = config["recorder"] else {
+            throw XCTSkip("Explicit local fullscreen diagnostic request required")
+        }
+        struct Surface: NSViewRepresentable {
+            let view: MPVOpenGLView
+            func makeNSView(context: Context) -> MPVOpenGLView { view }
+            func updateNSView(_ view: MPVOpenGLView, context: Context) {}
+            static func dismantleNSView(_ view: MPVOpenGLView, coordinator: ()) { view.tearDown() }
+        }
+        @MainActor final class FullscreenTestDelegate: NSObject, NSWindowDelegate {
+            let presentation = PlayerFullscreenPresentation()
+            weak var surface: MPVOpenGLView?
+            weak var composition: PlayerFullscreenContentView?
+            var presentationAspect = 4.0 / 3
+            func customWindowsToEnterFullScreen(for window: NSWindow, on screen: NSScreen) -> [NSWindow]? {
+                presentation.prepareToEnter(window: window, surface: surface, aspectRatio: presentationAspect, presentationView: composition) ? [window] : nil
+            }
+            func customWindowsToExitFullScreen(for window: NSWindow) -> [NSWindow]? {
+                presentation.prepareToExit(window: window, surface: surface, aspectRatio: presentationAspect) ? [window] : nil
+            }
+            func window(_ window: NSWindow, startCustomAnimationToEnterFullScreenOn screen: NSScreen,
+                        withDuration duration: TimeInterval) {
+                presentation.startEntering(window: window, screen: screen, duration: duration)
+            }
+            func window(_ window: NSWindow, startCustomAnimationToExitFullScreenWithDuration duration: TimeInterval) {
+                presentation.startExiting(window: window, duration: duration)
+            }
+            func windowDidEnterFullScreen(_ notification: Notification) {
+                presentation.complete(window: notification.object as! NSWindow, isFullScreen: true)
+            }
+            func windowDidExitFullScreen(_ notification: Notification) {
+                presentation.complete(window: notification.object as! NSWindow, isFullScreen: false)
+            }
+            func windowDidFailToEnterFullScreen(_ window: NSWindow) {
+                presentation.failed(window: window)
+                WindowTransitionCoordinator.state(for: window).fullScreenDidFail()
+            }
+            func windowDidFailToExitFullScreen(_ window: NSWindow) {
+                presentation.failed(window: window)
+                WindowTransitionCoordinator.state(for: window).fullScreenDidFail()
+            }
+            func windowWillClose(_ notification: Notification) { presentation.cancel() }
+        }
+        let prototype = FullscreenTestDelegate()
+        let player = try MPVPlayerClient(teardownMode: .fullDestroy, renderControlMode: .advanced)
+        try await player.setMuted(true)
+        if config["hardwareDecoding"] == "off" { try await player.setHardwareDecoding(enabled: false) }
+        try await player.enableLocalRenderDiagnosticsForTesting()
+        var ready = false
+        let view = MPVOpenGLView(player: player, onError: { XCTFail("Renderer: \($0)") },
+                                onSurfaceReady: { _ in ready = true }, onSurfaceUnavailable: { _ in })
+        view.collectRenderTimingsForTesting = true
+        prototype.surface = view
+        let window = NSWindow(contentRect: NSRect(x: 120, y: 120, width: 600, height: 450),
+                              styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.title = "Fullscreen aspect baseline — production MPVOpenGLView"
+        window.backgroundColor = .black
+        window.isOpaque = true
+        window.contentView?.wantsLayer = true
+        window.level = .floating
+        window.titlebarAppearsTransparent = true
+        window.collectionBehavior = [.fullScreenPrimary]
+        if config["customAnimation"] == "on" { window.delegate = prototype }
+        let root = ZStack {
+            Color.black
+            Surface(view: view).ignoresSafeArea()
+            VStack {
+                Text("UI REFERENCE  ●  Fullscreen aspect baseline").foregroundStyle(.white)
+                Spacer()
+                HStack { Circle().fill(.orange).frame(width: 36, height: 36); Text("UI circle stays round").foregroundStyle(.white) }
+            }.padding(28)
+        }
+        let composition = PlayerFullscreenContentView(frame: window.contentView!.bounds)
+        let hosting = NSHostingView(rootView: root)
+        hosting.frame = composition.bounds; hosting.autoresizingMask = [.width, .height]
+        composition.addSubview(hosting); window.contentView?.addSubview(composition)
+        prototype.composition = composition
+        let transition = WindowTransitionCoordinator.state(for: window)
+        window.center(); window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        var rows = ["uptime,event,phase,window_w,window_h,view_w,view_h,backing_w,backing_h,updates,renders,skips,layer,placement,redraw"]
+        func record(_ event: String) {
+            let backing = view.convertToBacking(view.bounds)
+            rows.append("\(ProcessInfo.processInfo.systemUptime),\(event.replacingOccurrences(of: ",", with: ";").replacingOccurrences(of: "\n", with: " ")),\(transition.phase),\(window.frame.width),\(window.frame.height),\(view.bounds.width),\(view.bounds.height),\(backing.width),\(backing.height),\(view.renderUpdatesForTesting),\(view.renderedFramesForTesting),\(view.skippedFramesForTesting),\(view.layer.map { String(describing: type(of: $0)) } ?? "none"),\(view.layerContentsPlacement.rawValue),\(view.layerContentsRedrawPolicy.rawValue)")
+        }
+        let names: [Notification.Name] = [
+            NSWindow.willEnterFullScreenNotification, NSWindow.didEnterFullScreenNotification,
+            NSWindow.willExitFullScreenNotification, NSWindow.didExitFullScreenNotification,
+            NSWindow.willStartLiveResizeNotification, NSWindow.didEndLiveResizeNotification,
+            WindowTransitionCoordinator.didFailFullScreen
+        ]
+        let observers = names.map { name in
+            NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { note in
+                MainActor.assumeIsolated { record(note.name.rawValue) }
+            }
+        }
+        var sharedAnimationSamples = 0
+        var transparentBackdropSamples = 0
+        var maximumAnisotropy: CGFloat = 0
+        var secondaryVideoAnimations = 0
+        let sampler = Task { @MainActor in
+            while !Task.isCancelled {
+                record("sample")
+                if composition.layer?.animation(forKey: "com.okvideomac.video.fullscreen") != nil,
+                   let transform = composition.layer?.presentation()?.transform {
+                    sharedAnimationSamples += 1
+                    if !window.isOpaque, window.backgroundColor.alphaComponent == 0,
+                       let mask = window.contentView?.layer?.mask as? CAShapeLayer,
+                       mask.animation(forKey: "com.okvideomac.fullscreen.viewport") != nil {
+                        transparentBackdropSamples += 1
+                    }
+                    maximumAnisotropy = max(maximumAnisotropy, abs(transform.m11 - transform.m22))
+                    if view.layer?.animation(forKey: "com.okvideomac.video.fullscreen") != nil { secondaryVideoAnimations += 1 }
+                }
+                try? await Task.sleep(nanoseconds: 16_666_667)
+            }
+        }
+        var playbackPosition = 0.0
+        let eventReader = Task { @MainActor in
+            for await event in player.events {
+                if case let .snapshot(snapshot, _) = event {
+                    playbackPosition = snapshot.position
+                    if snapshot.videoWidth > 0 && snapshot.videoHeight > 0 {
+                        prototype.presentationAspect = Double(snapshot.videoWidth) / Double(snapshot.videoHeight)
+                    }
+                    record("playback_\(snapshot.status)_\(snapshot.position)_video\(snapshot.videoWidth)x\(snapshot.videoHeight)")
+                } else if case let .error(message, _) = event {
+                    record("player_error_" + message.replacingOccurrences(of: ",", with: ";").replacingOccurrences(of: "\n", with: " "))
+                    XCTFail(message)
+                }
+            }
+        }
+        let recorder = Process()
+        let shouldRecord = recorderPath != "none"
+        let recordingLog = URL(fileURLWithPath: output + ".capture.log")
+        FileManager.default.createFile(atPath: recordingLog.path, contents: nil)
+        let logHandle = try FileHandle(forWritingTo: recordingLog)
+        recorder.executableURL = URL(fileURLWithPath: recorderPath)
+        recorder.arguments = [output + ".mov", "25"]
+        recorder.standardOutput = logHandle; recorder.standardError = logHandle
+        do {
+            let media = ResolvedMedia(url: URL(fileURLWithPath: fixture), headers: [:], format: "mov",
+                                      siteKey: "fullscreen-fixture", sourceName: "Local", episodeName: "Calibration")
+            for _ in 0..<100 where !ready { try await Task.sleep(nanoseconds: 50_000_000) }
+            _ = try XCTUnwrap(ready ? true : nil, "Render context must exist before loading a video track")
+            try await player.load(media, startPosition: nil, requestID: UUID())
+            try await player.play()
+            for _ in 0..<160 where playbackPosition < 0.5 { try await Task.sleep(nanoseconds: 50_000_000) }
+            XCTAssertGreaterThan(playbackPosition, 0.2, "Calibration must actually advance before native animation")
+            let videoOutput = await player.diagnosticPropertyForTesting("current-vo")
+            XCTAssertEqual(videoOutput, "libmpv", "Audio-only playback cannot validate fullscreen aspect")
+            if config["paused"] == "yes" { try await player.pause() }
+            for name in ["vid", "video-codec", "current-vo", "video-out-params", "track-list/0/type", "track-list/0/selected", "track-list/0/codec"] {
+                record("property_\(name)_\(await player.diagnosticPropertyForTesting(name) ?? "unavailable")")
+            }
+            if shouldRecord { try recorder.run() }
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            let cycles = min(30, max(1, Int(config["cycles"] ?? "1") ?? 1))
+            let hold = cycles == 1 ? UInt64(2_000_000_000) : UInt64(300_000_000)
+            for cycle in 0..<cycles {
+                if cycles > 1 {
+                    if cycle % 6 == 0 { try await player.seek(to: 1) }
+                    if cycle % 2 == 0 { try await player.play() } else { try await player.pause() }
+                }
+                record("cycle_\(cycle + 1)")
+                let beforeEnterRenders = view.renderedFramesForTesting
+                record("before_enter")
+                transition.requestFullScreenToggle()
+                for _ in 0..<200 {
+                    if transition.phase == .fullScreen && !transition.isTransitioning { break }
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                }
+                _ = try XCTUnwrap(transition.phase == .fullScreen ? true : nil, "Native entry failed; stop instead of inverting later toggles")
+                try await Task.sleep(nanoseconds: hold)
+                XCTAssertGreaterThan(view.renderedFramesForTesting, beforeEnterRenders)
+                XCTAssertEqual(view.lastPresentedPixelSizeForTesting, view.convertToBacking(view.bounds).size)
+                record("after_enter")
+                let beforeExitRenders = view.renderedFramesForTesting
+                record("before_exit")
+                transition.requestFullScreenToggle()
+                for _ in 0..<200 {
+                    if transition.phase == .windowed && !transition.isTransitioning { break }
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                }
+                _ = try XCTUnwrap(transition.phase == .windowed ? true : nil, "Native exit failed; stop instead of inverting later toggles")
+                try await Task.sleep(nanoseconds: 500_000_000)
+                XCTAssertGreaterThan(view.renderedFramesForTesting, beforeExitRenders)
+                XCTAssertEqual(view.lastPresentedPixelSizeForTesting, view.convertToBacking(view.bounds).size)
+                record("after_exit")
+            }
+            while recorder.isRunning { try await Task.sleep(nanoseconds: 100_000_000) }
+            if shouldRecord { XCTAssertEqual(recorder.terminationStatus, 0, "Capture must succeed; inspect capture log") }
+            if config["customAnimation"] == "on" {
+                XCTAssertGreaterThan(sharedAnimationSamples, 4, "Actual system transitions must animate the shared composition")
+                XCTAssertEqual(maximumAnisotropy, 0, accuracy: 0.000001)
+                XCTAssertEqual(secondaryVideoAnimations, 0)
+                XCTAssertEqual(transparentBackdropSamples, sharedAnimationSamples)
+                XCTAssertTrue(window.isOpaque)
+                XCTAssertEqual(window.backgroundColor, NSColor.black)
+                XCTAssertNil(window.contentView?.layer?.mask)
+                XCTAssertTrue(CATransform3DIsIdentity(composition.layer!.transform))
+            }
+            let summary: [String: Any] = ["sharedAnimationSamples": sharedAnimationSamples,
+                "maximumAnisotropy": maximumAnisotropy, "secondaryVideoAnimations": secondaryVideoAnimations,
+                "renders": view.renderedFramesForTesting, "cycles": cycles,
+                "transparentBackdropSamples": transparentBackdropSamples]
+            try JSONSerialization.data(withJSONObject: summary, options: [.prettyPrinted, .sortedKeys])
+                .write(to: URL(fileURLWithPath: output + ".composition.json"))
+        } catch {
+            if recorder.isRunning { recorder.terminate() }
+            sampler.cancel(); eventReader.cancel(); observers.forEach(NotificationCenter.default.removeObserver)
+            try? rows.joined(separator: "\n").write(toFile: output + ".render.csv", atomically: true, encoding: .utf8)
+            view.tearDown(); window.close(); await player.shutdown()
+            try? logHandle.close()
+            throw error
+        }
+        sampler.cancel(); eventReader.cancel(); observers.forEach(NotificationCenter.default.removeObserver)
+        try rows.joined(separator: "\n").write(toFile: output + ".render.csv", atomically: true, encoding: .utf8)
+        try (["uptime,sync_s,render_s,flush_s,revision,width,height"] + view.renderTimingsForTesting).joined(separator: "\n").write(toFile: output + ".timings.csv", atomically: true, encoding: .utf8)
+        try logHandle.close()
+        view.tearDown(); window.close(); await player.shutdown()
+    }
+
+    func testRealMPVServicesUpdatesDuringResizeAndResumesRendering() async throws {
+        let localConfig = try? Data(contentsOf: URL(fileURLWithPath: "/private/tmp/ok-fullscreen-baseline-request.json"))
+        let config = localConfig.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: String] }
+        guard let path = ProcessInfo.processInfo.environment["OKVIDEOMAC_WINDOW_MEDIA_FIXTURE"] ?? config?["fixture"] else {
+            throw XCTSkip("Opt-in local video and OpenGL integration test")
+        }
+        let player = try MPVPlayerClient(teardownMode: .fullDestroy, renderControlMode: .advanced)
+        try await player.setMuted(true)
+        let window = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 640, height: 480),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        var ready = false
+        let view = MPVOpenGLView(player: player, onError: { XCTFail("Renderer: \($0)") },
+                                onSurfaceReady: { _ in ready = true }, onSurfaceUnavailable: { _ in })
+        window.contentView = view
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        do {
+            for _ in 0..<100 where !ready { try await Task.sleep(nanoseconds: 50_000_000) }
+            _ = try XCTUnwrap(ready ? true : nil, "Render surface must precede loadfile")
+            let media = ResolvedMedia(url: URL(fileURLWithPath: path), headers: [:], format: "mov",
+                                      siteKey: "window-fixture", sourceName: "Local", episodeName: "Fixture")
+            try await player.load(media, startPosition: nil, requestID: UUID())
+            try await player.play()
+            try await Task.sleep(nanoseconds: 500_000_000)
+            let transition = WindowTransitionCoordinator.state(for: window)
+            let updates = view.renderUpdatesForTesting
+            let renders = view.renderedFramesForTesting
+            transition.beginFullScreen(entering: true)
+            view.viewWillStartLiveResize()
+            try await Task.sleep(nanoseconds: 500_000_000)
+            XCTAssertFalse(transition.canApplyChrome)
+            XCTAssertGreaterThan(view.renderUpdatesForTesting, updates)
+            XCTAssertGreaterThan(view.renderedFramesForTesting, renders,
+                                 "A valid visible surface must keep drawing while chrome is protected")
+            view.viewDidEndLiveResize()
+            transition.fullScreenDidFail()
+            window.orderOut(nil)
+            try await Task.sleep(nanoseconds: 100_000_000)
+            let hiddenRenders = view.renderedFramesForTesting
+            let hiddenUpdates = view.renderUpdatesForTesting
+            let hiddenSkips = view.skippedFramesForTesting
+            try await Task.sleep(nanoseconds: 500_000_000)
+            XCTAssertEqual(view.renderedFramesForTesting, hiddenRenders)
+            XCTAssertGreaterThan(view.renderUpdatesForTesting, hiddenUpdates)
+            XCTAssertGreaterThan(view.skippedFramesForTesting, hiddenSkips)
+            try await player.pause()
+            window.makeKeyAndOrderFront(nil)
+            window.setContentSize(NSSize(width: 800, height: 500))
+            view.synchronizeDrawableAfterWindowLayout()
+            for _ in 0..<100 where view.renderedFramesForTesting == hiddenRenders {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            XCTAssertGreaterThan(view.renderedFramesForTesting, hiddenRenders,
+                                 "A paused current frame must redraw after restoration and geometry change")
+            let presentation = PlayerFullscreenPresentation()
+            let restoredFrame = window.frame
+            XCTAssertTrue(presentation.prepareToEnter(window: window, surface: view, aspectRatio: 4.0 / 3))
+            transition.beginFullScreen(entering: true)
+            if let screen = window.screen { presentation.startEntering(window: window, screen: screen, duration: 1) }
+            try await Task.sleep(nanoseconds: 50_000_000)
+            presentation.failed(window: window)
+            transition.fullScreenDidFail()
+            try await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertEqual(window.frame, restoredFrame, "Failed entry must restore the owned window geometry")
+            XCTAssertTrue(CATransform3DIsIdentity(view.layer?.transform ?? CATransform3DIdentity))
+            XCTAssertTrue(transition.canApplyChrome)
+            // Destruction must also cancel a queued animation before its draw.
+            _ = presentation.prepareToEnter(window: window, surface: view, aspectRatio: 4.0 / 3)
+            if let screen = window.screen { presentation.startEntering(window: window, screen: screen, duration: 1) }
+            view.tearDown()
+            presentation.cancel()
+            let finalRenders = view.renderedFramesForTesting
+            view.synchronizeDrawableAfterWindowLayout()
+            view.draw(view.bounds)
+            try await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertEqual(view.renderedFramesForTesting, finalRenders,
+                           "Queued geometry and draw requests must not revive a destroyed context")
+        } catch {
+            view.tearDown(); window.close(); await player.shutdown()
+            throw error
+        }
+        view.tearDown(); window.close(); await player.shutdown()
+    }
+
 }
 
 final class OKVideoMacTests: XCTestCase {
@@ -3354,7 +4871,10 @@ final class OKVideoMacTests: XCTestCase {
             id: .xtream(identifier), name: "Native", canRefresh: true,
             canExport: false, supportsEPG: false
         )
-        let session = LiveBrowserSession()
+        let defaults = UserDefaults(suiteName: "LiveBrowserSourceReconciliation-\(UUID())")!
+        let session = LiveBrowserSession(preferences: LiveBrowserPreferenceStore(
+            defaults: defaults, storageKey: "fixture"
+        ))
         session.reconcileSources([imported, native])
         XCTAssertEqual(session.selectedSourceID, imported.id)
         session.selectedSourceID = native.id
@@ -3363,12 +4883,15 @@ final class OKVideoMacTests: XCTestCase {
         session.reconcileSources([imported])
         XCTAssertEqual(session.selectedSourceID, imported.id)
         session.reconcileSources([])
-        XCTAssertNil(session.selectedSourceID)
+        XCTAssertEqual(session.selectedSourceID, imported.id)
     }
 
     @MainActor
     func testLiveBrowserGroupReconciliationUsesStableIdentityNotDisplayName() {
-        let session = LiveBrowserSession()
+        let defaults = UserDefaults(suiteName: "LiveBrowserGroupReconciliation-\(UUID())")!
+        let session = LiveBrowserSession(preferences: LiveBrowserPreferenceStore(
+            defaults: defaults, storageKey: "fixture"
+        ))
         session.selectedGroupID = "xtream-group-7"
         session.reconcileGroups([
             LiveGroup(name: "Original Name", explicitID: "xtream-group-7")
@@ -3387,6 +4910,60 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(session.selectedGroupID, "Legacy Group")
         session.reconcileGroups([])
         XCTAssertNil(session.selectedGroupID)
+    }
+
+    @MainActor
+    func testLiveBrowserPreferenceRestoresSourceGroupChannelAndStableRoute() {
+        let defaults = UserDefaults(suiteName: "LiveBrowserPreference-\(UUID())")!
+        let store = LiveBrowserPreferenceStore(defaults: defaults, storageKey: "fixture")
+        let importedID = UUID()
+        let xtreamID = UUID()
+        let imported = LiveSourceID.imported(importedID)
+        let xtream = LiveSourceID.xtream(xtreamID)
+        let channel = LiveChannel(
+            groupName: "News", name: "Channel 1",
+            streams: [
+                LiveStream(name: "HD", url: URL(string: "https://fixture.invalid/hd")!),
+                LiveStream(name: "SD", url: URL(string: "https://fixture.invalid/sd")!)
+            ]
+        )
+
+        let first = LiveBrowserSession(preferences: store)
+        first.selectedSourceID = imported
+        first.selectedGroupID = "news"
+        first.remember(channel: channel, source: imported, route: "name:HD")
+        first.selectedSourceID = xtream
+        first.selectedGroupID = "sports"
+        first.selectedSourceID = imported
+
+        XCTAssertEqual(first.selectedGroupID, "news")
+        XCTAssertEqual(first.rememberedChannel(for: imported), channel.id)
+        XCTAssertEqual(first.rememberedRoute(for: imported, channel: channel), "name:HD")
+        XCTAssertEqual(first.importedRouteIdentity(for: channel.streams[0], in: channel), "name:HD")
+
+        let restored = LiveBrowserSession(preferences: store)
+        XCTAssertEqual(restored.selectedSourceID, imported)
+        XCTAssertEqual(restored.selectedGroupID, "news")
+        restored.reconcileSources([])
+        XCTAssertEqual(restored.selectedSourceID, imported)
+    }
+
+    func testLiveBrowserPreferenceKeepsImportedAndXtreamNamespacesDistinct() {
+        let id = UUID()
+        let imported = LiveSourceID.imported(id)
+        let xtream = LiveSourceID.xtream(id)
+        XCTAssertNotEqual(
+            LiveBrowserPreferenceStore.encode(imported),
+            LiveBrowserPreferenceStore.encode(xtream)
+        )
+        XCTAssertEqual(
+            LiveBrowserPreferenceStore.decodeSource(LiveBrowserPreferenceStore.encode(imported)),
+            imported
+        )
+        XCTAssertEqual(
+            LiveBrowserPreferenceStore.decodeSource(LiveBrowserPreferenceStore.encode(xtream)),
+            xtream
+        )
     }
 
     func testNativeLiveLogoPolicyDoesNotReuseImportedFallbackCache() throws {
@@ -3522,7 +5099,7 @@ final class OKVideoMacTests: XCTestCase {
         )
         let decoded = try PortableBackupCodec.decode(data)
 
-        XCTAssertEqual(decoded.manifest.schemaVersion, 3)
+        XCTAssertEqual(decoded.manifest.schemaVersion, 4)
         XCTAssertEqual(decoded.manifest.historyCount, 1)
         XCTAssertEqual(decoded.payload.configuration.id, configurationID)
         XCTAssertEqual(decoded.payload.configuration.name, "Fixture")
@@ -4403,8 +5980,8 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testMPVRenderSafetyRejectsWindowResizeAndInvalidGeometry() {
-        XCTAssertNil(
+    func testMPVRenderSafetyAllowsValidResizeAndRejectsInvalidGeometry() {
+        XCTAssertNotNil(
             MPVRenderSafetyPolicy.framebufferSize(
                 backingBounds: NSRect(x: 0, y: 0, width: 1_920, height: 1_080),
                 isInLiveResize: true,
@@ -4715,6 +6292,106 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(fallback.last).contains(
             "demuxer-lavf-format"
         ))
+    }
+
+    func testTVBoxResumeIsFileScopedAndRetainedAcrossFormatFallback() throws {
+        var media = ResolvedMedia(url: URL(string: "http://127.0.0.1:19978/proxy/media/A")!, headers: [:], format: "hls", siteKey: "fixture", sourceName: "line", episodeName: "1")
+        media.transportProfile = .tvBox
+        let initial = MPVTVBoxPlaybackPolicy.loadCommand(for: media, startPosition: 1008.25).last!
+        XCTAssertTrue(initial.contains("start=1008.250"))
+        XCTAssertTrue(initial.contains("pause=yes"))
+        let fallback = MPVTVBoxPlaybackPolicy.loadCommand(for: media, omitFormatHint: true, startPosition: 1008.25).last!
+        XCTAssertTrue(fallback.contains("start=1008.250"))
+        XCTAssertFalse(fallback.contains("demuxer-lavf-format"))
+        XCTAssertTrue(MPVTVBoxPlaybackPolicy.loadCommand(for: media).last!.contains("start=0.000"))
+        XCTAssertTrue(MPVTVBoxPlaybackPolicy.loadCommand(for: media, startPosition: .nan).last!.contains("start=0.000"))
+    }
+
+    func testTVBoxSeekRequiresCurrentPositionAndReadyTransport() {
+        XCTAssertFalse(PlayerSeekCompletionPolicy.accepts(target: 2515.844, position: 2477.52, nativeSeeking: false, pausedForCache: false))
+        XCTAssertFalse(PlayerSeekCompletionPolicy.accepts(target: 100, position: 100, nativeSeeking: true, pausedForCache: false))
+        XCTAssertFalse(PlayerSeekCompletionPolicy.accepts(target: 100, position: 100, nativeSeeking: false, pausedForCache: true))
+        XCTAssertTrue(PlayerSeekCompletionPolicy.accepts(target: 100, position: 98, nativeSeeking: false, pausedForCache: false))
+        XCTAssertFalse(PlayerSeekCompletionPolicy.accepts(target: 100, position: .nan, nativeSeeking: false, pausedForCache: false))
+    }
+
+    @MainActor
+    func testTVBoxNativeResumeAndPausedSeekUseTargetWithoutInitialRewind() async throws {
+        // Deterministic, local 30-second video; no live provider, credentials,
+        // visible window or external video generator is needed.
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("ok115-\(UUID().uuidString).y4m")
+        var fixture = Data("YUV4MPEG2 W160 H90 F10:1 Ip A1:1 C420jpeg\n".utf8)
+        for frame in 0..<300 {
+            fixture.append(Data("FRAME\n".utf8))
+            fixture.append(Data(repeating: UInt8(30 + frame % 180), count: 160 * 90))
+            fixture.append(Data(repeating: 128, count: 160 * 90 / 2))
+        }
+        try fixture.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let player = try MPVPlayerClient(teardownMode: .fullDestroy)
+        try await player.setMuted(true)
+        let window = NSWindow(contentRect: NSRect(x: -2000, y: -2000, width: 320, height: 180), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let view = MPVOpenGLView(player: player, onError: { XCTFail("Renderer: \($0)") }, onSurfaceReady: { _ in }, onSurfaceUnavailable: { _ in })
+        window.contentView = view
+        view.frame = NSRect(x: 0, y: 0, width: 320, height: 180)
+        view.prepareOpenGL()
+        var latest = PlayerSnapshot()
+        var initialPlayingPositions: [Double] = []
+        var collectingInitial = true
+        var receivedFileLoaded = false
+        let reader = Task { @MainActor in
+            for await event in player.events {
+                if case .fileLoaded = event { receivedFileLoaded = true }
+                if case .snapshot(let snapshot, _) = event {
+                    latest = snapshot
+                    if collectingInitial, receivedFileLoaded, snapshot.status == .playing { initialPlayingPositions.append(snapshot.position) }
+                }
+            }
+        }
+        let renderer = Task { @MainActor in
+            while !Task.isCancelled {
+                view.draw(view.bounds)
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+        }
+        var media = ResolvedMedia(url: url, headers: [:], siteKey: "fixture", sourceName: "line", episodeName: "1")
+        media.transportProfile = .tvBox
+        do {
+            try await player.load(media, startPosition: 10, requestID: UUID())
+            let startDeadline = Date().addingTimeInterval(5)
+            while (latest.status != .playing || latest.position < 10.1), Date() < startDeadline {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            XCTAssertEqual(latest.status, .playing)
+            XCTAssertGreaterThanOrEqual(latest.position, 10)
+            XCTAssertFalse(initialPlayingPositions.isEmpty)
+            XCTAssertTrue(initialPlayingPositions.allSatisfy { $0 >= 9.9 }, "TVBox must not begin at zero before restoring its bookmark")
+            collectingInitial = false
+            try await player.pause()
+            try await player.seek(to: 20)
+            let seekDeadline = Date().addingTimeInterval(5)
+            while (latest.isSeeking || latest.seekTarget != nil || abs(latest.position - 20) > 0.2 || latest.status != .paused), Date() < seekDeadline {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            XCTAssertEqual(latest.status, .paused)
+            XCTAssertEqual(latest.position, 20, accuracy: 0.2)
+            XCTAssertFalse(latest.isSeeking)
+            XCTAssertNil(latest.seekTarget)
+            try await player.seek(to: 25)
+            try await player.seek(to: 5)
+            let replaceDeadline = Date().addingTimeInterval(5)
+            while (latest.isSeeking || latest.seekTarget != nil || abs(latest.position - 5) > 0.2), Date() < replaceDeadline {
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            XCTAssertEqual(latest.position, 5, accuracy: 0.2)
+            XCTAssertEqual(latest.status, .paused)
+        } catch {
+            renderer.cancel(); reader.cancel(); view.tearDown()
+            await player.shutdown(); window.close(); throw error
+        }
+        renderer.cancel(); reader.cancel(); view.tearDown()
+        await player.shutdown(); window.close()
     }
 
     func testXtreamLiveHTTPSForcesCertificateVerificationWithoutChangingOtherLoads()
@@ -5285,9 +6962,19 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
-    private func verifyNativeXtreamRendering(url: URL, selection: HLSStartupSelection?, expectedWidth: Int?) async throws {
+    func testXtreamVODRedirectWithAppRendererNetworkGate() async throws {
+        guard ProcessInfo.processInfo.environment["OKVIDEOMAC_XTREAM_NETWORK_GATE"] == "1" else {
+            throw XCTSkip("Explicit public-network and renderer gate")
+        }
+        let url = try XCTUnwrap(ProcessInfo.processInfo.environment["OKVIDEOMAC_XTREAM_VOD_FIXTURE_URL"].flatMap(URL.init(string:)))
+        try await verifyNativeXtreamRendering(url: url, selection: nil, expectedWidth: nil, onDemand: true)
+    }
+
+    @MainActor
+    private func verifyNativeXtreamRendering(url: URL, selection: HLSStartupSelection?, expectedWidth: Int?, onDemand: Bool = false) async throws {
         _ = NSApplication.shared
-        let player = try MPVPlayerClient(compatibilityPolicy: .nativeXtreamLive)
+        let policy: PlaybackCompatibilityPolicy = onDemand ? .existing : .nativeXtreamLive
+        let player = try MPVPlayerClient(compatibilityPolicy: policy)
         try await player.setMuted(true)
         let window = NSWindow(contentRect: NSRect(x: -2000, y: -2000, width: 640, height: 360), styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -5316,13 +7003,23 @@ final class OKVideoMacTests: XCTestCase {
                 try? await Task.sleep(nanoseconds: 20_000_000)
             }
         }
-        let media = ResolvedMedia(url: url, headers: [:], format: "m3u8", siteKey: "xtream-live", sourceName: "public fixture", episodeName: "fixture", hlsStartupSelection: selection, compatibilityPolicy: .nativeXtreamLive)
+        let media = ResolvedMedia(url: url, headers: [:], format: onDemand ? nil : "m3u8", siteKey: onDemand ? "xtream-vod" : "xtream-live", sourceName: "public fixture", episodeName: "fixture", hlsStartupSelection: selection, compatibilityPolicy: policy, networkPolicy: onDemand ? .systemHTTPProxy : .inherited)
         do {
             try await player.load(media, startPosition: nil, requestID: UUID())
             await fulfillment(of: [progressed], timeout: 15)
             if let expectedWidth { XCTAssertEqual(latest.videoWidth, expectedWidth) }
             XCTAssertTrue(latest.tracks.contains(where: { $0.type == .audio && $0.isSelected }))
-            if selection != nil, let output = ProcessInfo.processInfo.environment["OKVIDEOMAC_XTREAM_FRAME_PATH"] {
+            if onDemand {
+                try await player.pause()
+                try await player.seek(to: 120)
+                try await player.play()
+                let deadline = Date().addingTimeInterval(15)
+                while latest.position < 119, Date() < deadline {
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                }
+                XCTAssertGreaterThanOrEqual(latest.position, 119, "Real MP4 seek must reach the requested position")
+            }
+            if let output = ProcessInfo.processInfo.environment["OKVIDEOMAC_XTREAM_FRAME_PATH"] {
                 try await player.screenshot(to: URL(fileURLWithPath: output))
                 XCTAssertTrue(FileManager.default.fileExists(atPath: output))
             }
@@ -10484,7 +12181,7 @@ final class OKVideoMacTests: XCTestCase {
             onPlay: { _ in }
         )
         XCTAssertEqual(button.originalNamePresentationMode, .anchoredPopover)
-        XCTAssertEqual(presentation.displayName, "第 3 集")
+        XCTAssertEqual(presentation.displayName, "03")
     }
 
     func testDetailEpisodeOriginalNameCanBeCopiedFromContextMenuAction() {
@@ -10593,7 +12290,7 @@ final class OKVideoMacTests: XCTestCase {
                 episodeCount: 3,
                 showsInspector: true
             ),
-            54
+            62
         )
     }
 
@@ -10711,7 +12408,7 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertFalse(values[1].displayName.contains("第 2 集"))
     }
 
-    func testSingleEpisodeUsesFeatureLabelAndPreservesOriginalName() {
+    func testUnknownSingleResourcePreservesReadableAndOriginalName() {
         let values = EpisodeListPresentation.presentations(
             from: [
                 PlayEpisode(
@@ -10724,7 +12421,7 @@ final class OKVideoMacTests: XCTestCase {
         )
 
         XCTAssertEqual(values.count, 1)
-        XCTAssertEqual(values[0].displayName, "正片")
+        XCTAssertEqual(values[0].displayName, "后来的我们.1080p.HD中字")
         XCTAssertEqual(
             values[0].originalName,
             "后来的我们.1080p.HD中字.mp4【后来的我们】"
@@ -10740,8 +12437,8 @@ final class OKVideoMacTests: XCTestCase {
             for: PlayEpisode(name: "琅琊榜.SP01.花絮.mkv", url: "special")
         )
 
-        XCTAssertEqual(numbered.episodeNumber, 23)
-        XCTAssertEqual(numbered.displayName, "第 23 集")
+        XCTAssertNil(numbered.episodeNumber)
+        XCTAssertEqual(numbered.displayName, "琅琊榜_23")
         XCTAssertNil(special.episodeNumber)
         XCTAssertTrue(special.isSpecial)
         XCTAssertEqual(special.displayName, "琅琊榜.SP01.花絮")
@@ -10758,8 +12455,8 @@ final class OKVideoMacTests: XCTestCase {
             for: PlayEpisode(name: "你好，旧时光 全30集", url: "series-summary")
         )
 
-        XCTAssertEqual(fifth.episodeNumber, 5)
-        XCTAssertEqual(fifth.displayName, "第 5 集")
+        XCTAssertNil(fifth.episodeNumber)
+        XCTAssertEqual(fifth.displayName, "05")
         XCTAssertNil(aggregateOnly.episodeNumber)
         XCTAssertEqual(aggregateOnly.displayName, "你好，旧时光 全30集")
     }
@@ -10834,7 +12531,7 @@ final class OKVideoMacTests: XCTestCase {
             sortOrder: .sourceOrder
         )
 
-        XCTAssertEqual(values.map(\.episodeNumber), [1, 2, 3, 4])
+        XCTAssertEqual(values.map(\.episodeNumber), [nil, nil, nil, nil])
     }
 
     func testEpisodeListRecognizesStableDescendingFilenameSequence() {
@@ -10851,7 +12548,7 @@ final class OKVideoMacTests: XCTestCase {
             sortOrder: .sourceOrder
         )
 
-        XCTAssertEqual(values.map(\.episodeNumber), [12, 11, 10, 9])
+        XCTAssertEqual(values.map(\.episodeNumber), [nil, nil, nil, nil])
     }
 
     func testSingleFilenameStillUsesLocalEpisodeFallback() {
@@ -10862,8 +12559,8 @@ final class OKVideoMacTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(parsed.episodeNumber, 5)
-        XCTAssertEqual(parsed.displayName, "第 5 集")
+        XCTAssertNil(parsed.episodeNumber)
+        XCTAssertEqual(parsed.displayName, "05")
     }
 
     func testEpisodeNameParserDoesNotTreatOrdinaryTrailingNumberAsEpisode() {
@@ -11196,7 +12893,7 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(gate.requestUpdate())
     }
 
-    func testRenderUpdateGateDropsFramesDuringLiveWindowResize() {
+    func testRenderUpdateGateFencesCallbacksDuringTeardown() {
         let gate = PlayerDisplayUpdateGate()
         XCTAssertTrue(gate.requestUpdate())
 
@@ -13023,6 +14720,69 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testAndroidNetworkRejectsIncidentIPv6OnlyRouteAndSelectsIPv4Gateway() {
+        let broken = """
+        default dev dummy0 table 1002 proto static scope link
+        10.0.2.0/24 dev wlan0 proto kernel scope link src 10.0.2.16
+        default via fe80::2 dev wlan0 table 1016 proto ra
+        """
+        XCTAssertFalse(AndroidDexBridgeRuntime.networkLooksReady(status: "Wifi is connected", routes: broken))
+        XCTAssertNil(AndroidDexBridgeRuntime.defaultGateway(from: broken))
+        let recovered = broken + "\ndefault via 10.0.2.2 dev wlan0 table 1016 proto static"
+        XCTAssertTrue(AndroidDexBridgeRuntime.networkLooksReady(status: "connected", routes: recovered))
+        XCTAssertEqual(AndroidDexBridgeRuntime.defaultGateway(from: recovered), "10.0.2.2")
+        for invalid in ["default via 10.0.2.2 dev wlan0 linkdown",
+                        "default via 10.0.2.2 dev dummy0",
+                        "default via 0.0.0.0 dev wlan0",
+                        "default via not-an-ip dev wlan0"] {
+            XCTAssertFalse(AndroidDexBridgeRuntime.hasUsableDefaultRoute(invalid))
+        }
+    }
+
+    func testAndroidHomeNetworkFailureStopsFetchAndDoesNotReplaceSnapshot() async throws {
+        enum Failure: Error { case offline }
+        var fetched = false
+        var published = "cached home"
+        do {
+            _ = try await AndroidHomeNetworkLoadPolicy.load(checkNetwork: { _ in throw Failure.offline }, fetch: {
+                fetched = true
+                return SiteHome(categories: [], recommendations: [])
+            })
+            published = "empty home"
+            XCTFail("Offline home must throw before publication")
+        } catch Failure.offline { }
+        XCTAssertFalse(fetched)
+        XCTAssertEqual(published, "cached home")
+    }
+
+    func testAndroidHomeEmptyResultRechecksNetworkBeforeReturning() async throws {
+        enum Failure: Error { case lostNetwork }
+        var checks = 0
+        do {
+            _ = try await AndroidHomeNetworkLoadPolicy.load(checkNetwork: { allowRecovery in
+                XCTAssertEqual(allowRecovery, checks == 0)
+                checks += 1
+                if checks == 2 { throw Failure.lostNetwork }
+            }, fetch: { SiteHome(categories: [], recommendations: []) })
+            XCTFail("A plugin swallowing a network error must not publish an empty home")
+        } catch Failure.lostNetwork { }
+        XCTAssertEqual(checks, 2)
+    }
+
+    func testAndroidHomeAllowsLegitimateEmptyHomeAndCancellation() async throws {
+        var checks = 0
+        let empty = try await AndroidHomeNetworkLoadPolicy.load(checkNetwork: { _ in checks += 1 },
+            fetch: { SiteHome(categories: [], recommendations: []) })
+        XCTAssertTrue(empty.categories.isEmpty)
+        XCTAssertTrue(empty.recommendations.isEmpty)
+        XCTAssertEqual(checks, 2)
+        do {
+            _ = try await AndroidHomeNetworkLoadPolicy.load(checkNetwork: { _ in throw CancellationError() },
+                fetch: { XCTFail("Cancelled request must not call the plugin"); return empty })
+            XCTFail("Cancellation must propagate")
+        } catch is CancellationError { }
+    }
+
     func testAndroidBridgeNetworkEvidenceHelpers() {
         let routes = """
         default via 10.0.2.2 dev wlan0 proto dhcp
@@ -13098,6 +14858,18 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(presentation.title, "Android 兼容环境启动失败")
         XCTAssertTrue(presentation.message.contains("Emulator"))
         XCTAssertFalse(presentation.message.contains("technical detail"))
+    }
+
+    func testAndroidDexCacheFailureKeepsLocalCauseDistinctFromSiteFailure() {
+        let failure = AndroidDexJarCacheFailure(
+            bridgeMessage: "Failure: DEX_CACHE_WRITE: local path and secret token"
+        )
+        XCTAssertEqual(failure, .write)
+        XCTAssertNotNil(failure?.errorDescription)
+        XCTAssertFalse(failure?.errorDescription?.contains("secret") ?? true)
+        XCTAssertNil(AndroidDexJarCacheFailure(
+            bridgeMessage: "Failure: unrelated Spider error"
+        ))
     }
 
     func testAndroidBridgeTimeoutDoesNotClaimCleanedEmulatorIsRunning()
@@ -16572,25 +18344,25 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testAndroidDexEmptyFirstSearchRequiresSpiderReset() {
-        XCTAssertTrue(
-            AndroidDexSpiderSiteProvider.shouldRetrySearch(
-                page: 1,
-                value: .string(" \n")
-            )
-        )
-        XCTAssertFalse(
-            AndroidDexSpiderSiteProvider.shouldRetrySearch(
-                page: 2,
-                value: .string("")
-            )
-        )
-        XCTAssertTrue(
-            AndroidDexSpiderSiteProvider.shouldRetrySearch(
-                page: 1,
-                value: .object(["list": .array([])])
-            )
-        )
+    func testAndroidDexCancelledSearchNeverStartsOrResetsRuntime() async throws {
+        let runtime = AndroidDexBridgeRuntime(applicationSupportDirectory:
+            FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let bridge = AndroidDexBridgeClient(runtime: runtime, runtimePrerequisite: {
+            XCTFail("Cancelled search must not invoke or reset the provider")
+            throw CancellationError()
+        })
+        let provider = try AndroidDexSpiderSiteProvider(
+            site: SiteConfiguration(key: "search-cancel", name: "Fixture", type: 3, api: "csp_Fixture"),
+            configurationID: UUID(), configurationHosts: [],
+            jarReference: "https://example.invalid/fixture.jar", baseURL: nil, bridge: bridge)
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            do {
+                _ = try await provider.search(keyword: "Film", page: 1, quick: false)
+                XCTFail("Expected cancellation")
+            } catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
+        }
+        await task.value
     }
 
     func testAndroidDexEmptyFirstCategoryRequiresSingleSpiderRecovery() {
@@ -16990,15 +18762,6 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testPlayerWindowMutationsAreDeferredDuringLiveResize() {
-        XCTAssertFalse(
-            PlayerWindowMutationPolicy.canApply(isInLiveResize: true)
-        )
-        XCTAssertTrue(
-            PlayerWindowMutationPolicy.canApply(isInLiveResize: false)
-        )
-    }
-
     func testLiveWindowUsesManualOverrideOrDecodedChannelRatio() {
         let overriddenRatio = PlayerWindowAspectPolicy.aspectRatio(
             isLivePlayback: true,
@@ -17340,6 +19103,42 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
+    func testPlayerWindowStagedMoveIsImmediateInMemoryAndDurableAfterFlush() throws {
+        let suiteName = "OKVideoMacTests.PlayerWindowStage.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let key = "fixture.player-window-stage"
+        let store = PlayerWindowPreferenceStore(defaults: defaults, storageKey: key)
+        let visible = NSRect(x: 0, y: 0, width: 2_000, height: 1_200)
+        store.saveUserFrame(
+            contentSize: NSSize(width: 1_000, height: 600),
+            windowFrame: NSRect(x: 100, y: 100, width: 1_000, height: 600),
+            visibleFrame: visible,
+            screenIdentifier: 7
+        )
+        let originalCenter = store.preference.normalizedCenterX
+
+        store.stageUserFrame(
+            contentSize: NSSize(width: 1_000, height: 600),
+            windowFrame: NSRect(x: 700, y: 300, width: 1_000, height: 600),
+            visibleFrame: visible,
+            screenIdentifier: 7
+        )
+        XCTAssertNotEqual(store.preference.normalizedCenterX, originalCenter)
+        XCTAssertEqual(
+            PlayerWindowPreferenceStore(defaults: defaults, storageKey: key)
+                .preference.normalizedCenterX,
+            originalCenter
+        )
+
+        store.flushPendingUserFrame()
+        let restored = PlayerWindowPreferenceStore(defaults: defaults, storageKey: key)
+        XCTAssertEqual(restored.preference.normalizedCenterX, store.preference.normalizedCenterX)
+        XCTAssertEqual(restored.preference.normalizedCenterY, store.preference.normalizedCenterY)
+        XCTAssertEqual(restored.preference.screenIdentifier, 7)
+    }
+
+    @MainActor
     func testPlayerWindowLegacyFrameIsParsedWithoutMutatingNSWindow() throws {
         let suiteName = "OKVideoMacTests.PlayerLegacy.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -17549,6 +19348,80 @@ final class OKVideoMacTests: XCTestCase {
             AppState.historyResumePosition(from: unknownDuration),
             1_234
         )
+    }
+
+    @MainActor
+    func testHistoryRestoreRejectsReplacedFileAtSamePlaylistPosition() {
+        let original = PlaySource(name: "夸父原2", episodes: [
+            PlayEpisode(name: "原影片.mkv", url: "original-file")
+        ])
+        let detail = VideoDetail(summary: VideoSummary(siteKey: "fixture",
+            siteName: "Fixture", videoID: "131202", title: "兰香如故（臻彩）"),
+            playSources: [original])
+        let recipe = AppState.historyNavigationRecipe(detail: detail, source: original,
+            episode: original.episodes[0], configurationID: UUID(), position: 10)
+        let record = HistoryRecord(siteKey: "fixture", videoID: "131202",
+            title: detail.summary.title, sourceName: original.name,
+            episodeName: original.episodes[0].name,
+            playbackReference: AppState.historyPlaybackReference(source: original,
+                episode: original.episodes[0], navigationRecipe: recipe, headers: [:]))
+        for name in [original.name, "改名后的线路"] {
+            var replaced = detail
+            replaced.playSources = [PlaySource(name: name, episodes: [
+                PlayEpisode(name: "另一部影片.mkv", url: "different-file")
+            ])]
+            XCTAssertNil(AppState.historyPlaybackSelection(in: replaced, record: record))
+            XCTAssertTrue(AppState.historyPlaybackChoices(in: replaced, record: record).isEmpty)
+        }
+    }
+
+    @MainActor
+    func testHistoryRestoreRejectsReusedVideoIDWithDifferentTitle() {
+        let episode = PlayEpisode(name: "第21集", url: "episode-21")
+        let source = PlaySource(name: "线路一", episodes: [episode])
+        let record = HistoryRecord(siteKey: "fixture", videoID: "131202",
+            title: "兰香如故（臻彩）", sourceName: source.name, episodeName: episode.name,
+            episodeReference: episode.url)
+        var detail = VideoDetail(summary: VideoSummary(siteKey: "fixture",
+            siteName: "Fixture", videoID: "131202", title: "另一部剧"), playSources: [source])
+        XCTAssertNil(AppState.historyPlaybackSelection(in: detail, record: record))
+        XCTAssertTrue(AppState.historyPlaybackChoices(in: detail, record: record).isEmpty)
+        detail.summary.title = "兰香如故"
+        XCTAssertEqual(AppState.historyPlaybackSelection(in: detail, record: record)?.episode, episode)
+        detail.summary.siteKey = "other-site"
+        XCTAssertTrue(AppState.historyPlaybackChoices(in: detail, record: record).isEmpty)
+    }
+
+    @MainActor
+    func testHistoryStableResourceWinsOverReusedRouteNameAndPosition() {
+        let episode = PlayEpisode(name: "第21集", url: "original-file")
+        let source = PlaySource(name: "线路一", episodes: [episode])
+        var detail = VideoDetail(summary: VideoSummary(siteKey: "fixture",
+            siteName: "Fixture", videoID: "131202", title: "影片"), playSources: [source])
+        let recipe = AppState.historyNavigationRecipe(detail: detail, source: source,
+            episode: episode, configurationID: UUID(), position: 10)
+        let record = HistoryRecord(siteKey: "fixture", videoID: "131202", title: "影片",
+            sourceName: source.name, episodeName: episode.name,
+            playbackReference: AppState.historyPlaybackReference(source: source,
+                episode: episode, navigationRecipe: recipe, headers: [:]))
+        detail.playSources = [
+            PlaySource(name: source.name, episodes: [PlayEpisode(name: "第21集", url: "wrong-file")]),
+            PlaySource(name: "线路已改名", episodes: [episode])
+        ]
+        XCTAssertEqual(AppState.historyPlaybackSelection(in: detail, record: record)?.episode.url,
+            "original-file")
+    }
+
+    @MainActor
+    func testLegacyHistoryDoesNotSelectOnlyRemainingUnrelatedFile() {
+        let record = HistoryRecord(siteKey: "fixture", videoID: "video", title: "影片",
+            sourceName: "线路", episodeName: "正片")
+        let detail = VideoDetail(summary: VideoSummary(siteKey: "fixture", siteName: "Fixture",
+            videoID: "video", title: "影片"), playSources: [
+                PlaySource(name: "线路", episodes: [PlayEpisode(name: "预告片", url: "trailer")])
+            ])
+        XCTAssertNil(AppState.historyPlaybackSelection(in: detail, record: record))
+        XCTAssertTrue(AppState.historyPlaybackChoices(in: detail, record: record).isEmpty)
     }
 
     @MainActor
@@ -18021,7 +19894,7 @@ final class OKVideoMacTests: XCTestCase {
     }
 
     @MainActor
-    func testHistoryPlaybackSessionCacheReusesOnlyLiveMemorySession() throws {
+    func testHistoryPlaybackSessionCacheReusesLocalFileWithinLifetime() throws {
         let configurationID = UUID()
         let episode = PlayEpisode(name: "第 2 集", url: "provider-runtime-ref")
         let source = PlaySource(name: "网盘线路", episodes: [episode])
@@ -18035,7 +19908,7 @@ final class OKVideoMacTests: XCTestCase {
             playSources: [source]
         )
         let mediaURL = try XCTUnwrap(
-            URL(string: "http://127.0.0.1:19978/proxy/media/session-a")
+            URL(string: "file:///private/tmp/fixture-a.mp4")
         )
         let playback = ActivePlaybackContext(
             configurationID: configurationID,
@@ -18079,6 +19952,32 @@ final class OKVideoMacTests: XCTestCase {
             )
         )
         XCTAssertEqual(cache.count, 0)
+    }
+
+    @MainActor
+    func testHistoryCacheRejectsMutableCloudSessionEvenWhenTitleAndTTLMatch() throws {
+        let configurationID = UUID()
+        let episode = PlayEpisode(name: "第 1 集", url: "opaque:A")
+        let source = PlaySource(name: "Cloud", episodes: [episode])
+        let detail = VideoDetail(summary: VideoSummary(siteKey: "site", siteName: "Site", videoID: "A", title: "A"), playSources: [source])
+        let url = try XCTUnwrap(URL(string: "http://127.0.0.1:19978/proxy/media/shared"))
+        let reference = PlaybackResourceReference(configurationIdentity: configurationID.uuidString.lowercased(), siteIdentity: "site", providerKind: "fixture", providerVersion: 1, stableResourceLocator: "file-A", sourceIdentity: source.stableIdentity, episodeIdentity: episode.stableIdentity, stability: .providerStable)
+        var session = PlaybackMediaSession(sessionID: "old-A", transport: .providerLoopback, mediaURL: url.absoluteString, expiresAt: Date().addingTimeInterval(7200), resourceReference: reference)
+        var playback = ActivePlaybackContext(configurationID: configurationID, detail: detail, source: source, episode: episode, media: ResolvedMedia(url: url, headers: [:], siteKey: "site", sourceName: source.name, episodeName: episode.name), playbackResult: SitePlaybackResult(url: url.absoluteString, needsParsing: false, flag: source.name, mediaSession: session), providerResourceReference: reference)
+        var cache = HistoryPlaybackSessionCache()
+        cache.store(playback, for: ["A"])
+        XCTAssertNil(cache.playback(for: "A"), "Old proxy may now return B; matching metadata and two-hour TTL do not authorize reuse")
+        session.historyReusePolicy = .immutableResource
+        playback.playbackResult?.mediaSession = session
+        cache.store(playback, for: ["A"])
+        XCTAssertNotNil(cache.playback(for: "A"))
+        XCTAssertNil(cache.playback(for: "A", now: Date().addingTimeInterval(7201)), "Session expiry remains absolute even when cache is touched")
+        playback.playbackResult?.mediaSession?.resourceReference.siteIdentity = "other-site"
+        cache.store(playback, for: ["A"])
+        XCTAssertNil(cache.playback(for: "A"))
+        playback.playbackResult = nil
+        cache.store(playback, for: ["A"])
+        XCTAssertNil(cache.playback(for: "A"), "Legacy loopback without a session contract must also refresh")
     }
 
     @MainActor
@@ -18235,7 +20134,7 @@ final class OKVideoMacTests: XCTestCase {
                 PlaySource(
                     name: "线路一",
                     episodes: [
-                        PlayEpisode(name: "第 23 集", url: "new-token")
+                        PlayEpisode(name: "S01E23", url: "new-token")
                     ]
                 )
             ]
@@ -18583,6 +20482,124 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertTrue(button.isEnabled)
     }
 
+    @MainActor
+    func testHomeCategoryLoadingLayoutHasNoObserverSpacingAndUsesLargeControl() throws {
+        _ = NSApplication.shared
+        let items = [BrowseCategoryNavigationItem(id: "a", title: "推荐", categoryID: nil),
+                     BrowseCategoryNavigationItem(id: "b", title: "热播电影", categoryID: "b")]
+        let root = ScrollView {
+            HomeBrowseScrollContent(coordinateSpaceName: "category-layout-test") {
+                VStack(spacing: 0) {
+                    NativeBrowseCategoryNavigationRepresentable(items: items, selectedID: "a", onSelect: { _ in })
+                        .frame(height: HomeBrowseGridMetrics.categoryRowHeight)
+                    BrowseSegmentedNavigationBottomDivider()
+                }
+                NativeBrowseCategoryNavigationRepresentable(items: items, selectedID: "b", onSelect: { _ in })
+                    .frame(height: HomeBrowseGridMetrics.categoryRowHeight)
+                Color.clear.frame(height: 800)
+            }
+        }
+        let host = NSHostingView(rootView: root)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.close() }
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        host.layoutSubtreeIfNeeded()
+        func navigations(_ node: NSView) -> [NativeBrowseCategoryNavigation] {
+            if let navigation = node as? NativeBrowseCategoryNavigation { return [navigation] }
+            return node.subviews.flatMap(navigations)
+        }
+        let controls = navigations(host).sorted { $0.convert($0.bounds, to: host).minY < $1.convert($1.bounds, to: host).minY }
+        XCTAssertEqual(controls.count, 2)
+        let first = try XCTUnwrap(controls.first)
+        let second = try XCTUnwrap(controls.last)
+        let top = first.convert(first.bounds, to: host).minY
+        let contentTop = second.convert(second.bounds, to: host).minY
+        XCTAssertEqual(top, 0, accuracy: 0.5, "Zero-height observer must not add 8pt before navigation")
+        XCTAssertEqual(contentTop - top, HomeBrowseGridMetrics.headerHeight(hasFilters: false), accuracy: 0.5,
+                       "Loading content and native collection section inset must agree")
+        first.layoutSubtreeIfNeeded()
+        let regular = NSSegmentedControl(labels: ["推荐", "热播电影"], trackingMode: .selectOne, target: nil, action: nil)
+        XCTAssertEqual(first.segments.controlSize, .large)
+        XCTAssertGreaterThan(first.segments.frame.height, regular.fittingSize.height)
+        XCTAssertGreaterThanOrEqual(first.segments.frame.minY, 8)
+        let frame = first.segments.frame
+        first.configure(items: items, selectedID: "b") { _ in }
+        first.layoutSubtreeIfNeeded()
+        XCTAssertEqual(first.segments.frame, frame, "Selection must not resize or move navigation")
+        print("Category geometry: navigationTop=\(top), contentTop=\(contentTop), largeControl=\(frame)")
+    }
+
+    @MainActor
+    func testNativeCategoryOverflowSelectionResizeAndRecommendationRouting() throws {
+        _ = NSApplication.shared
+        let view = NativeBrowseCategoryNavigation(frame: NSRect(x: 0, y: 0, width: 300, height: 48))
+        let recommendation = BrowseCategoryNavigationItem(id: HomeCategoryNavigationLayoutPolicy.recommendationID,
+            title: "推荐", categoryID: nil)
+        let items = [recommendation] + (0..<12).map {
+            BrowseCategoryNavigationItem(id: "c\($0)", title: "分类 \($0)", categoryID: "c\($0)")
+        }
+        var selection: String? = "unset"
+        view.configure(items: items, selectedID: recommendation.id) { selection = $0 }
+        view.layoutSubtreeIfNeeded()
+        XCTAssertFalse(view.partition.hiddenIDs.isEmpty)
+        XCTAssertEqual(Set(view.partition.visibleIDs + view.partition.hiddenIDs), Set(items.map(\.id)))
+        let menu = view.makeOverflowMenu()
+        XCTAssertEqual(menu.items.dropFirst().first?.state, .on)
+        let last = try XCTUnwrap(menu.items.last)
+        XCTAssertEqual(last.representedObject as? String, "c11")
+        XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(last.action), to: last.target, from: last))
+        XCTAssertEqual(selection, "c11")
+        view.configure(items: items, selectedID: selection) { selection = $0 }
+        view.layoutSubtreeIfNeeded()
+        XCTAssertTrue(view.partition.visibleIDs.contains("c11"))
+        XCTAssertFalse(view.partition.hiddenIDs.contains("c11"))
+        // Recommendation may remain visible beside the selected overflow item.
+        if let index = view.partition.visibleIDs.firstIndex(of: recommendation.id) {
+            view.segments.selectedSegment = index
+            XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(view.segments.action), to: view.segments.target, from: view.segments))
+        } else {
+            let returnItem = try XCTUnwrap(view.makeOverflowMenu().items.first { $0.representedObject as? String == recommendation.id })
+            XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(returnItem.action), to: returnItem.target, from: returnItem))
+        }
+        XCTAssertNil(selection, "Recommendation must dispatch nil, not disappear from an optional dictionary")
+        view.frame.size.width = 1600
+        view.needsLayout = true
+        view.layoutSubtreeIfNeeded()
+        XCTAssertTrue(view.partition.hiddenIDs.isEmpty)
+        XCTAssertEqual(view.partition.visibleIDs, items.map(\.id))
+    }
+
+    @MainActor
+    func testNativeCategoryLongTitleLeavesMoreReachableAndReusesLatestAction() throws {
+        _ = NSApplication.shared
+        let view = NativeBrowseCategoryNavigation(frame: NSRect(x: 0, y: 0, width: 180, height: 48))
+        let items = [BrowseCategoryNavigationItem(id: "long", title: String(repeating: "很长的分类", count: 20), categoryID: "long"),
+                     BrowseCategoryNavigationItem(id: "other", title: "其他", categoryID: "other")]
+        var oldCalls = 0
+        var newCalls = 0
+        view.configure(items: items, selectedID: "long") { _ in oldCalls += 1 }
+        view.layoutSubtreeIfNeeded()
+        let more = view.more
+        XCTAssertFalse(more.isHidden)
+        XCTAssertGreaterThan(more.frame.width, 0)
+        XCTAssertLessThanOrEqual(more.frame.maxX, view.bounds.width)
+        XCTAssertLessThanOrEqual(view.segments.frame.maxX, more.frame.minX)
+        XCTAssertEqual(view.segments.segmentCount, 1)
+        XCTAssertEqual(view.segments.label(forSegment: 0), items[0].title)
+        view.configure(items: items, selectedID: "long") { _ in newCalls += 1 }
+        XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(view.segments.action), to: view.segments.target, from: view.segments))
+        XCTAssertEqual(oldCalls, 0)
+        XCTAssertEqual(newCalls, 1)
+        view.configure(items: [], selectedID: nil) { _ in }
+        view.layoutSubtreeIfNeeded()
+        XCTAssertTrue(view.partition.visibleIDs.isEmpty)
+        XCTAssertTrue(more.isHidden)
+    }
+
     func testHomeCategoryNavigationHidesMoreAtExactFit() {
         let candidates = ["a", "b", "c"].map {
             HomeCategoryNavigationCandidate(id: $0, width: 72)
@@ -18698,7 +20715,8 @@ final class OKVideoMacTests: XCTestCase {
             ),
             isSearchEnabled: true,
             focusRequest: 0,
-            selectedSection: .home,
+            selection: NavigationSelection(section: .home, revision: 0),
+            navigation: AppNavigationState(),
             onTextChange: { _ in },
             onSubmit: {},
             onExitSearch: { true },
@@ -19732,7 +21750,7 @@ final class NodeBundleCompatibilityTests: XCTestCase {
     }
 
     func testDeterministicPatchAcceptsExactInputAndRejectsChangedInput() throws {
-        let shipped = NodeBundleDeterministicPatch.quarkLifecycleV2
+        let shipped = NodeBundleDeterministicPatch.quarkLifecycleV3
         let patchURL = try XCTUnwrap(
             Bundle.main.url(
                 forResource: shipped.patchResourceName,
@@ -26882,6 +28900,36 @@ private func quarkStoken(from episodeReference: String) throws -> String {
     return try XCTUnwrap(token["stoken"] as? String)
 }
 
+private actor PosterAdmissionProbe: HTTPClient {
+    private let body: Data
+    private let oldDelayNanoseconds: UInt64
+    private var starts: [String: Int] = [:]
+    private var cancellations: [String: Int] = [:]
+
+    init(body: Data, oldDelayNanoseconds: UInt64) {
+        self.body = body
+        self.oldDelayNanoseconds = oldDelayNanoseconds
+    }
+
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        let key = request.url.lastPathComponent
+        starts[key, default: 0] += 1
+        if key.hasPrefix("old-") {
+            do { try await Task.sleep(nanoseconds: oldDelayNanoseconds) }
+            catch {
+                cancellations[key, default: 0] += 1
+                throw error
+            }
+        }
+        return HTTPResponse(url: request.url, statusCode: 200,
+            headers: ["Content-Type": "image/png"], body: body)
+    }
+
+    func oldStarts() -> Int { starts.filter { $0.key.hasPrefix("old-") }.values.reduce(0, +) }
+    func newStarts() -> Int { starts["new-visible.png", default: 0] }
+    func oldCancellations() -> Int { cancellations.values.reduce(0, +) }
+}
+
 private actor ImageRepositoryHTTPClientProbe: HTTPClient {
     private let body: Data?
     private let error: HTTPClientError?
@@ -27855,6 +29903,61 @@ extension AndroidRuntimeModeCompatibilityTests {
 final class LiveGuideGridTests: XCTestCase {
     private let start = Date(timeIntervalSince1970: 2_000_000_000)
 
+    func testPartiallyClippedTopProgrammeKeepsItsOriginalTextOrigin() throws {
+        let model = try fixture(rows: 48, programmesPerRow: 24)
+        let view = LiveGuideGridView(frame: .init(x: 0, y: 0, width: 1100, height: 720))
+        let window = NSWindow(contentRect: view.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = view
+        defer { window.close() }
+        view.apply(model, now: start)
+        view.layoutSubtreeIfNeeded()
+        view.scroll(to: .init(x: 80, y: 5 * LiveGuideGridView.rowHeight + 51))
+        view.displayIfNeeded()
+        let frames = view.debugVisibleProgrammeFrames
+        let partial = try XCTUnwrap(frames.first { $0.minY < 0 })
+        XCTAssertLessThan(partial.minY + 8 + 20, 0,
+            "The previous row title must stay above the clip, never be repositioned into the next row")
+        XCTAssertLessThan(partial.maxY, LiveGuideGridView.rowHeight)
+        let next = try XCTUnwrap(frames.first { $0.minY >= 0 })
+        XCTAssertGreaterThanOrEqual(next.minY, partial.maxY)
+        let output = URL(fileURLWithPath: "/private/tmp/OKVideoMac-UX109-Visuals", isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: output.appendingPathComponent("guide-partial-top.png"))
+    }
+
+    func testNativeGuideUsesOneClipAndBoundedDrawingMemory() async throws {
+        let initial = try fixture(rows: 48, programmesPerRow: 24)
+        let model = try LiveGuideGridModel(windowStart: start,
+            windowEnd: start.addingTimeInterval(24 * 3600), timeZone: .current, rows: initial.rows)
+        let sampler = LiveGuideResourceSampler(); sampler.start()
+        let view = LiveGuideGridView(frame: .init(x: 0, y: 0, width: 1100, height: 720))
+        let window = NSWindow(contentRect: view.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = view; window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        view.apply(model, now: start)
+        view.layoutSubtreeIfNeeded(); view.displayIfNeeded()
+        let scrolls = BrowserKeyboardView.descendants(of: view).compactMap { $0 as? NSScrollView }
+        XCTAssertEqual(scrolls.count, 1)
+        let scroll = try XCTUnwrap(scrolls.first)
+        let document = try XCTUnwrap(scroll.documentView)
+        XCTAssertGreaterThan(document.frame.width, scroll.contentSize.width)
+        for index in 0..<24 {
+            scroll.contentView.scroll(to: .init(x: CGFloat(index % 8) * 300, y: CGFloat(index % 6) * 360))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            view.displayIfNeeded()
+            try await Task.sleep(nanoseconds: 20_000_000)
+            XCTAssertEqual(view.scrollOffset, scroll.contentView.bounds.origin)
+            XCTAssertLessThanOrEqual(view.debugMetrics.visibleProgrammeViews, 200)
+            XCTAssertTrue(document.subviews.allSatisfy { $0.bounds.width <= scroll.contentSize.width + 1 && $0.bounds.height <= scroll.contentSize.height + 1 })
+        }
+        let measurement = sampler.stop()
+        let growth = Int64(measurement.peak.footprint) - Int64(measurement.baseline.footprint)
+        print("UX109 guide: footprint growth \(growth) bytes; document layer \(document.layer != nil); raster contents \(document.layer?.contents != nil)")
+        XCTAssertLessThan(growth, 128 * 1024 * 1024, "A guide must not allocate a bitmap for the entire logical document")
+    }
+
     func testFixtureGridVirtualizesBothAxesAndKeepsFixedRegionsStable() throws {
         let model = try fixture(rows: 48, programmesPerRow: 24)
         let view = LiveGuideGridView(frame: NSRect(x: 0, y: 0, width: 980, height: 620))
@@ -27876,7 +29979,7 @@ final class LiveGuideGridTests: XCTestCase {
         XCTAssertLessThan(initial.emittedLayoutAttributes, initial.totalProgrammes)
         XCTAssertLessThanOrEqual(initial.cachedTimeLabels, 64)
         XCTAssertEqual(try XCTUnwrap(view.debugNowLineX),
-                       12 * LiveGuideGridView.minimumProgrammeWidth, accuracy: 0.001)
+                       6 * LiveGuideGridView.pointsPerHour, accuracy: 0.001)
 
         for point in [NSPoint(x: 400, y: 640), NSPoint(x: 800, y: 1_280),
                       NSPoint(x: 1_200, y: 1_900), NSPoint(x: 1_000, y: 2_400)] {
@@ -27899,8 +30002,7 @@ final class LiveGuideGridTests: XCTestCase {
         view.layoutSubtreeIfNeeded()
         let resized = view.debugFixedFrames
         XCTAssertEqual(resized.timeHeader.width,
-                       720 - LiveGuideGridView.channelColumnWidth
-                           - NSScroller.scrollerWidth(for: .small, scrollerStyle: .overlay),
+                       720 - LiveGuideGridView.channelColumnWidth,
                        accuracy: 0.001)
         XCTAssertEqual(resized.channelHeader.minY, LiveGuideGridView.timeHeaderHeight,
                        accuracy: 0.001)
@@ -27936,6 +30038,191 @@ final class LiveGuideGridTests: XCTestCase {
                        window.backingScaleFactor)
         XCTAssertLessThan(view.debugMetrics.visibleProgrammeViews,
                           view.debugMetrics.totalProgrammes)
+    }
+
+    func testSwiftUIHostRendersFixedRegionsInFiniteViewport() async throws {
+        let model = try fixture(rows: 48, programmesPerRow: 24)
+        for (name, appearance, size) in [
+            ("light", NSAppearance.Name.aqua, NSSize(width: 1280, height: 720)),
+            ("dark", NSAppearance.Name.darkAqua, NSSize(width: 800, height: 480))
+        ] {
+            let host = NSHostingView(rootView: VStack(spacing: 0) {
+                Text("Guide Date · Now · Previous / Next").frame(height: 46)
+                LiveGuideViewportHost {
+                    LiveGuideGridRepresentable(model: model, now: self.start.addingTimeInterval(1800),
+                        onProgrammeSelected: { _, _ in }, onProgrammeActivated: { _, _ in },
+                        onChannelActivated: { _ in }, onVisibleRangeChanged: { _ in })
+                }
+            })
+            let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
+                styleMask: [.borderless], backing: .buffered, defer: false)
+            window.appearance = NSAppearance(named: appearance)
+            window.contentView = host
+            window.orderFront(nil)
+            defer { window.orderOut(nil) }
+            try await Task.sleep(nanoseconds: 80_000_000)
+            host.layoutSubtreeIfNeeded()
+            func find(_ view: NSView) -> LiveGuideGridView? {
+                if let grid = view as? LiveGuideGridView { return grid }
+                return view.subviews.lazy.compactMap { find($0) }.first
+            }
+            let grid = try XCTUnwrap(find(host))
+            grid.layoutSubtreeIfNeeded()
+            XCTAssertEqual(grid.bounds.width, size.width, accuracy: 1)
+            XCTAssertEqual(grid.bounds.height, size.height - 46, accuracy: 1)
+            let bitmap = try XCTUnwrap(grid.bitmapImageRepForCachingDisplay(in: grid.bounds))
+            grid.cacheDisplay(in: grid.bounds, to: bitmap)
+            // Inspect actual raster colour variation inside text regions (not separators).
+            func distinctPixels(_ rect: NSRect) -> Int {
+                let sx = CGFloat(bitmap.pixelsWide) / grid.bounds.width
+                let sy = CGFloat(bitmap.pixelsHigh) / grid.bounds.height
+                var colours = Set<Int>()
+                for y in Int(rect.minY * sy)..<Int(rect.maxY * sy) {
+                    for x in Int(rect.minX * sx)..<Int(rect.maxX * sx) {
+                        guard let c = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                        colours.insert(Int(c.redComponent * 255) * 65536 + Int(c.greenComponent * 255) * 256 + Int(c.blueComponent * 255))
+                    }
+                }
+                return colours.count
+            }
+            XCTAssertGreaterThan(distinctPixels(NSRect(x: 12, y: 55, width: 155, height: 19)), 8, "channel text must paint")
+            XCTAssertGreaterThan(distinctPixels(NSRect(x: 194, y: 10, width: 105, height: 23)), 8, "time text must paint")
+            let output = URL(fileURLWithPath: "/private/tmp/OKVideoMac-NavH2/guide-B-\(name).png")
+            try bitmap.representation(using: .png, properties: [:])?.write(to: output)
+        }
+    }
+
+    func testTimeGeometryClipsEdgesAndNeverWidensShortOrOverlappingEntries() throws {
+        let end = start.addingTimeInterval(3_600)
+        func frame(_ lower: Double, _ upper: Double) throws -> NSRect {
+            try XCTUnwrap(LiveGuideGeometry.timeFrame(start: start.addingTimeInterval(lower),
+                end: start.addingTimeInterval(upper), windowStart: start, windowEnd: end, row: 0))
+        }
+        XCTAssertEqual(try frame(-600, 600).width, 40, accuracy: 0.001)
+        XCTAssertEqual(try frame(3_000, 4_000).width, 40, accuracy: 0.001)
+        XCTAssertEqual(try frame(-600, 4_000).width, 240, accuracy: 0.001)
+        XCTAssertEqual(try frame(0, 1).width, 1.0 / 15, accuracy: 0.001)
+        let tiny = try frame(0, 1)
+        XCTAssertLessThanOrEqual(LiveGuideGeometry.renderFrame(tiny).width, tiny.width)
+        let first = try frame(0, 180), second = try frame(180, 540)
+        XCTAssertEqual(first.maxX, second.minX)
+        XCTAssertFalse(LiveGuideGeometry.renderFrame(first).intersects(LiveGuideGeometry.renderFrame(second)))
+        let overlap = try frame(120, 600)
+        XCTAssertTrue(first.intersects(overlap))
+        XCTAssertEqual(overlap.width, 32, accuracy: 0.001)
+        XCTAssertNil(LiveGuideGeometry.timeFrame(start: end, end: end.addingTimeInterval(60),
+            windowStart: start, windowEnd: end, row: 0))
+        let bounds = NSRect(x: 0, y: 0, width: 200, height: 64)
+        XCTAssertTrue(bounds.contains(LiveGuideGeometry.hitFrame(tiny, bounds: bounds)))
+    }
+
+    func testMixedShortProgrammesKeepOneFixedTimeScale() throws {
+        let durations: [TimeInterval] = [3, 6, 30, 60, 90].map { $0 * 60 }
+        var cursor = start
+        let programmes = durations.enumerated().map { index, duration in
+            defer { cursor = cursor.addingTimeInterval(duration) }
+            return programme(row: 0, item: index, start: cursor, duration: duration)
+        }
+        let model = try LiveGuideGridModel(
+            windowStart: start,
+            windowEnd: start.addingTimeInterval(4 * 3_600),
+            timeZone: .current,
+            rows: [LiveGuideGridRow(id: "mixed", title: "Mixed", programmes: programmes)]
+        )
+        let view = LiveGuideGridView(frame: NSRect(x: 0, y: 0, width: 1_200, height: 220))
+        view.apply(model, now: start)
+        view.updateNow(start.addingTimeInterval(2 * 3_600))
+        view.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(try XCTUnwrap(view.debugNowLineX),
+                       2 * LiveGuideGridView.pointsPerHour, accuracy: 0.001)
+        let widths = view.debugVisibleProgrammeWidths
+        XCTAssertEqual(widths.count, durations.count)
+        for (width, duration) in zip(widths, durations) {
+            let expected = CGFloat(duration / 3_600) * LiveGuideGridView.pointsPerHour
+            XCTAssertEqual(width, expected, accuracy: 0.001)
+        }
+        XCTAssertLessThan(widths[0], widths[1])
+        XCTAssertLessThan(widths[1], widths[2])
+    }
+
+    func testRefreshPreservesViewportButAWindowChangeResetsIt() throws {
+        let model = try fixture(rows: 48, programmesPerRow: 24)
+        let view = LiveGuideGridView(frame: NSRect(x: 0, y: 0, width: 900, height: 420))
+        view.apply(model, now: start)
+        view.layoutSubtreeIfNeeded()
+        view.scroll(to: NSPoint(x: 720, y: 1_100))
+        let retained = view.scrollOffset
+
+        view.apply(model, now: start.addingTimeInterval(30))
+        XCTAssertEqual(view.scrollOffset, retained)
+
+        let shifted = try LiveGuideGridModel(
+            windowStart: model.windowStart.addingTimeInterval(12 * 3_600),
+            windowEnd: model.windowEnd.addingTimeInterval(12 * 3_600),
+            timeZone: model.timeZone,
+            rows: model.rows
+        )
+        view.apply(shifted, now: shifted.windowStart)
+        XCTAssertEqual(view.scrollOffset, .zero)
+    }
+
+    func testNowResizeAndReorderedChannelAnchors() throws {
+        let model = try fixture(rows: 48, programmesPerRow: 24)
+        let view = LiveGuideGridView(frame: NSRect(x: 0, y: 0, width: 1000, height: 400))
+        let now = start.addingTimeInterval(6 * 3600)
+        view.apply(model, now: now)
+        view.layoutSubtreeIfNeeded()
+        XCTAssertEqual(1440 - view.scrollOffset.x, view.debugFixedFrames.content.width * 0.25, accuracy: 0.01)
+        view.scroll(to: NSPoint(x: 800, y: 10 * LiveGuideGridView.rowHeight + 20))
+        let center = view.scrollOffset.x + view.debugFixedFrames.content.width / 2
+        view.frame.size.width = 800
+        view.layoutSubtreeIfNeeded()
+        XCTAssertEqual(view.scrollOffset.x + view.debugFixedFrames.content.width / 2, center, accuracy: 0.01)
+        var rows = model.rows
+        rows.swapAt(10, 14)
+        let reordered = try LiveGuideGridModel(windowStart: model.windowStart, windowEnd: model.windowEnd,
+            timeZone: model.timeZone, rows: rows)
+        view.apply(reordered, now: now)
+        XCTAssertEqual(view.scrollOffset.y, 14 * LiveGuideGridView.rowHeight + 20)
+        view.reposition(to: now, reason: .now)
+        let first = view.scrollOffset
+        view.scroll(to: NSPoint(x: 0, y: first.y))
+        view.reposition(to: now, reason: .now)
+        XCTAssertEqual(view.scrollOffset, first, "repeated Now is an operation, not a date onChange")
+        view.updateNow(now.addingTimeInterval(600))
+        XCTAssertEqual(view.scrollOffset, first, "clock tick must not pull viewport")
+    }
+
+    func testTemporalStyleUsesHalfOpenIntervalsAndGenerationSelectionIsSemantic() throws {
+        XCTAssertEqual(LiveGuideProgrammePhase.phase(start: start, end: start.addingTimeInterval(60), now: start), .current)
+        XCTAssertEqual(LiveGuideProgrammePhase.phase(start: start, end: start.addingTimeInterval(60), now: start.addingTimeInterval(60)), .past)
+        XCTAssertEqual(LiveGuideProgrammePhase.phase(start: start, end: start.addingTimeInterval(60), now: start.addingTimeInterval(-1)), .future)
+        let model = try fixture(rows: 2, programmesPerRow: 24)
+        let view = LiveGuideGridView(frame: NSRect(x: 0, y: 0, width: 900, height: 300))
+        view.apply(model, now: start)
+        view.layoutSubtreeIfNeeded()
+        view.debugSelect(item: 1, section: 1)
+        let rows = model.rows.map { row in
+            LiveGuideGridRow(id: row.id, title: row.title, programmes: row.programmes.map { old in
+                LiveGuideGridProgramme(EPGWindowProgramme(id: EPGProgrammeRecordIdentity(kind: .xmltv,
+                    resourceIdentity: "fixture", sourceEpoch: "epoch", dataVersion: "new",
+                    ordinal: old.id.ordinal), programme: EPGProgramme(channelID: row.id,
+                        title: old.title, start: old.start, end: old.end)))
+            })
+        }
+        view.apply(try LiveGuideGridModel(windowStart: model.windowStart, windowEnd: model.windowEnd,
+            timeZone: model.timeZone, rows: rows), now: start)
+        XCTAssertEqual(view.debugSelectedIndexPath, IndexPath(item: 1, section: 1))
+    }
+
+    func testChannelPagerKeepsDemandBoundedAndMakesLaterChannelsReachable() {
+        XCTAssertEqual(LiveGuideChannelPager.pageCount(total: 113), 3)
+        XCTAssertEqual(LiveGuideChannelPager.range(page: 0, total: 113), 0..<48)
+        XCTAssertEqual(LiveGuideChannelPager.range(page: 1, total: 113), 48..<96)
+        XCTAssertEqual(LiveGuideChannelPager.range(page: 2, total: 113), 96..<113)
+        XCTAssertEqual(LiveGuideChannelPager.range(page: 99, total: 113), 96..<113)
+        XCTAssertEqual(LiveGuideChannelPager.range(page: 0, total: 0), 0..<0)
     }
 
     func testDSTFallbackUsesElapsedTimeAndDisambiguatesRepeatedWallClockLabels() throws {
@@ -27995,6 +30282,205 @@ final class LiveGuideGridTests: XCTestCase {
 
 @MainActor
 final class LiveGuidePresentationStateTests: XCTestCase {
+    func testOldPageReleaseAndDemandCannotClearNewOwner() {
+        let app = AppState(environment: nil)
+        app.selectSection(.live)
+        let old = UUID(), current = UUID()
+        XCTAssertTrue(app.acquireLiveGuideDemand(owner: old, navigation: app.navigation.selection))
+        XCTAssertTrue(app.acquireLiveGuideDemand(owner: current, navigation: app.navigation.selection))
+        let identity = self.identity(source: EPGSourceKey(.imported(UUID())), incarnation: UUID())
+        app.liveGuide.begin(identity, refreshing: true)
+        app.clearLiveGuideDemand(owner: old)
+        XCTAssertEqual(app.liveGuide.lifecycle, .loadingInitial)
+        app.setLiveGuideDemand(owner: old, source: nil, channels: [],
+            windowStart: Date(), windowEnd: Date(), visibleRange: 0..<1)
+        XCTAssertEqual(app.liveGuide.lifecycle, .loadingInitial)
+        app.clearLiveGuideDemand(owner: current)
+        XCTAssertEqual(app.liveGuide.lifecycle, .inactive)
+    }
+
+    func testNavigationAwayInvalidatesGuideAndRejectsOldAppearance() {
+        let app = AppState(environment: nil)
+        app.selectSection(.live)
+        let selection = app.navigation.selection
+        XCTAssertTrue(app.acquireLiveGuideDemand(owner: UUID(), navigation: selection))
+        app.liveGuide.begin(identity(source: EPGSourceKey(.imported(UUID())), incarnation: UUID()), refreshing: true)
+        app.selectSection(.home)
+        XCTAssertEqual(app.liveGuide.lifecycle, .inactive)
+        app.selectSection(.live)
+        XCTAssertFalse(app.acquireLiveGuideDemand(owner: UUID(), navigation: selection))
+        XCTAssertTrue(app.acquireLiveGuideDemand(owner: UUID(), navigation: app.navigation.selection))
+    }
+
+    func testResourceFailureEndsWaitingButOldOperationCannotEndReplacement() {
+        let app = AppState(environment: nil)
+        let key = EPGRequestKey(source: .imported(UUID()), revision: "fixture", resource: "xmltv")
+        let old = UUID(), current = UUID()
+        app.beginLiveGuideResourceWaitForTesting(key: key, operation: old)
+        app.beginLiveGuideResourceWaitForTesting(key: key, operation: current)
+        app.finishLiveGuideResourceWaitForTesting(key: key, operation: old)
+        XCTAssertEqual(app.liveGuide.lifecycle, .loadingInitial)
+        app.finishLiveGuideResourceWaitForTesting(key: key, operation: current)
+        XCTAssertEqual(app.liveGuide.lifecycle, .failed(.unavailable))
+        XCTAssertNil(app.liveGuide.snapshot, "a transport failure is not an empty programme guide")
+    }
+
+    func testTraceIsBoundedAndPresenterRejectionHasTerminalState() {
+        for _ in 0..<300 { BrowserInteractionTrace.record("test") }
+        XCTAssertEqual(BrowserInteractionTrace.entries.count, 128)
+        let presenter = LiveGuideModelPresenter()
+        presenter.rejectScope()
+        XCTAssertTrue(presenter.conversionFailed)
+        XCTAssertNil(presenter.model)
+    }
+
+    func testModelPresenterCoalescesRefreshAndRejectsOldScopeAndCallbacks() async throws {
+        actor Converter {
+            var continuations: [CheckedContinuation<LiveGuideGridModel?, Never>] = []
+            var started = 0
+            func convert() async -> LiveGuideGridModel? {
+                started += 1
+                return await withCheckedContinuation { continuations.append($0) }
+            }
+            func finish(_ model: LiveGuideGridModel) { continuations.removeFirst().resume(returning: model) }
+        }
+        let converter = Converter()
+        let presenter = LiveGuideModelPresenter { _, _ in await converter.convert() }
+        let identity = self.identity(source: EPGSourceKey(.imported(UUID())), incarnation: UUID())
+        let first = try snapshot(identity, title: "First")
+        let model = try LiveGuideGridModel(snapshot: first, timeZone: .current)
+        let scope = LiveGuideViewScope(source: first.source, start: model.windowStart,
+            end: model.windowEnd, channelIDs: model.rows.map(\.id))
+        presenter.submit(first, scope: scope)
+        for _ in 0..<100 where await converter.started == 0 { await Task.yield() }
+        let count1 = await converter.started; XCTAssertEqual(count1, 1)
+        await converter.finish(model)
+        for _ in 0..<100 where presenter.model == nil { await Task.yield() }
+        XCTAssertEqual(presenter.model, model)
+        XCTAssertTrue(presenter.acceptsCallback(scope: scope, revision: first.demandRevision))
+        presenter.submit(first, scope: scope)
+        for _ in 0..<100 where await converter.started < 2 { await Task.yield() }
+        XCTAssertEqual(presenter.model, model, "refresh retains mounted content")
+        for _ in 0..<100 { presenter.submit(first, scope: scope) }
+        let count2 = await converter.started; XCTAssertEqual(count2, 2, "only one conversion runs")
+        presenter.invalidate()
+        await converter.finish(model)
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertNil(presenter.model)
+        XCTAssertFalse(presenter.acceptsCallback(scope: scope, revision: first.demandRevision))
+        let foreign = LiveGuideViewScope(source: EPGSourceKey(.imported(UUID())),
+            start: model.windowStart, end: model.windowEnd, channelIDs: scope.channelIDs)
+        presenter.submit(first, scope: foreign)
+        XCTAssertNil(presenter.model)
+        let count3 = await converter.started; XCTAssertEqual(count3, 2)
+    }
+
+    func testFullGuideScreenVisualMatrixAndRefreshKeepsNativeHost() async throws {
+        let sourceID = LiveSourceID.imported(UUID())
+        let source = EPGSourceKey(sourceID)
+        let incarnation = UUID()
+        let start = LiveBrowserSession.roundedGuideStart(Date().addingTimeInterval(-3600))
+        let channelNames = ["湖南卫视", "江苏卫视", "浙江卫视", "北京卫视", "广东卫视", "山东卫视", "湖北卫视", "深圳卫视"]
+        let channels = (0..<84).map { index in
+            LiveChannel(groupName: "Fixture", name: channelNames[index % channelNames.count], tvgID: "c\(index)",
+                        streams: [], explicitID: "channel-\(index)")
+        }
+        let suite = "GuideVisual.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let session = LiveBrowserSession(preferences: LiveBrowserPreferenceStore(defaults: defaults))
+        session.selectedSourceID = sourceID
+        session.guideWindowStart = start
+        let guide = LiveGuideState()
+        func publish(empty: Bool = false) throws {
+            let identity = self.identity(source: source, incarnation: incarnation)
+            let token = EPGResultToken(serviceIncarnation: incarnation, resourceIdentity: "visual",
+                sourceEpoch: "epoch", dataVersion: UUID().uuidString, demandRevision: identity.demandRevision)
+            let rows = channels.prefix(LiveGuideChannelPager.pageSize).enumerated().map { row, channel in
+                var cursor = start.addingTimeInterval(-Double(row % 4) * 180)
+                let durations = [3, 6, 30, 60, 90, 30, 60, 90, 30, 60, 90].map { Double($0 * 60) }
+                let programmes: [EPGWindowProgramme] = empty || row % 8 >= 6 ? [] : durations.enumerated().map { index, duration in
+                    defer { cursor = cursor.addingTimeInterval(duration) }
+                    return EPGWindowProgramme(id: EPGProgrammeRecordIdentity(kind: .xmltv,
+                        resourceIdentity: token.resourceIdentity, sourceEpoch: token.sourceEpoch,
+                        dataVersion: token.dataVersion, ordinal: row * 256 + index),
+                        programme: EPGProgramme(channelID: channel.tvgID!, title: ["新闻直播间", "午间剧场：亲爱的生活", "自然与旅行", "城市纪录片", "文化访谈", "晚间新闻"][index % 6],
+                            start: cursor, end: cursor.addingTimeInterval(duration)))
+                }
+                return EPGGuideRow(channel: EPGGuideChannel(channel), token: token,
+                    match: EPGChannelMatch(kind: .exact, channelID: channel.tvgID), availability: .fresh,
+                    programmes: programmes, state: programmes.isEmpty ? .empty : .ready)
+            }
+            let snapshot = try EPGGuideSnapshot(source: source, revision: identity.revision,
+                demandRevision: identity.demandRevision,
+                slices: [EPGGuideTimeSlice(start: start, end: start.addingTimeInterval(43200))],
+                coherence: .xmltv(token), rows: rows)
+            guide.begin(identity, refreshing: false)
+            XCTAssertTrue(guide.publish(snapshot, identity: identity))
+        }
+        try publish()
+        let appState = AppState(environment: nil)
+        let host = NSHostingView(rootView: LiveGuideScreen(guide: guide, session: session,
+            sourceID: sourceID, channels: channels, importedCatalog: nil).environmentObject(appState)
+            .environment(\.colorScheme, .light))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 720),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        func find(_ view: NSView) -> LiveGuideGridView? {
+            if let grid = view as? LiveGuideGridView { return grid }
+            return view.subviews.lazy.compactMap { find($0) }.first
+        }
+        for _ in 0..<200 where find(host)?.model == nil {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let grid = try XCTUnwrap(find(host))
+        XCTAssertNotNil(grid.model)
+        grid.debugSelect(item: 4, section: 2)
+        for (name, appearance, size) in [
+            ("light-1280", NSAppearance.Name.aqua, NSSize(width: 1280, height: 720)),
+            ("dark-1280", NSAppearance.Name.darkAqua, NSSize(width: 1280, height: 720)),
+            ("light-small", NSAppearance.Name.aqua, NSSize(width: 720, height: 480)),
+            ("dark-large", NSAppearance.Name.darkAqua, NSSize(width: 1600, height: 900))
+        ] {
+            window.appearance = NSAppearance(named: appearance)
+            host.rootView = LiveGuideScreen(guide: guide, session: session,
+                sourceID: sourceID, channels: channels, importedCatalog: nil).environmentObject(appState)
+                .environment(\.colorScheme, appearance == .darkAqua ? .dark : .light)
+            window.setContentSize(size)
+            try await Task.sleep(nanoseconds: 50_000_000)
+            host.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            XCTAssertTrue(find(host) === grid)
+            XCTAssertEqual(grid.frame.width, size.width, accuracy: 1)
+            XCTAssertLessThan(grid.frame.height, size.height - 45)
+            XCTAssertGreaterThan(grid.debugMetrics.visibleProgrammeViews, 5)
+            let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])?.write(to:
+                URL(fileURLWithPath: "/private/tmp/OKVideoMac-NavH2/guide-F-\(name).png"))
+        }
+        grid.scroll(to: NSPoint(x: 660, y: 440))
+        let offset = grid.scrollOffset
+        let oldModel = grid.model
+        try publish()
+        for _ in 0..<200 where grid.model == oldModel { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(find(host) === grid, "async model conversion must not destroy native host")
+        XCTAssertNotEqual(grid.model, oldModel)
+        XCTAssertEqual(grid.scrollOffset, offset)
+        try publish(empty: true)
+        for _ in 0..<200 where grid.debugMetrics.totalProgrammes != 0 { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(find(host) === grid, "empty is an overlay, not another native host")
+        XCTAssertEqual(grid.debugMetrics.totalProgrammes, 0)
+        XCTAssertEqual(grid.model?.rows.count, LiveGuideChannelPager.pageSize)
+        XCTAssertEqual(grid.scrollOffset, offset)
+        let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        try bitmap.representation(using: .png, properties: [:])?.write(to:
+            URL(fileURLWithPath: "/private/tmp/OKVideoMac-NavH2/guide-F-empty.png"))
+    }
+
     func testDemandDebounceHasQuietDelayAndFiniteMaximumWait() {
         var debounce = LiveGuideDemandDebounce()
         debounce.register(at: 1_000_000_000)
@@ -29014,5 +31500,1408 @@ final class LiveGuidePlaybackAcceptanceTests: XCTestCase {
 #else
         false
 #endif
+    }
+}
+
+@MainActor
+final class BrowserKeyboardOwnershipTests: XCTestCase {
+    @MainActor
+    func testSidebarArrowTransfersFocusAndForwardsVerticalNavigationToPosters() throws {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        let root = NSView(frame: window.contentView?.bounds ?? .zero)
+        window.contentView = root
+        let sidebar = BrowserSidebarOutlineView(frame: NSRect(x: 0, y: 0, width: 220, height: 600))
+        let posters = BrowserKeyboardView(frame: NSRect(x: 220, y: 0, width: 580, height: 600))
+        var forwardedKey: UInt16?
+        posters.handler = { event in forwardedKey = event.keyCode; return true }
+        root.addSubview(sidebar)
+        root.addSubview(posters)
+        XCTAssertTrue(window.makeFirstResponder(sidebar))
+        let event = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, characters: "",
+            charactersIgnoringModifiers: "", isARepeat: false, keyCode: 125
+        ))
+
+        sidebar.keyDown(with: event)
+
+        XCTAssertTrue(window.firstResponder === posters)
+        XCTAssertEqual(forwardedKey, 125)
+    }
+
+    func testPointerAndKeyboardShareOneHighlightWithoutDefaultSelection() {
+        var value = BrowserItemSelection()
+        value.reconcile(["a", "b", "c"])
+        XCTAssertNil(value.highlightedID)
+        value.select("b")
+        XCTAssertEqual(value.currentID, "b")
+        value.hover("c", inside: true)
+        XCTAssertEqual(value.highlightedID, "c")
+        XCTAssertEqual(value.currentID, "b", "hover must not create a second selection")
+        value.select("a")
+        XCTAssertEqual(value.highlightedID, "a")
+        value.hover("c", inside: false)
+        XCTAssertEqual(value.highlightedID, "a", "late hover exit cannot undo keyboard selection")
+        value.reconcile(["b", "c"])
+        XCTAssertNil(value.highlightedID, "a removed item must not auto-select the first poster")
+    }
+
+    func testAllArrowsStayOutOfSidebarEvenWithoutContent() throws {
+        let sidebar = BrowserSidebarOutlineView()
+        for key: UInt16 in [123, 124, 125, 126] {
+            let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
+                modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+                characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: key))
+            sidebar.keyDown(with: event)
+            XCTAssertEqual(sidebar.selectedRow, -1)
+        }
+    }
+
+    func testGridNavigationTracksActualColumnsAndIncompleteLastRow() {
+        XCTAssertEqual(BrowserGridNavigation.destination(index: 2, count: 11, columns: 4, key: 125), 6)
+        XCTAssertEqual(BrowserGridNavigation.destination(index: 6, count: 11, columns: 3, key: 126), 3)
+        XCTAssertEqual(BrowserGridNavigation.destination(index: 8, count: 11, columns: 4, key: 125), 10)
+        XCTAssertEqual(BrowserGridNavigation.destination(index: 4, count: 11, columns: 4, key: 123), 4)
+        XCTAssertNil(BrowserGridNavigation.destination(index: nil, count: 0, columns: 4, key: 125))
+        XCTAssertEqual(BrowserGridNavigation.destination(index: nil, count: 11, columns: 4, key: 125), 0)
+    }
+
+    func testContentMountOnlyClaimsAnUnchangedNeutralResponder() {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let sidebar = BrowserSidebarOutlineView(frame: NSRect(x: 0, y: 0, width: 180, height: 600))
+        window.contentView!.addSubview(sidebar)
+        let content = BrowserKeyboardView(frame: NSRect(x: 180, y: 0, width: 620, height: 600))
+        window.contentView!.addSubview(content)
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 100, height: 24))
+        window.contentView!.addSubview(field)
+        XCTAssertTrue(BrowserFocusOwnershipPolicy.mayClaimDefaultFocus(
+            initial: window, current: window, window: window
+        ))
+        XCTAssertTrue(BrowserFocusOwnershipPolicy.mayClaimDefaultFocus(
+            initial: window.contentView, current: window.contentView, window: window
+        ))
+        XCTAssertFalse(BrowserFocusOwnershipPolicy.mayClaimDefaultFocus(
+            initial: sidebar, current: sidebar, window: window
+        ))
+        XCTAssertFalse(BrowserFocusOwnershipPolicy.mayClaimDefaultFocus(
+            initial: field, current: field, window: window
+        ))
+        XCTAssertFalse(BrowserFocusOwnershipPolicy.mayClaimDefaultFocus(
+            initial: window, current: sidebar, window: window
+        ))
+    }
+}
+
+@MainActor
+final class SidebarSelectionRevisionTests: XCTestCase {
+    func testRapidNativeSelectionsRejectStaleSwiftUISnapshots() throws {
+        let state = AppState.bootstrap()
+        func parent(_ selection: NavigationSelection) -> NativeSidebarSourceList {
+            NativeSidebarSourceList(text: .constant(""),
+                presentation: SidebarSearchPresentationPolicy.presentation(for: selection.section),
+                isSearchEnabled: true, focusRequest: 0, selection: selection,
+                navigation: state.navigation, onTextChange: { _ in }, onSubmit: {},
+                onExitSearch: { true }, onSelect: state.selectSection)
+        }
+        let original = state.navigation.selection
+        let coordinator = parent(original).makeCoordinator()
+        let view = NativeSidebarSourceList.ContainerView(coordinator: coordinator)
+        coordinator.attach(to: view)
+        coordinator.synchronize(view)
+        var snapshots = [original]
+        for index in 0..<100 {
+            let row = (index + 1) % AppSection.allCases.count
+            view.outlineView.onActivateRow?(row)
+            snapshots.append(state.navigation.selection)
+            coordinator.parent = parent(original)
+            coordinator.synchronize(view)
+            XCTAssertEqual(view.outlineView.selectedRow, row)
+            XCTAssertEqual(state.selectedSection, AppSection.allCases[row])
+        }
+        let latest = state.navigation.selection
+        for stale in snapshots.reversed() where stale != latest {
+            coordinator.parent = parent(stale)
+            coordinator.synchronize(view)
+            XCTAssertEqual(view.outlineView.selectedRow, AppSection.allCases.firstIndex(of: latest.section))
+            XCTAssertEqual(state.navigation.selection, latest)
+        }
+        coordinator.parent = parent(latest)
+        coordinator.synchronize(view)
+        XCTAssertEqual(view.outlineView.selectedRow, AppSection.allCases.firstIndex(of: latest.section))
+    }
+
+    func testNativeSelectionNotificationCannotNavigateBack() {
+        let state = AppState.bootstrap()
+        let parent = NativeSidebarSourceList(text: .constant(""),
+            presentation: SidebarSearchPresentationPolicy.presentation(for: .home),
+            isSearchEnabled: true, focusRequest: 0, selection: state.navigation.selection,
+            navigation: state.navigation, onTextChange: { _ in }, onSubmit: {},
+            onExitSearch: { true }, onSelect: state.selectSection)
+        let coordinator = parent.makeCoordinator()
+        let view = NativeSidebarSourceList.ContainerView(coordinator: coordinator)
+        coordinator.attach(to: view)
+        coordinator.synchronize(view)
+        view.outlineView.onActivateRow?(1)
+        let latest = state.navigation.selection
+        view.outlineView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        XCTAssertEqual(state.navigation.selection, latest)
+        XCTAssertEqual(view.outlineView.selectedRow, 1)
+    }
+
+    func testMouseDownSelectsHitRowWithoutNativeTrackingReplay() throws {
+        let state = AppState.bootstrap()
+        let parent = NativeSidebarSourceList(text: .constant(""),
+            presentation: SidebarSearchPresentationPolicy.presentation(for: .home),
+            isSearchEnabled: true, focusRequest: 0, selection: state.navigation.selection,
+            navigation: state.navigation, onTextChange: { _ in }, onSubmit: {},
+            onExitSearch: { true }, onSelect: state.selectSection)
+        let coordinator = parent.makeCoordinator()
+        let view = NativeSidebarSourceList.ContainerView(coordinator: coordinator)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 220, height: 600),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = view
+        coordinator.attach(to: view)
+        coordinator.synchronize(view)
+        view.layoutSubtreeIfNeeded()
+        for index in 0..<100 {
+            let row = index % AppSection.allCases.count
+            let rect = view.outlineView.rect(ofRow: row)
+            let point = view.outlineView.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+            let event = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown,
+                location: point, modifierFlags: [], timestamp: Double(index) / 100,
+                windowNumber: window.windowNumber, context: nil, eventNumber: index,
+                clickCount: 1, pressure: 1))
+            view.outlineView.mouseDown(with: event)
+            XCTAssertEqual(state.selectedSection, AppSection.allCases[row])
+            XCTAssertEqual(view.outlineView.selectedRow, row)
+        }
+    }
+
+    func testStaleSearchFocusCannotStealAfterNavigation() async throws {
+        let navigation = AppNavigationState()
+        func parent(_ request: UInt64) -> NativeSidebarSourceList {
+            NativeSidebarSourceList(text: .constant(""),
+                presentation: SidebarSearchPresentationPolicy.presentation(for: navigation.selection.section),
+                isSearchEnabled: true, focusRequest: request, selection: navigation.selection,
+                navigation: navigation, onTextChange: { _ in }, onSubmit: {},
+                onExitSearch: { true }, onSelect: { navigation.select($0) })
+        }
+        let coordinator = parent(0).makeCoordinator()
+        let view = NativeSidebarSourceList.ContainerView(coordinator: coordinator)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 240, height: 600),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = view
+        coordinator.attach(to: view)
+        coordinator.synchronize(view)
+        window.makeFirstResponder(view.outlineView)
+        coordinator.parent = parent(1)
+        coordinator.synchronize(view)
+        navigation.select(.history)
+        try await Task.sleep(nanoseconds: 10_000_000)
+        XCTAssertTrue(window.firstResponder === view.outlineView)
+        coordinator.parent = parent(2)
+        coordinator.synchronize(view)
+        try await Task.sleep(nanoseconds: 10_000_000)
+        XCTAssertTrue(window.firstResponder === view.searchField.currentEditor())
+        window.close()
+    }
+
+    func testRepeatedSelectionDoesNotPublishAndSearchExitPublishesOnlyFinalTarget() {
+        let state = AppState.bootstrap()
+        state.selectSection(.history)
+        var values: [NavigationSelection] = []
+        let observation = state.navigation.$selection.dropFirst().sink { values.append($0) }
+        state.selectSection(.history)
+        XCTAssertTrue(values.isEmpty)
+        state.presentHomeSearch(returnSection: .history)
+        values.removeAll()
+        state.selectSection(.settings)
+        XCTAssertEqual(values.map(\.section), [.settings])
+        XCTAssertFalse(state.isHomeSearchPresented)
+        XCTAssertNil(state.homeSearchReturnSection)
+        withExtendedLifetime(observation) {}
+    }
+
+    func testFocusRequiresMatchingMountedContentAndCurrentSelection() {
+        let navigation = AppNavigationState()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        let sidebar = BrowserSidebarOutlineView(frame: NSRect(x: 0, y: 0, width: 220, height: 600))
+        let parent = NativeSidebarSourceList(text: .constant(""),
+            presentation: SidebarSearchPresentationPolicy.presentation(for: .home),
+            isSearchEnabled: true, focusRequest: 0, selection: navigation.selection,
+            navigation: navigation, onTextChange: { _ in }, onSubmit: {},
+            onExitSearch: { true }, onSelect: { navigation.select($0) })
+        let coordinator = parent.makeCoordinator()
+        sidebar.addTableColumn(NSTableColumn(identifier: .init("sidebar")))
+        sidebar.dataSource = coordinator
+        sidebar.delegate = coordinator
+        AppSidebarNativePolicy.configure(outlineView: sidebar)
+        sidebar.reloadData()
+        let content = BrowserKeyboardView(frame: NSRect(x: 220, y: 0, width: 580, height: 600))
+        window.contentView!.addSubview(sidebar)
+        window.contentView!.addSubview(content)
+        let first = navigation.select(.favorites)
+        content.navigationSelection = first
+        XCTAssertTrue(window.makeFirstResponder(sidebar))
+        sidebar.requestContentFocus(for: first) { navigation.selection == first }
+        let second = navigation.select(.history)
+        sidebar.completeContentFocus()
+        XCTAssertTrue(window.firstResponder === sidebar, "Old request must not focus old content: \(String(describing: window.firstResponder)) sidebar=\(sidebar)")
+        sidebar.requestContentFocus(for: second) { navigation.selection == second }
+        sidebar.completeContentFocus()
+        XCTAssertTrue(window.firstResponder === sidebar, "Wait for the matching mounted page")
+        content.navigationSelection = second
+        sidebar.completeContentFocus()
+        XCTAssertTrue(window.firstResponder === content)
+
+        XCTAssertTrue(window.makeFirstResponder(sidebar))
+        sidebar.requestContentFocus(for: second) { navigation.selection == second }
+        let search = NSTextField(frame: NSRect(x: 0, y: 0, width: 150, height: 24))
+        window.contentView!.addSubview(search)
+        window.makeFirstResponder(search)
+        sidebar.completeContentFocus()
+        XCTAssertFalse(window.firstResponder === content, "Search input must keep focus")
+        withExtendedLifetime(coordinator) {}
+    }
+}
+
+
+@MainActor
+final class BrowserModeButtonTests: XCTestCase {
+    func testNativeButtonWholeRectangleAndFirstMouseAreInteractive() {
+        let button = BrowserToolbarModeNSButton()
+        for x in [1.0, 8, 16, 24, 31] {
+            for y in [1.0, 8, 16, 24, 31] {
+                XCTAssertTrue(button.hitTest(NSPoint(x: x, y: y)) === button)
+            }
+        }
+        XCTAssertTrue(button.acceptsFirstMouse(for: nil))
+        XCTAssertFalse(button.mouseDownCanMoveWindow)
+    }
+
+    func testNativeMouseTrackingFiresOnceAtCentreAndEdges() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 160, height: 120),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let button = BrowserToolbarModeNSButton()
+        button.frame.origin = NSPoint(x: 40, y: 40)
+        window.contentView!.addSubview(button)
+        window.makeKeyAndOrderFront(nil)
+        var actions = 0
+        button.configure(selected: false, enabled: true, help: "Fixture") { actions += 1 }
+        for (index, point) in [NSPoint(x: 16, y: 16), NSPoint(x: 2, y: 16),
+                               NSPoint(x: 30, y: 16), NSPoint(x: 16, y: 2), NSPoint(x: 16, y: 30)].enumerated() {
+            let location = button.convert(point, to: nil)
+            let down = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: location,
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil, eventNumber: index * 2,
+                clickCount: 1, pressure: 1))
+            let up = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseUp, location: location,
+                modifierFlags: [], timestamp: down.timestamp + 0.01,
+                windowNumber: window.windowNumber, context: nil, eventNumber: index * 2 + 1,
+                clickCount: 1, pressure: 0))
+            NSApp.postEvent(up, atStart: true)
+            button.mouseDown(with: down)
+            XCTAssertEqual(actions, index + 1)
+        }
+    }
+
+    func testActionReadsCurrentSessionAndDoesNotWaitForGuide() throws {
+        let suite = "ModeButton.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let session = LiveBrowserSession(preferences: .init(defaults: defaults))
+        let button = BrowserToolbarModeNSButton()
+        button.configure(selected: false, enabled: true, help: "Fixture") {
+            session.setDisplayMode(session.showsGuide ? .channels : .guide)
+        }
+        for index in 0..<100 {
+            button.performClick(nil)
+            XCTAssertEqual(session.showsGuide, index % 2 == 0)
+        }
+        var replacement = 0
+        button.configure(selected: false, enabled: true, help: "Replacement") { replacement += 1 }
+        button.performClick(nil)
+        XCTAssertEqual(replacement, 1)
+        XCTAssertFalse(session.showsGuide)
+    }
+}
+
+
+@MainActor
+final class BrowserInteractionIntegrationTests: XCTestCase {
+    func testPosterDefaultAndKeyboardRenderUseSharedCardAppearance() async throws {
+        let items = (1...12).map { VideoSummary(siteKey: "fixture", siteName: "Fixture", videoID: "\($0)", title: "节目 \($0)") }
+        let host = NSHostingView(rootView: ScrollView { VideoGrid(items: items, onSelect: { _ in }).padding(20) }
+            .background(Color.white).environment(\.colorScheme, .light)
+            .frame(width: 920, height: 680))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 680),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let keyboard = try XCTUnwrap(BrowserKeyboardView.descendants(of: host)
+            .compactMap { $0 as? BrowserKeyboardView }.first)
+        func capture(_ name: String) throws -> Data {
+            host.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            let bytes = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+            try bytes.write(to: URL(fileURLWithPath: "/private/tmp/OKVideoMac-InteractionFix/poster-\(name).png"))
+            return bytes
+        }
+        let initial = try capture("default")
+        window.makeFirstResponder(keyboard)
+        let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
+            modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
+            characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 124))
+        keyboard.keyDown(with: event)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let selected = try capture("keyboard")
+        XCTAssertNotEqual(initial, selected, "keyboard selection must be visible through the shared card style")
+    }
+
+    func testOldLivePageCannotDeactivateReplacement() throws {
+        let suite = "Activation.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let session = LiveBrowserSession(preferences: .init(defaults: defaults))
+        let old = UUID(), next = UUID()
+        session.activate(owner: old)
+        session.activate(owner: next)
+        XCTAssertFalse(session.deactivate(owner: old))
+        XCTAssertTrue(session.isActive)
+        XCTAssertTrue(session.deactivate(owner: next))
+        XCTAssertFalse(session.isActive)
+    }
+
+    func testCompleteRootRapidMouseNavigationSurvivesPageLifecycle() async throws {
+        let app = AppState(environment: nil)
+        let host = NSHostingController(rootView: RootView()
+            .environmentObject(app).environmentObject(app.navigation))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 720),
+            styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = host
+        window.makeKeyAndOrderFront(nil)
+        defer { window.close() }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        let sidebar = try XCTUnwrap(BrowserKeyboardView.descendants(of: window.contentView)
+            .compactMap { $0 as? BrowserSidebarOutlineView }.first)
+        for index in 0..<100 {
+            let row = index % 2
+            let rect = sidebar.rect(ofRow: row)
+            let location = sidebar.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+            let event = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: location,
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil, eventNumber: index,
+                clickCount: 1, pressure: 1))
+            sidebar.mouseDown(with: event)
+            if index % 3 == 0 { try await Task.sleep(nanoseconds: 2_000_000) }
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(app.selectedSection, .live)
+        XCTAssertEqual(sidebar.selectedRow, 1)
+        for key: UInt16 in [123, 124, 125, 126] {
+            let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
+                modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: key))
+            sidebar.keyDown(with: event)
+        }
+        XCTAssertEqual(app.selectedSection, .live, "empty content must not route arrows to the sidebar")
+    }
+}
+
+@MainActor
+final class PlaybackUX112RegressionTests: XCTestCase {
+    func testRepeatedChannelArtworkCoalescesAndKeepsVisibleDemand() {
+        let image = PosterImageRequest(url: URL(string: "https://fixture.invalid/cctv1.png")!, pixels: 512)
+        let otherSize = PosterImageRequest(url: image.url, pixels: 256)
+        let plan: [PosterPrefetchRequest] = [
+            .init(request: image, demand: .init(priority: .forward, distance: 0)),
+            .init(request: otherSize, demand: .init(priority: .visible, distance: 4)),
+            .init(request: image, demand: .init(priority: .visible, distance: 7)),
+            .init(request: image, demand: .init(priority: .visible, distance: 2))
+        ]
+        let result = PosterPreheater.coalesced(plan)
+        XCTAssertEqual(result.count, 2)
+        XCTAssertEqual(result[0].demand, .init(priority: .visible, distance: 2))
+        XCTAssertEqual(result[1].request, otherSize)
+        let preheater = PosterPreheater()
+        preheater.update(plan, repository: nil) // Previously trapped even without a repository.
+        preheater.update(Array(plan.reversed()), repository: nil)
+        preheater.cancel()
+    }
+
+    func testMovieVersionsAreNotEpisodesAndKeepIdentities() {
+        let episodes = ["电影.1.mkv", "电影.2.mkv", "粤语导演剪辑版", "预告片"].enumerated().map {
+            PlayEpisode(name: $0.element, url: "fixture:\($0.offset)")
+        }
+        let result = EpisodeListPresentation.presentations(from: episodes, query: "", sortOrder: .sourceOrder, categoryName: "动作电影")
+        XCTAssertTrue(result.allSatisfy { $0.episodeNumber == nil })
+        XCTAssertEqual(result.map(\.episode), episodes)
+        XCTAssertEqual(result[2].displayName, "粤语 · 导演剪辑版")
+        XCTAssertTrue(result[3].isSpecial)
+    }
+
+    func testOneEpisodeAndOneTrailerDoNotBecomeFeature() {
+        let series = EpisodeListPresentation.presentations(from: [.init(name: "第 1 集", url: "fixture:1")], query: "", sortOrder: .sourceOrder, categoryName: "电视剧")
+        XCTAssertEqual(series.first?.episodeNumber, 1)
+        let trailer = EpisodeListPresentation.presentations(from: [.init(name: "预告片", url: "fixture:trailer")], query: "", sortOrder: .sourceOrder, categoryName: "电影")
+        XCTAssertTrue(trailer.first?.isSpecial == true)
+        XCTAssertNotEqual(trailer.first?.displayName, "正片")
+        let version = EpisodeListPresentation.presentations(from: [.init(name: "粤语版", url: "fixture:version")], query: "", sortOrder: .sourceOrder, categoryName: "电影")
+        XCTAssertEqual(version.first?.displayName, "正片 · 粤语")
+    }
+
+    func testUnknownUnrelatedFileNumbersStayAsNames() {
+        let entries = [PlayEpisode(name: "电影.720.mkv", url: "fixture:a"), PlayEpisode(name: "幕后制作", url: "fixture:b")]
+        let result = EpisodeListPresentation.presentations(from: entries, query: "", sortOrder: .sourceOrder)
+        XCTAssertNil(result[0].episodeNumber)
+        XCTAssertEqual(result[0].displayName, "电影.720")
+    }
+
+    func testCachedPresentationSeparatesMovieAndSeriesContext() async {
+        let source = PlaySource(name: "线路", episodes: [.init(name: "第 1 集", url: "fixture:1")])
+        let repository = EpisodePresentationRepository()
+        let movie = await repository.snapshot(videoID: "same", source: source, categoryName: "电影")
+        let series = await repository.snapshot(videoID: "same", source: source, categoryName: "电视剧")
+        XCTAssertNil(movie.values.first?.episodeNumber)
+        XCTAssertEqual(series.values.first?.episodeNumber, 1)
+    }
+
+    func testMainWindowGeometryPersistsIndependentlyOfAutosaveName() throws {
+        let suite = "OKVideoMac.geometry-test.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let window = NSWindow(contentRect: NSRect(x: 123, y: 234, width: 1080, height: 710), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let store = MainWindowGeometryStore(window: window, defaults: defaults)
+        store.save()
+        let saved = try XCTUnwrap(MainWindowGeometryStore.savedFrame(defaults: defaults))
+        XCTAssertEqual(saved, window.frame)
+        NotificationCenter.default.post(name: NSWindow.willEnterFullScreenNotification, object: window)
+        window.setFrame(NSRect(x: 0, y: 0, width: 2000, height: 1200), display: false)
+        store.save()
+        XCTAssertEqual(MainWindowGeometryStore.savedFrame(defaults: defaults), saved)
+        defaults.set(Data("invalid".utf8), forKey: MainWindowGeometryStore.storageKey)
+        XCTAssertNil(MainWindowGeometryStore.savedFrame(defaults: defaults))
+    }
+
+    func testLiveWaitDistinguishesBufferingPauseAndTerminalFailure() {
+        XCTAssertTrue(LiveLoadingPresentationPolicy.isWaiting(snapshot: .init(status: .loading), recovering: false, exhausted: false))
+        XCTAssertTrue(LiveLoadingPresentationPolicy.isWaiting(snapshot: .init(status: .playing), recovering: true, exhausted: false))
+        XCTAssertTrue(LiveLoadingPresentationPolicy.isWaiting(snapshot: .init(status: .buffering), recovering: false, exhausted: false))
+        XCTAssertFalse(LiveLoadingPresentationPolicy.isWaiting(snapshot: .init(status: .paused), recovering: false, exhausted: false))
+        XCTAssertFalse(LiveLoadingPresentationPolicy.isWaiting(snapshot: .init(status: .failed("offline")), recovering: false, exhausted: true))
+        XCTAssertFalse(LiveSwitchLoadingIndicatorPolicy.shouldKeepPreviousFrameClean(isLivePlayback: true, holdsPreviousFrame: true, status: .buffering, elapsed: 1))
+    }
+
+    func testRenderFailureAppearsInlineWithoutEitherModalAndIsRedacted() {
+        let state = AppState(environment: nil)
+        state.isPlayerPresented = true
+        state.reportPlayerRenderError(AppError.playback("Cannot open https://example.invalid/video?token=private"))
+        XCTAssertEqual(state.playbackResolutionState, .failed)
+        XCTAssertNotNil(state.playbackFailureSummary)
+        XCTAssertFalse(state.playbackFailureSummary?.contains("private") == true)
+        XCTAssertNil(state.playerPresentedError)
+        XCTAssertNil(state.presentedError)
+    }
+}
+
+@MainActor
+final class ResourcePresentationIntegrationTests: XCTestCase {
+    func testQueueDoesNotJumpToDifferentEditionWhenNextNumberIsUnique() {
+        let episodes = ["S01E01.4KSDR", "S01E02.4KHDR", "S01E03.4KSDR"].map { PlayEpisode(name: $0, url: $0) }
+        XCTAssertEqual(PlayerEpisodeAdvancePolicy.nextEpisode(in: episodes, currentEpisodeID: episodes[0].id, enabled: true)?.id, episodes[2].id)
+    }
+
+    func testPlayerPagesKeepSeasonsSeparateAndLocateSameCountReplacement() {
+        let episodes = (1...2).flatMap { season in (1...25).map { PlayEpisode(name: "S0\(season)E\($0)", url: "\(season)-\($0)") } }
+        let values = EpisodeListPresentation.presentations(from: episodes, query: "", sortOrder: .sourceOrder)
+        XCTAssertEqual(PlayerEpisodePagePolicy.pages(values).count, 2)
+        XCTAssertEqual(PlayerEpisodePagePolicy.pageIndex(presentations: values, selectedEpisodeID: values[35].id), 1)
+        XCTAssertEqual(PlayerEpisodePagePolicy.title(presentations: values, pageIndex: 1), "第 2 季 · 1–25 集")
+        XCTAssertEqual(Set(PlayerEpisodePagePolicy.page(values, pageIndex: 0).map(\.seasonNumber)), [1])
+        let reversed = Array(values.reversed())
+        XCTAssertEqual(PlayerEpisodePagePolicy.pageIndex(presentations: reversed, selectedEpisodeID: values[35].id), 0)
+    }
+    func testPlayerTitleRetainsUnknownResourceRangeAndIssue() {
+        for resource in ["4KSDR 10", "1–2 集", "2026-09-27", "第 12 期"] {
+            XCTAssertEqual(PlayerEpisodeTitlePolicy.title(content: "片名", resource: resource), "片名 · " + resource)
+        }
+        XCTAssertEqual(PlayerEpisodeTitlePolicy.title(content: "片名", resource: "片名"), "片名")
+    }
+    func testNarrowPlayerGridUsesActualColumnCount() {
+        XCTAssertGreaterThan(PlayerEpisodePanelLayoutPolicy.gridHeight(episodeCount: 6, showsInspector: false, width: 250), PlayerEpisodePanelLayoutPolicy.gridHeight(episodeCount: 6, showsInspector: false, width: 472))
+    }
+
+    func testTechnicalEpisodePresentationAndVersionQueueAgree() async {
+        let weak = (1...10).map { PlayEpisode(name: "4KSDR \($0)", url: "weak:\($0)") }
+        let strong = [2, 5].map { PlayEpisode(name: "S01E\($0).4KHDR", url: "strong:\($0)") }
+        let source = PlaySource(name: "line", episodes: weak + strong)
+        let snapshot = await EpisodePresentationRepository().snapshot(videoID: "test", source: source)
+        XCTAssertEqual(snapshot.values[9].displayName, "第 10 集")
+        XCTAssertNil(snapshot.values[9].seasonNumber)
+        XCTAssertEqual(snapshot.versionOrders["4K|SDR"], weak)
+        XCTAssertEqual(PlayerEpisodeAdvancePolicy.nextEpisode(in: source.episodes, currentEpisodeID: weak[4].id, enabled: true)?.id, weak[5].id)
+        XCTAssertNil(PlayerEpisodeAdvancePolicy.nextEpisode(in: source.episodes, currentEpisodeID: weak[9].id, enabled: true))
+        XCTAssertEqual(source.episodes, weak + strong)
+    }
+
+    func testExplicitMarkersNeverReplacedByFileSequence() {
+        let entries = ["EP05.1.mp4", "EP08.2.mp4", "EP10.3.mp4"].map { PlayEpisode(name: $0, url: $0) }
+        let values = EpisodeListPresentation.presentations(from: entries, query: "", sortOrder: .sourceOrder)
+        XCTAssertEqual(values.map(\.episodeNumber), [5, 8, 10])
+        XCTAssertEqual(values.map(\.episode), entries)
+    }
+    func testUnknownMovieScreenshotCannotBecomeEpisodeFourAndSeven() {
+        let entries = ["求救信号.4.mkv", "求救信号.7.mkv"].map { PlayEpisode(name: $0, url: $0) }
+        let values = EpisodeListPresentation.presentations(from: entries, query: "", sortOrder: .episodeAscending)
+        XCTAssertEqual(values.map(\.episodeNumber), [nil, nil])
+        XCTAssertEqual(values.map(\.displayName), ["求救信号.4", "求救信号.7"])
+    }
+    func testMovieQualityAndSingleUnknownMusic() {
+        let movie = EpisodeListPresentation.presentations(from: [.init(name: "Movie.1080p.mkv", url: "movie")], query: "", sortOrder: .sourceOrder, categoryName: "电影")
+        XCTAssertEqual(movie.first?.displayName, "正片 · 1080p")
+        let music = EpisodeListPresentation.presentations(from: [.init(name: "Pa's Kitchen 1", url: "music")], query: "", sortOrder: .sourceOrder)
+        XCTAssertEqual(music.first?.displayName, "Pa's Kitchen 1")
+    }
+    func testMergedEpisodeFinaleAndDuplicateVersionNames() {
+        XCTAssertEqual(EpisodeNameParser.presentation(for: .init(name: "S01E01-E02.mkv", url: "range")).displayName, "第 1 季 · 1–2 集")
+        XCTAssertEqual(EpisodeNameParser.presentation(for: .init(name: "第20集 大结局", url: "finale")).displayName, "第 20 集 · 大结局")
+        let versions = ["S02E05.1080p", "S02E05.2160p"].map { PlayEpisode(name: $0, url: $0) }
+        let values = EpisodeListPresentation.presentations(from: versions, query: "", sortOrder: .sourceOrder)
+        XCTAssertEqual(Set(values.map(\.displayName)).count, 2)
+    }
+    func testRangesNeverCrossSeasons() {
+        let episodes = (1...2).flatMap { season in (1...25).map { PlayEpisode(name: "S0\(season)E\($0)", url: "\(season)-\($0)") } }
+        let values = EpisodeListPresentation.presentations(from: episodes, query: "", sortOrder: .sourceOrder)
+        let ranges = EpisodeListPresentation.rangeOptions(from: values)
+        XCTAssertEqual(ranges.count, 4)
+        for range in ranges {
+            XCTAssertEqual(Set(values.filter { range.episodeIDs.contains($0.id) }.map(\.seasonNumber)).count, 1)
+        }
+    }
+    func testMetadataRefreshInvalidatesCachedDisplayWithoutChangingIdentity() async {
+        let episode = PlayEpisode(name: "Pilot", url: "fixture")
+        let source = PlaySource(name: "same", episodes: [episode])
+        let repository = EpisodePresentationRepository()
+        let first = await repository.snapshot(videoID: "same", source: source)
+        var updated = source
+        updated.episodes[0].metadata = .init(form: .series, season: 2, episode: 5)
+        let second = await repository.snapshot(videoID: "same", source: updated)
+        XCTAssertEqual(first.values.first?.id, second.values.first?.id)
+        XCTAssertEqual(second.values.first?.displayName, "第 2 季 · 第 5 集")
+    }
+}
+
+@MainActor
+final class ResourceIdentityIntegrationTests: XCTestCase {
+    func testHistoryShellRestoresSavedMetadataAndCategory() {
+        var item = record("4KSDR 10.mkv")
+        let recipe = HistoryNavigationRecipe(configurationID: UUID(), siteKey: "test", detailID: "video",
+            source: .init(flag: "line", name: "line"),
+            episode: .init(name: item.episodeName!, normalizedFilename: "4ksdr10", metadata: .init(form: .series, season: 2, episode: 10), categoryName: "电视剧"), resumePosition: 123)
+        item.playbackReference = .init(sourceIdentity: "line", resourceIdentity: "file", navigationRecipe: recipe)
+        let context = AppState.historyPlaybackContext(record: item, siteName: "Test", episodeURL: "fixture:media")
+        XCTAssertEqual(context.detail.summary.categoryName, "电视剧")
+        XCTAssertEqual(context.episode.metadata, recipe.episode.metadata)
+        XCTAssertEqual(EpisodeNameParser.presentation(for: context.episode).displayName, "第 2 季 · 第 10 集")
+        XCTAssertEqual(item.position, 123)
+    }
+
+    private func detail(_ names: [String], category: String? = nil) -> VideoDetail {
+        VideoDetail(summary: VideoSummary(siteKey: "test", siteName: "test", videoID: "video", title: "Same Work", categoryName: category),
+            playSources: [PlaySource(name: "line", episodes: names.enumerated().map { PlayEpisode(name: $0.element, url: "file-\($0.offset)") })])
+    }
+    private func record(_ name: String) -> HistoryRecord {
+        HistoryRecord(siteKey: "test", videoID: "video", title: "Same Work", sourceName: "line", episodeName: name, position: 123)
+    }
+    func testWeakFileNumbersCannotRestoreDifferentMovieVersion() {
+        let value = detail(["Movie.4.mkv", "Movie.7.mkv"], category: "电影")
+        XCTAssertNil(AppState.historyPlaybackSelection(in: value, record: record("Old.Title.EP04.mkv")))
+        XCTAssertNil(AppState.historyPlaybackSelection(in: value, record: record("Old.Title.4.mkv")))
+    }
+    func testDuplicateSameLineNamesRequireChoice() {
+        let value = detail(["S01E05.mkv", "S01E05.mkv"])
+        XCTAssertNil(AppState.historyPlaybackSelection(in: value, record: record("S01E05.mkv")))
+        XCTAssertEqual(AppState.historyPlaybackChoices(in: value, record: record("S01E05.mkv")).count, 2)
+    }
+    func testSeasonMustMatchIncludingAbsentSeason() {
+        XCTAssertNil(AppState.historyPlaybackSelection(in: detail(["S02E05"]), record: record("S01E05")))
+        XCTAssertNil(AppState.historyPlaybackSelection(in: detail(["EP05"]), record: record("S01E05")))
+        XCTAssertNil(AppState.historyPlaybackSelection(in: detail(["S01E05"]), record: record("EP05")))
+        XCTAssertNotNil(AppState.historyPlaybackSelection(in: detail(["New.S01E05"]), record: record("Old.S01E05")))
+    }
+    func testMergedEpisodesAndTechnicalVersionsAreNotSingleEpisodeIdentity() {
+        XCTAssertNil(AppState.historyPlaybackSelection(in: detail(["S01E01"]), record: record("S01E01-E02")))
+        XCTAssertNil(AppState.historyPlaybackSelection(in: detail(["S01E05.2160p"]), record: record("S01E05.1080p")))
+    }
+    func testLegacyRecipeNumbersAreReevaluatedAndProgressSurvives() throws {
+        let value = detail(["S01E04"])
+        var history = record("Movie.4.mkv")
+        let recipe = HistoryNavigationRecipe(configurationID: UUID(), siteKey: "test", detailID: "video",
+            source: .init(flag: "line", name: "line"),
+            episode: .init(name: "Movie.4.mkv", normalizedFilename: "oldmovie4", seasonNumber: 1, episodeNumber: 4), resumePosition: 123)
+        history.playbackReference = .init(sourceIdentity: "legacy", resourceIdentity: "legacy", navigationRecipe: recipe)
+        let restored = try JSONDecoder().decode(HistoryRecord.self, from: JSONEncoder().encode(history))
+        XCTAssertNil(AppState.historyPlaybackSelection(in: value, record: restored))
+        XCTAssertEqual(restored.position, 123)
+    }
+    func testAutoplayOrdersReliableEpisodesAndSkipsExtras() {
+        let value = detail(["S02E08", "S02E05", "预告", "S02E10", "S02E06 花絮"])
+        let episodes = value.playSources[0].episodes
+        let next = PlayerEpisodeAdvancePolicy.nextEpisode(in: episodes, currentEpisodeID: episodes[1].id, enabled: true)
+        XCTAssertEqual(next?.name, "S02E08")
+        XCTAssertNil(PlayerEpisodeAdvancePolicy.nextEpisode(in: episodes, currentEpisodeID: episodes[4].id, enabled: true))
+    }
+    func testAutoplayNeverTreatsMovieVersionsOrUnknownDigitsAsNextEpisode() {
+        for names in [["Movie.4", "Movie.7"], ["S01E05.1080p", "S01E05.2160p", "S01E06"]] {
+            let episodes = detail(names).playSources[0].episodes
+            XCTAssertNil(PlayerEpisodeAdvancePolicy.nextEpisode(in: episodes, currentEpisodeID: episodes[0].id, enabled: true))
+        }
+        let movies = detail(["EP01", "EP02"], category: "电影").playSources[0].episodes
+        XCTAssertNil(PlayerEpisodeAdvancePolicy.nextEpisode(in: movies, currentEpisodeID: movies[0].id, enabled: true, categoryName: "电影"))
+    }
+    func testNewHistoryStoresProviderEvidenceAndNoInventedEpisode() {
+        let unknown = detail(["Movie.4.mkv"])
+        let recipe = AppState.historyNavigationRecipe(detail: unknown, source: unknown.playSources[0], episode: unknown.playSources[0].episodes[0], configurationID: UUID(), position: 15)
+        XCTAssertNil(recipe.episode.episodeNumber)
+        var known = detail(["Pilot"], category: "电视剧")
+        known.playSources[0].episodes[0].metadata = .init(form: .series, season: 3, episode: 1)
+        let structured = AppState.historyNavigationRecipe(detail: known, source: known.playSources[0], episode: known.playSources[0].episodes[0], configurationID: UUID(), position: 15)
+        XCTAssertEqual(structured.episode.episodeNumber, 1)
+        XCTAssertEqual(structured.episode.metadata?.season, 3)
+        XCTAssertEqual(structured.sanitizedForPersistence()?.episode.metadata?.season, 3)
+    }
+}
+
+@MainActor
+final class PlayerAudioMemoryTests: XCTestCase {
+    private func assertNative(_ controller: PlayerLifecycleController, volume: Double, muted: Bool,
+                              file: StaticString = #filePath, line: UInt = #line) async throws {
+        let player = try XCTUnwrap(controller.renderPlayer, "Native libmpv is required", file: file, line: line)
+        let observedVolume = await player.diagnosticPropertyForTesting("volume")
+        let observedMute = await player.diagnosticPropertyForTesting("mute")
+        XCTAssertEqual(Double(observedVolume ?? ""), volume, file: file, line: line)
+        XCTAssertEqual(observedMute, muted ? "yes" : "no", file: file, line: line)
+    }
+
+    func testNativeCreationStartsWithSavedZeroVolumeAndMute() async throws {
+        for volume in [0.0, 35, 100, 120] {
+            let store = PlaybackAudioPreferenceStore()
+            store.setVolume(volume)
+            store.setMuted(true)
+            let controller = PlayerLifecycleController(mode: .warmStop, audioPreferences: store)
+            try await assertNative(controller, volume: volume, muted: true)
+            await controller.shutdown()
+        }
+    }
+
+    func testRapidDragImmediatelyClosingKeepsFinalChoiceAcrossRecreation() async throws {
+        let suite = "OKVideoAudioClose.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = PlaybackAudioPreferenceStore(defaults: defaults)
+        let controller = PlayerLifecycleController(mode: .fullDestroy, audioPreferences: store)
+        for value in 0...120 { controller.rememberVolume(Double(value)) }
+        let apply = Task { try await controller.applyAudioPreference() }
+        await controller.closeAfterPlayback(requestID: UUID())
+        try await apply.value
+        XCTAssertEqual(PlaybackAudioPreferenceStore(defaults: defaults).value.volume, 120)
+        _ = try await controller.prepareForPlayback(requestID: UUID())
+        try await assertNative(controller, volume: 120, muted: false)
+        await controller.shutdown()
+    }
+
+    func testMutedVolumeSurvivesStrictEngineRebuild() async throws {
+        let controller = PlayerLifecycleController(mode: .fullDestroy)
+        try await controller.setVolume(35)
+        try await controller.setMuted(true)
+        let old = controller.renderPlayer?.renderOwnerID
+        _ = try await controller.prepareForPlayback(requestID: UUID(), releasePolicy: .destroyBeforeLoad)
+        XCTAssertNotEqual(controller.renderPlayer?.renderOwnerID, old)
+        try await assertNative(controller, volume: 35, muted: true)
+        try await controller.setMuted(false)
+        try await assertNative(controller, volume: 35, muted: false)
+        try await controller.setMuted(true)
+        try await controller.setVolume(120)
+        try await assertNative(controller, volume: 120, muted: false)
+        await controller.shutdown()
+    }
+
+    func testDelayedOldCommandCannotWinOverNewerIntent() async throws {
+        let controller = PlayerLifecycleController(mode: .warmStop)
+        let entered = expectation(description: "old audio command suspended")
+        var release: CheckedContinuation<Void, Never>?
+        var once = true
+        controller.audioCommandSuspensionForTesting = {
+            if once {
+                once = false
+                entered.fulfill()
+                await withCheckedContinuation { release = $0 }
+            }
+        }
+        let old = Task { try await controller.setVolume(15) }
+        await fulfillment(of: [entered], timeout: 3)
+        controller.rememberVolume(35)
+        controller.rememberMuted(true)
+        release?.resume()
+        try await old.value
+        try await assertNative(controller, volume: 35, muted: true)
+        await controller.shutdown()
+    }
+
+    func testNewIntentAtNativeCommandCompletionIsNeverDropped() async throws {
+        let controller = PlayerLifecycleController(mode: .warmStop)
+        for index in 0..<12 {
+            let firstValue = Double(index + 10), lastValue = Double(index + 70)
+            let first = Task { try await controller.setVolume(firstValue) }
+            let deadline = Date().addingTimeInterval(3)
+            while Date() < deadline {
+                let observed = await controller.renderPlayer?.diagnosticPropertyForTesting("volume")
+                if Double(observed ?? "") == firstValue { break }
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            // Submit before joining the previous caller, at the native completion boundary.
+            try await controller.setVolume(lastValue)
+            try await first.value
+            try await assertNative(controller, volume: lastValue, muted: false)
+        }
+        await controller.shutdown()
+    }
+
+    func testFailedApplicationKeepsPreferenceForRetry() async throws {
+        let controller = PlayerLifecycleController(mode: .warmStop)
+        controller.audioCommandSuspensionForTesting = { throw CocoaError(.fileReadUnknown) }
+        do { try await controller.setVolume(35); XCTFail("must report native application failure") }
+        catch { XCTAssertEqual(controller.audioPreference.volume, 35) }
+        try await assertNative(controller, volume: 100, muted: false)
+        controller.audioCommandSuspensionForTesting = nil
+        try await controller.applyAudioPreference()
+        try await assertNative(controller, volume: 35, muted: false)
+        await controller.shutdown()
+    }
+
+    func testAudioSurvivesActualLoadAndLiveCompatibilitySwitch() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("ok116-audio-\(UUID().uuidString).wav")
+        // A silent PCM fixture verifies the real audio path without audible output.
+        var wav = Data("RIFF".utf8)
+        func little32(_ value: UInt32) -> Data { var v = value.littleEndian; return withUnsafeBytes(of: &v) { Data($0) } }
+        func little16(_ value: UInt16) -> Data { var v = value.littleEndian; return withUnsafeBytes(of: &v) { Data($0) } }
+        let bytes: UInt32 = 48_000 * 2 * 3
+        wav.append(little32(36 + bytes)); wav.append(Data("WAVEfmt ".utf8))
+        wav.append(little32(16)); wav.append(little16(1)); wav.append(little16(1))
+        wav.append(little32(48_000)); wav.append(little32(96_000))
+        wav.append(little16(2)); wav.append(little16(16)); wav.append(Data("data".utf8))
+        wav.append(little32(bytes)); wav.append(Data(repeating: 0, count: Int(bytes)))
+        try wav.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = PlaybackAudioPreferenceStore()
+        store.setVolume(35); store.setMuted(true)
+        let controller = PlayerLifecycleController(mode: .fullDestroy, audioPreferences: store)
+        do {
+            let media = ResolvedMedia(url: url, headers: [:], siteKey: "audio-fixture", sourceName: "local", episodeName: "silent")
+            try await controller.load(media, startPosition: nil, requestID: UUID())
+            try await assertNative(controller, volume: 35, muted: true)
+            _ = try await controller.prepareForPlayback(requestID: UUID(), compatibilityPolicy: .nativeXtreamLive)
+            try await assertNative(controller, volume: 35, muted: true)
+            _ = try await controller.prepareForPlayback(requestID: UUID(), compatibilityPolicy: .existing)
+            try await assertNative(controller, volume: 35, muted: true)
+            await controller.shutdown()
+        } catch {
+            await controller.shutdown()
+            throw error
+        }
+    }
+
+    // These two acceptance tests run in separate xcodebuild/test-host processes.
+    // In an ordinary full-suite invocation the reader skips when it observes
+    // the writer's current PID; the release check invokes each test separately.
+    static let acceptanceSuite = "com.okvideomac.AudioAcceptance116"
+    func testProcessAWritePreferencesForRestartAcceptance() throws {
+        let marker = try XCTUnwrap(UserDefaults(suiteName: Self.acceptanceSuite))
+        marker.set(ProcessInfo.processInfo.processIdentifier, forKey: "writerPID")
+        marker.set(Date().timeIntervalSince1970, forKey: "writtenAt")
+        for volume in [0.0, 35, 100, 120] {
+            for muted in [false, true] {
+                let defaults = try XCTUnwrap(UserDefaults(suiteName: "\(Self.acceptanceSuite).\(Int(volume)).\(muted)"))
+                let store = PlaybackAudioPreferenceStore(defaults: defaults)
+                store.setVolume(volume)
+                store.setMuted(muted)
+                // Ensure the default 100/false is also explicitly represented.
+                defaults.set(try JSONEncoder().encode(store.value), forKey: PlaybackAudioPreferenceStore.key)
+                XCTAssertTrue(defaults.synchronize())
+            }
+        }
+        XCTAssertTrue(marker.synchronize())
+    }
+
+    func testProcessBRestartReadsNativeVolumeAndMuteBeforePlayback() async throws {
+        let marker = try XCTUnwrap(UserDefaults(suiteName: Self.acceptanceSuite))
+        if marker.integer(forKey: "writerPID") == Int(
+            ProcessInfo.processInfo.processIdentifier
+        ) {
+            throw XCTSkip("requires a separate audio-restart reader process")
+        }
+        XCTAssertNotEqual(marker.integer(forKey: "writerPID"), Int(ProcessInfo.processInfo.processIdentifier))
+        XCTAssertGreaterThan(marker.integer(forKey: "writerPID"), 0)
+        XCTAssertLessThan(Date().timeIntervalSince1970 - marker.double(forKey: "writtenAt"), 3600)
+        for volume in [0.0, 35, 100, 120] {
+            for muted in [false, true] {
+                let suite = "\(Self.acceptanceSuite).\(Int(volume)).\(muted)"
+                let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+                XCTAssertNotNil(defaults.data(forKey: PlaybackAudioPreferenceStore.key))
+                let store = PlaybackAudioPreferenceStore(defaults: defaults)
+                let controller = PlayerLifecycleController(mode: .fullDestroy, audioPreferences: store)
+                try await assertNative(controller, volume: volume, muted: muted)
+                _ = try await controller.prepareForPlayback(requestID: UUID(), releasePolicy: .destroyBeforeLoad)
+                try await assertNative(controller, volume: volume, muted: muted)
+                await controller.shutdown()
+            }
+        }
+    }
+}
+
+@MainActor
+final class XtreamFileNetworkTests: XCTestCase {
+    private func media(_ url: URL, managed: Bool = true) -> ResolvedMedia {
+        ResolvedMedia(url: url, headers: [:], siteKey: "xtream-test", sourceName: "movie", episodeName: "fixture",
+                      networkPolicy: managed ? .systemHTTPProxy : .inherited)
+    }
+
+    private func waitUntil(_ condition: () async -> Bool, timeout: TimeInterval = 4) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await condition() { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        throw NSError(domain: "XtreamFileNetworkTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "Condition did not become true"])
+    }
+
+    func testNetworkIntentDoesNotSelectLivePlaybackBehavior() {
+        let vod = media(URL(string: "https://fixture.invalid/movie.mp4")!)
+        XCTAssertTrue(PlayerMediaNetworkPolicy.usesSystemProxy(vod))
+        XCTAssertEqual(vod.compatibilityPolicy, .existing)
+        XCTAssertEqual(PlayerLoadTimeoutPolicy.seconds(for: vod), 30)
+        XCTAssertFalse(PlayerMediaNetworkPolicy.usesSystemProxy(media(vod.url, managed: false)))
+        let command = MPVTVBoxPlaybackPolicy.loadCommand(for: vod,
+            networkOptions: MediaProxyDecision.direct.mpvOptions)
+        XCTAssertEqual(command[3], "-1")
+        XCTAssertTrue(command[4].contains("http-proxy=%0%"))
+        XCTAssertTrue(command[4].contains("stream-lavf-o=%11%http_proxy="))
+        XCTAssertFalse(command[4].contains("pause=yes"))
+        XCTAssertFalse(command[4].contains("demuxer-lavf-format=hls"))
+        XCTAssertEqual(MPVTVBoxPlaybackPolicy.loadCommand(for: media(vod.url, managed: false)),
+                       ["loadfile", vod.url.absoluteString, "replace"])
+    }
+
+    func testProxyRedirectAndReplacementRestoreOptionsOnSamePlayer() async throws {
+        let proxyA = try XtreamNetworkFixture(), proxyB = try XtreamNetworkFixture()
+        try await proxyA.start(); try await proxyB.start()
+        defer { proxyA.close(); proxyB.close() }
+        let player = try MPVPlayerClient(audioPreference: .init(volume: 35, muted: true), mediaProxyResolver: { media in
+            guard media.networkPolicy == .systemHTTPProxy else { return nil }
+            if media.url.isFileURL { return .direct }
+            return .httpProxy(media.url.host == "b.fixture.invalid" ? proxyB.url : proxyA.url)
+        })
+        let keys = ["http-proxy", "stream-lavf-o", "demuxer-lavf-o", "tls-verify"]
+        var baseline: [String: String] = [:]
+        for key in keys { baseline[key] = await player.diagnosticPropertyForTesting(key) }
+        let owner = player.renderOwnerID
+        do {
+            try await player.load(media(URL(string: "http://a.fixture.invalid/redirect")!), startPosition: nil, requestID: UUID())
+            XCTAssertTrue(proxyA.requests.contains { $0.contains("cdn.fixture.invalid") && $0.contains("/audio.wav") })
+            let selectedA = await player.diagnosticPropertyForTesting("http-proxy")
+            XCTAssertEqual(selectedA, proxyA.url.absoluteString)
+            try await player.seek(to: 4)
+            try await waitUntil { Double(await player.diagnosticPropertyForTesting("time-pos") ?? "") ?? 0 >= 3.5 }
+            try await player.load(media(URL(string: "http://b.fixture.invalid/audio.wav")!), startPosition: 2, requestID: UUID())
+            let selectedB = await player.diagnosticPropertyForTesting("http-proxy")
+            XCTAssertEqual(selectedB, proxyB.url.absoluteString)
+            XCTAssertFalse(proxyA.requests.contains { $0.contains("b.fixture.invalid") })
+            XCTAssertTrue(proxyB.requests.contains { $0.contains("b.fixture.invalid") })
+            XCTAssertEqual(player.renderOwnerID, owner)
+            let volume = await player.diagnosticPropertyForTesting("volume")
+            let mute = await player.diagnosticPropertyForTesting("mute")
+            XCTAssertEqual(Double(volume ?? ""), 35); XCTAssertEqual(mute, "yes")
+            await player.stop()
+            for key in keys {
+                try await waitUntil { await player.diagnosticPropertyForTesting(key) == baseline[key] }
+            }
+            let file = FileManager.default.temporaryDirectory.appendingPathComponent("xtream117-\(UUID()).wav")
+            try XtreamNetworkFixture.wav.write(to: file)
+            defer { try? FileManager.default.removeItem(at: file) }
+            try await player.load(media(file, managed: false), startPosition: nil, requestID: UUID())
+            for key in keys {
+                let actual = await player.diagnosticPropertyForTesting(key)
+                XCTAssertEqual(actual, baseline[key], key)
+            }
+            XCTAssertEqual(player.renderOwnerID, owner)
+            await player.shutdown()
+        } catch { await player.shutdown(); throw error }
+    }
+
+    func testRejectedLoadRestoresProxyBeforeFollowingPlayback() async throws {
+        let proxy = try XtreamNetworkFixture(); try await proxy.start()
+        defer { proxy.close() }
+        let player = try MPVPlayerClient(audioPreference: .init(muted: true), mediaProxyResolver: { _ in .httpProxy(proxy.url) })
+        let baseline = await player.diagnosticPropertyForTesting("http-proxy")
+        do {
+            do {
+                try await player.load(media(URL(string: "http://fixture.invalid/denied")!), startPosition: nil, requestID: UUID())
+                XCTFail("HTTP 403 must fail")
+            } catch { XCTAssertFalse(error is CancellationError) }
+            try await waitUntil { await player.diagnosticPropertyForTesting("http-proxy") == baseline }
+            try await player.load(media(URL(string: "http://fixture.invalid/audio.wav")!), startPosition: nil, requestID: UUID())
+            let duration = await player.diagnosticPropertyForTesting("duration")
+            XCTAssertGreaterThan(Double(duration ?? "") ?? 0, 5)
+            await player.shutdown()
+        } catch { await player.shutdown(); throw error }
+    }
+
+    func testCancelledLoadAndLateOldCancellationCannotStopSameRequestRetry() async throws {
+        let proxy = try XtreamNetworkFixture(); try await proxy.start()
+        defer { proxy.close() }
+        let player = try MPVPlayerClient(audioPreference: .init(muted: true), mediaProxyResolver: { _ in .httpProxy(proxy.url) })
+        let request = UUID()
+        let old = Task { try await player.load(media(URL(string: "http://fixture.invalid/hang")!), startPosition: nil, requestID: request) }
+        do {
+            try await waitUntil { proxy.requests.contains { $0.contains("/hang") } }
+            // Retire the old attempt, then reuse the same request identity.
+            player.cancelPendingMediaLoad(requestID: request)
+            do { try await old.value; XCTFail("Expected cancellation") } catch { XCTAssertTrue(error is CancellationError) }
+            var retryCompleted = false
+            let retry = Task {
+                defer { retryCompleted = true }
+                try await player.load(media(URL(string: "http://fixture.invalid/hang-retry")!), startPosition: nil, requestID: request)
+            }
+            try await waitUntil { proxy.requests.contains { $0.contains("/hang-retry") } }
+            player.cancelPendingMediaLoad(requestID: request, loadIdentifier: UUID())
+            try await Task.sleep(nanoseconds: 100_000_000)
+            XCTAssertFalse(retryCompleted, "A different attempt's cancellation must not release this load")
+            retry.cancel()
+            do { try await retry.value; XCTFail("Expected task cancellation") } catch { XCTAssertTrue(error is CancellationError) }
+            try await player.load(media(URL(string: "http://fixture.invalid/audio.wav")!), startPosition: nil, requestID: request)
+            old.cancel()
+            player.cancelPendingMediaLoad(requestID: request, loadIdentifier: UUID())
+            try await Task.sleep(nanoseconds: 100_000_000)
+            let path = await player.diagnosticPropertyForTesting("path")
+            XCTAssertEqual(path, "http://fixture.invalid/audio.wav")
+            await player.shutdown()
+        } catch { old.cancel(); await player.shutdown(); throw error }
+    }
+
+    func testVODCloseReleasesLifecycleBarrierWithoutWaitingThirtySeconds() async throws {
+        let fixture = try XtreamNetworkFixture(); try await fixture.start()
+        defer { fixture.close() }
+        let controller = PlayerLifecycleController(mode: .warmStop)
+        let request = UUID()
+        let pending = Task { try await controller.load(media(fixture.url.appendingPathComponent("hang")), startPosition: nil, requestID: request) }
+        do {
+            try await waitUntil { fixture.requests.contains { $0.contains("/hang") } }
+            let start = Date()
+            await controller.closeAfterPlayback(requestID: request)
+            do { try await pending.value; XCTFail("Expected cancellation") } catch { XCTAssertTrue(error is CancellationError) }
+            XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+            await controller.shutdown()
+        } catch { pending.cancel(); await controller.shutdown(); throw error }
+    }
+}
+
+/// A bounded loopback HTTP server also accepts absolute-form proxy requests.
+/// No DNS, upstream service or user proxy configuration is needed by these tests.
+private final class XtreamNetworkFixture: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "Xtream117.Fixture")
+    private let lock = NSLock()
+    private var received: [String] = []
+    private var connections: [NWConnection] = []
+    var requests: [String] { lock.lock(); defer { lock.unlock() }; return received }
+    var url: URL { URL(string: "http://127.0.0.1:\(listener.port!.rawValue)")! }
+    init() throws { listener = try NWListener(using: .tcp, on: .any) }
+    func start() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            var completed = false
+            listener.stateUpdateHandler = { state in
+                guard !completed else { return }
+                if case .ready = state { completed = true; continuation.resume() }
+                if case .failed(let error) = state { completed = true; continuation.resume(throwing: error) }
+            }
+            listener.newConnectionHandler = { [weak self] connection in
+                guard let self else { connection.cancel(); return }
+                self.connections.append(connection)
+                connection.start(queue: self.queue)
+                self.read(connection, prefix: Data())
+            }
+            listener.start(queue: queue)
+        }
+    }
+    func close() {
+        listener.cancel()
+        queue.async { self.connections.forEach { $0.cancel() }; self.connections.removeAll() }
+    }
+    private func read(_ connection: NWConnection, prefix: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, done, error in
+            guard let self else { return }
+            let bytes = prefix + (data ?? Data())
+            guard bytes.count <= 32_768 else { connection.cancel(); return }
+            guard let text = String(data: bytes, encoding: .utf8), text.contains("\r\n\r\n") else {
+                if !done && error == nil { self.read(connection, prefix: bytes) } else { connection.cancel() }
+                return
+            }
+            self.lock.lock(); self.received.append(text); self.lock.unlock()
+            let target = text.split(separator: " ").dropFirst().first.map(String.init) ?? ""
+            if target.contains("/hang") { return }
+            if target.contains("/redirect") {
+                self.reply(connection, status: "302 Found", headers: "Location: http://cdn.fixture.invalid/audio.wav\r\n", body: Data()); return
+            }
+            if target.contains("/denied") {
+                self.reply(connection, status: "403 Forbidden", headers: "", body: Data()); return
+            }
+            let wave = Self.wav
+            let range = text.components(separatedBy: "\r\n").first { $0.lowercased().hasPrefix("range: bytes=") }
+            let start = range.flatMap { Int($0.components(separatedBy: "=").last!.components(separatedBy: "-")[0]) } ?? 0
+            guard start < wave.count, start >= 0 else {
+                self.reply(connection, status: "416 Range Not Satisfiable", headers: "", body: Data()); return
+            }
+            let headers = "Content-Type: audio/wav\r\nAccept-Ranges: bytes\r\n"
+                + (range == nil ? "" : "Content-Range: bytes \(start)-\(wave.count - 1)/\(wave.count)\r\n")
+            self.reply(connection, status: range == nil ? "200 OK" : "206 Partial Content", headers: headers, body: wave.subdata(in: start..<wave.count))
+        }
+    }
+    private func reply(_ connection: NWConnection, status: String, headers: String, body: Data) {
+        let header = "HTTP/1.1 \(status)\r\n\(headers)Content-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+        connection.send(content: Data(header.utf8) + body, completion: .contentProcessed { _ in connection.cancel() })
+    }
+    static let wav: Data = {
+        var data = Data("RIFF".utf8)
+        func append<T: FixedWidthInteger>(_ n: T) { var value = n.littleEndian; withUnsafeBytes(of: &value) { data.append(contentsOf: $0) } }
+        let size: UInt32 = 48_000 * 2 * 10
+        append(size + 36); data.append(Data("WAVEfmt ".utf8)); append(UInt32(16)); append(UInt16(1)); append(UInt16(1))
+        append(UInt32(48_000)); append(UInt32(96_000)); append(UInt16(2)); append(UInt16(16)); data.append(Data("data".utf8)); append(size)
+        data.append(Data(repeating: 0, count: Int(size))); return data
+    }()
+}
+
+
+@MainActor
+final class CompactBrowse118Tests: XCTestCase {
+    func testSameListNewSessionRefreshesSelectionCallbacks() {
+        let first = PlayerEpisodeGrid(presentations: [], selectedEpisodeID: nil, accentColor: .blue, displayName: { $0.displayName }, onPlay: { _ in }, onInspect: { _ in }, selectionSessionID: UUID())
+        var second = first
+        second.selectionSessionID = UUID()
+        XCTAssertNotEqual(first, second)
+        second = first
+        second.canRetrySelected = true
+        XCTAssertNotEqual(first, second)
+    }
+
+    func testNativePosterTemplatesKeepRemarksAndSearchSourceVisible() throws {
+        final class Flipped: NSView { override var isFlipped: Bool { true } }
+        let canvas = Flipped(frame: .init(x: 0, y: 0, width: 620, height: 345))
+        canvas.wantsLayer = true; canvas.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        for (index, remark) in ["7.8", "更新至第12集", "2026"].enumerated() {
+            let item = VideoSummary(siteKey: "fixture", siteName: "来源 A", videoID: "\(index)", title: index == 1 ? "这是一个用于检查截断的长片名" : "节目 \(index + 1)", remarks: remark)
+            let search = index == 2
+            let card = PosterNativeCardView(frame: .init(x: CGFloat(index) * 200 + 10, y: 10, width: 190, height: PosterGridMetrics.cardHeight(width: 190, showsSubtitle: search)))
+            canvas.addSubview(card)
+            card.bind(summary: item, repository: nil, pixels: 256, onSelect: {})
+            card.present(search ? .init(id: item.id, subtitle: "2026 · 来源 A", sources: [item]) : nil, onSelectSource: nil)
+            card.layoutSubtreeIfNeeded()
+            let visible = card.subviews.compactMap { $0 as? NSTextField }.filter { !$0.isHidden }
+            XCTAssertTrue(visible.allSatisfy { $0.frame.maxY <= card.bounds.height })
+            XCTAssertTrue(visible.contains { $0.stringValue == (search ? "2026 · 来源 A" : remark) })
+            XCTAssertTrue(card.toolTip?.contains(item.title) == true)
+        }
+        let bitmap = try XCTUnwrap(canvas.bitmapImageRepForCachingDisplay(in: canvas.bounds))
+        canvas.cacheDisplay(in: canvas.bounds, to: bitmap)
+        try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "/private/tmp/ok118-poster-layout.png"))
+    }
+
+    func testNumericRemarksAreNotSilentlyDiscarded() {
+        for value in ["30", "2026", "-1", "更新至12集"] {
+            XCTAssertEqual(VideoCardMetadata.secondaryText(from: value), value)
+        }
+        for value in ["0", "7.8", "评分：7.5"] {
+            XCTAssertNil(VideoCardMetadata.secondaryText(from: value))
+        }
+    }
+    func testSearchAndCompactAnchorsRoundTripTheirOwnGeometry() throws {
+        let ids = (0..<100).map(String.init)
+        for width: CGFloat in [450, 920] {
+            for subtitle in [false, true] {
+                let columns = PosterGridMetrics.columnCount(width: width)
+                let rows = (ids.count + columns - 1) / columns
+                let stride = PosterGridMetrics.cardHeight(width: PosterGridMetrics.cardWidth(width: width), showsSubtitle: subtitle) + PosterGridMetrics.rowSpacing
+                let metrics = PosterScrollMetrics(offset: 70 + 3 * stride + 12, viewport: .init(width: width, height: 600), regionTop: 70,
+                    regionSize: .init(width: width, height: CGFloat(rows) * stride - PosterGridMetrics.rowSpacing))
+                let anchor = try XCTUnwrap(PosterBrowseAnchor.capture(ids: ids, metrics: metrics, showsSubtitle: subtitle))
+                XCTAssertEqual(anchor.itemID, ids[3 * columns])
+                XCTAssertEqual(try XCTUnwrap(anchor.targetOffset(ids: ids, width: width, regionTop: 70, showsSubtitle: subtitle)), metrics.offset, accuracy: 0.01)
+            }
+        }
+    }
+    func testLiveEPGChangesKeepCardGeometryAndRenderCompactStates() throws {
+        final class Flipped: NSView { override var isFlipped: Bool { true } }
+        let canvas = Flipped(frame: .init(x: 0, y: 0, width: 880, height: 245))
+        canvas.wantsLayer = true; canvas.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        let date = Date(timeIntervalSince1970: 1_790_470_000)
+        let now = EPGProgramme(channelID: "fixture", title: "正在播放的节目", start: date.addingTimeInterval(-900), end: date.addingTimeInterval(900))
+        let next = EPGProgramme(channelID: "fixture", title: "下一档节目", start: date.addingTimeInterval(900), end: date.addingTimeInterval(2700))
+        let states: [EPGNowNextSnapshot] = [.init(), .init(current: now, next: next, availability: .fresh), .init(next: next)]
+        for (index, state) in states.enumerated() {
+            let card = LiveChannelNativeCard()
+            card.frame = .init(x: CGFloat(index) * 290 + 10, y: 10, width: 270, height: LiveChannelCardMetrics.height(width: 270))
+            canvas.addSubview(card)
+            card.bind(channel: .init(groupName: "fixture", name: "CCTV-\(index + 1)", streams: []), favorite: false, urls: [], pixels: 256, repository: nil)
+            let size = card.frame.size
+            card.showProgramme(state, date: date, formatter: DateFormatter())
+            card.layoutSubtreeIfNeeded()
+            XCTAssertEqual(card.frame.size, size)
+            let fields = card.subviews.compactMap { $0 as? NSTextField }.filter { !$0.isHidden }
+            XCTAssertEqual(fields.count, 2)
+            let progress = try XCTUnwrap(card.subviews.compactMap { $0 as? NativeNeutralProgressView }.first)
+            XCTAssertEqual(progress.isHidden, state.progress(at: date) == nil)
+            XCTAssertEqual(progress.frame.height, 2)
+            XCTAssertEqual(progress.frame.minY, fields.map { $0.frame.maxY }.max()! + 6)
+            XCTAssertLessThanOrEqual(progress.frame.maxY, card.bounds.height)
+            XCTAssertTrue(fields.allSatisfy { $0.frame.maxY <= card.bounds.height })
+        }
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            canvas.appearance = NSAppearance(named: appearance)
+            canvas.effectiveAppearance.performAsCurrentDrawingAppearance {
+                canvas.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+            }
+            let bitmap = try XCTUnwrap(canvas.bitmapImageRepForCachingDisplay(in: canvas.bounds))
+            canvas.cacheDisplay(in: canvas.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "/private/tmp/ok123-live-\(appearance.rawValue).png"))
+        }
+    }
+    func testEpisodeGridRendersCurrentItemAndAllowsNarrowWindow() async throws {
+        let values = EpisodeListPresentation.presentations(from: (1...50).map { PlayEpisode(name: "S02E\($0).4KSDR", url: "fixture:\($0)") }, query: "", sortOrder: .sourceOrder)
+        let grid = PlayerEpisodeGrid(presentations: values, selectedEpisodeID: values[47].id, accentColor: .blue, displayName: { $0.displayName }, onPlay: { _ in }, onInspect: { _ in })
+        let host = NSHostingView(rootView: grid.padding(14).frame(width: 472, height: 286).background(Color.black).environment(\.colorScheme, .dark))
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 472, height: 286), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
+        defer { window.close() }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        let scroll = try XCTUnwrap(BrowserKeyboardView.descendants(of: host).compactMap { $0 as? NSScrollView }.first)
+        XCTAssertGreaterThan(scroll.contentView.bounds.minY, 0, "Opening must locate item 48")
+        let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: "/private/tmp/ok118-episode-grid.png"))
+    }
+}
+
+final class LiveBrowseAnchorRegressionTests: XCTestCase {
+    func testTopAndPartialTopInsetSurviveRepeatedRestoration() throws {
+        let ids = (0..<100).map(String.init)
+        for original: CGFloat in [0, 5, 10, 20, 100, 557] {
+            var offset = original
+            for _ in 0..<5 {
+                let anchor = try XCTUnwrap(LiveChannelBrowseAnchor.capture(ids: ids, offset: offset, columns: 4, rowHeight: 270))
+                offset = anchor.offset(ids: ids, columns: 4, rowHeight: 270)
+                XCTAssertEqual(offset, original, accuracy: 0.01)
+            }
+        }
+    }
+    func testResizingRetainsChannelAndMissingChannelReturnsToTop() throws {
+        let ids = (0..<100).map(String.init)
+        let anchor = try XCTUnwrap(LiveChannelBrowseAnchor.capture(ids: ids, offset: 580, columns: 4, rowHeight: 270))
+        XCTAssertEqual(anchor.id, "8")
+        XCTAssertEqual(anchor.offset(ids: ids, columns: 2, rowHeight: 300), 1240)
+        XCTAssertEqual(anchor.offset(ids: ["a", "b"], columns: 2, rowHeight: 300), 0)
+        let top = try XCTUnwrap(LiveChannelBrowseAnchor.capture(ids: ids, offset: 0, columns: 4, rowHeight: 270))
+        XCTAssertEqual(top.offset(ids: ids.reversed(), columns: 2, rowHeight: 300), 0)
+    }
+}
+
+private actor Danmaku127HTTP: HTTPClient {
+    var requests: [URL] = []
+    var searchDelay: UInt64 = 0
+    var commentDelay: UInt64 = 0
+    var badComments = false
+    var generation = 10000
+    func configure(searchDelay: UInt64 = 0, commentDelay: UInt64 = 0, bad: Bool = false, generation: Int = 10000) {
+        self.searchDelay = searchDelay; self.commentDelay = commentDelay; badComments = bad; self.generation = generation
+    }
+    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        requests.append(request.url)
+        let body: Data
+        if request.url.path.contains("/search/") {
+            if searchDelay > 0 { try await Task.sleep(nanoseconds: searchDelay) }
+            let episodes = (1...34).map { ["episodeId": generation + $0, "episodeTitle": "【qq】 兰香如故_\(String(format: "%02d", $0))", "url": "https://v.qq.com/x/cover/show/video\($0).html"] as [String: Any] }
+            body = try JSONSerialization.data(withJSONObject: ["animes": [["animeTitle": "兰香如故(2026)【电视剧】from tencent", "type": "电视剧", "episodes": episodes]]])
+        } else {
+            if commentDelay > 0 { try await Task.sleep(nanoseconds: commentDelay) }
+            let name = request.url.lastPathComponent
+            body = Data((badComments ? "<!DOCTYPE html><html>error</html>" : "<i><d p=\"1,1,25,16777215\">\(name)</d></i>").utf8)
+        }
+        return HTTPResponse(url: request.url, statusCode: 200, headers: [:], body: body)
+    }
+}
+
+@MainActor
+final class Danmaku127SessionTests: XCTestCase {
+    private let configurationID = UUID()
+    private func context(_ episode: Int, provided: [DanmakuSourceDescriptor] = []) -> DanmakuPlaybackContext {
+        let content = DanmakuContentIdentity(configurationID: configurationID, siteKey: "test", contentID: "show", title: "兰香如故")
+        let siblings = (1...34).map { PlayEpisode(name: "\($0) [2.06GB]", url: "\($0)") }
+        var value = DanmakuPlaybackContext(ecosystem: .catPaw, contentIdentity: content,
+            editionIdentity: .init(episode: .init(content: content, episodeID: "ep\(episode)", title: siblings[episode-1].name), editionID: "line"),
+            providedSources: provided, searchCapabilities: [.configuredEndpoint(value: "https://danmaku.example/key")], runtimeGeneration: UInt64(episode))
+        value.matchRequest = .init(title: content.title, category: "电视剧", episode: siblings[episode-1], siblings: siblings)
+        return value
+    }
+    private func fixture() throws -> (DanmakuSessionCoordinator, Danmaku127HTTP, SQLiteStore) {
+        let defaults = UserDefaults(suiteName: "danmaku127.\(UUID())")!
+        let http = Danmaku127HTTP()
+        let client = DanmakuServiceClient(http: http)
+        let coordinator = DanmakuSessionCoordinator(defaults: defaults, client: client)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("danmaku127-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return (coordinator, http, try SQLiteStore(databaseURL: directory.appendingPathComponent("test.sqlite")))
+    }
+    private func wait(_ condition: () -> Bool) async throws {
+        for _ in 0..<150 { if condition() { return }; try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTFail("Timed out waiting for session state")
+    }
+    private func ready(_ c: DanmakuSessionCoordinator) -> Bool { if case .ready = c.loadState { return true }; return false }
+    private func saved(_ store: SQLiteStore, _ context: DanmakuPlaybackContext) async throws -> DanmakuBinding? {
+        for _ in 0..<30 {
+            if let b = try await store.danmakuBinding(for: context.editionIdentity), b.verificationVersion == 2 { return b }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return try await store.danmakuBinding(for: context.editionIdentity)
+    }
+    func testAuto34MigratesFailed07OnlyAfterSuccessfulLoad() async throws {
+        let (c, http, store) = try fixture(), ctx = context(34)
+        let legacy = StableDanmakuLocator(kind: .providerURLIdentity, provider: "legacy", resourceID: "web07", displayName: "第7集")
+        try await store.saveDanmakuBinding(.init(editionIdentity: ctx.editionIdentity, locator: legacy))
+        c.begin(context: ctx, playbackSessionID: UUID(), database: store)
+        try await wait { self.ready(c) }
+        XCTAssertEqual(c.selectedSource?.match?.episode, 34)
+        XCTAssertEqual(c.timeline.comments.first?.text, "10034")
+        let binding = try await saved(store, ctx)
+        XCTAssertEqual(binding?.verificationVersion, 2)
+        XCTAssertEqual(binding?.authority, .automaticMatch)
+        XCTAssertEqual(binding?.previousLocator, legacy)
+        let urls = await http.requests
+        XCTAssertFalse(urls.contains { $0.host == "v.qq.com" })
+        c.endSession()
+    }
+    func testFailedManualSelectionNeverCreatesVerifiedBinding() async throws {
+        let (c, http, store) = try fixture(), ctx = context(34)
+        await http.configure(bad: true)
+        c.begin(context: ctx, playbackSessionID: UUID(), database: store)
+        try await wait { if case .failed = c.loadState { return true }; return false }
+        let source = try XCTUnwrap(c.selectedSource)
+        c.select(source)
+        try await wait { if case .failed = c.loadState { return true }; return false }
+        let binding = try await store.danmakuBinding(for: ctx.editionIdentity)
+        XCTAssertNil(binding)
+        XCTAssertTrue(c.statusText.contains("网页"))
+        c.endSession()
+    }
+    func testEmptyOrInvalidProvidedPayloadFallsBackToCurrentEpisode() async throws {
+        for payload in ["<i/>", "<!DOCTYPE html><html>error</html>"] {
+            let (c, _, store) = try fixture()
+            var runtime = RuntimeDanmakuLocator(url: URL(string: "https://danmaku.example/provided")!, runtimeGeneration: 34)
+            runtime.inlineData = Data(payload.utf8)
+            let source = DanmakuSourceDescriptor(
+                stable: .init(kind: .providerURLIdentity, provider: "provided", resourceID: "empty", displayName: "源内弹幕"),
+                runtime: runtime)
+            let ctx = context(34, provided: [source])
+            c.begin(context: ctx, playbackSessionID: UUID(), database: store)
+            try await wait { self.ready(c) }
+            XCTAssertEqual(c.selectedSource?.match?.episode, 34)
+            XCTAssertEqual(c.timeline.comments.first?.text, "10034")
+            XCTAssertEqual(c.selectionDescription, "自动匹配")
+            let binding = try await saved(store, ctx)
+            XCTAssertEqual(binding?.authority, .automaticMatch)
+            XCTAssertEqual(binding?.match?.episode, 34)
+            c.endSession()
+        }
+    }
+    func testDisableAndRapidEpisodeChangeDiscardLateResults() async throws {
+        let (c, http, store) = try fixture()
+        await http.configure(commentDelay: 180_000_000)
+        c.begin(context: context(33), playbackSessionID: UUID(), database: store)
+        try await wait { if case .loading = c.loadState { return true }; return false }
+        c.begin(context: context(34), playbackSessionID: UUID(), database: store)
+        try await wait { self.ready(c) }
+        XCTAssertEqual(c.timeline.comments.first?.text, "10034")
+        let old = try await store.danmakuBinding(for: context(33).editionIdentity)
+        XCTAssertNil(old)
+        c.rematch(); c.isEnabled = false
+        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(c.loadState, .disabled); XCTAssertTrue(c.timeline.comments.isEmpty)
+        c.endSession()
+    }
+    func testManualSelectionWinsAgainstInFlightSearch() async throws {
+        let (c, http, store) = try fixture()
+        await http.configure(searchDelay: 200_000_000)
+        c.begin(context: context(34), playbackSessionID: UUID(), database: store)
+        try await wait { c.searchState == .searching }
+        c.select(.init(stable: .init(kind: .providerURLIdentity, provider: "manual", resourceID: "manual", displayName: "自选"),
+            runtime: .init(url: URL(string: "https://danmaku.example/manual")!, runtimeGeneration: 34)))
+        try await wait { self.ready(c) }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(c.timeline.comments.first?.text, "manual")
+        XCTAssertEqual(c.selectionDescription, "手动选择")
+        c.endSession()
+    }
+    func testVerifiedManualChoiceReResolvesChangedRuntimeEpisodeID() async throws {
+        let (c, http, store) = try fixture(), ctx = context(34)
+        c.begin(context: ctx, playbackSessionID: UUID(), database: store)
+        try await wait { self.ready(c) }
+        c.select(try XCTUnwrap(c.selectedSource))
+        try await wait { self.ready(c) }
+        c.updateOffset(2.5)
+        try await Task.sleep(nanoseconds: 80_000_000)
+        c.endSession()
+        await http.configure(generation: 20000)
+        c.begin(context: ctx, playbackSessionID: UUID(), database: store)
+        try await wait { self.ready(c) }
+        XCTAssertEqual(c.selectedSource?.match?.serviceEpisodeID, "20034")
+        XCTAssertEqual(c.timeline.comments.first?.text, "20034")
+        XCTAssertEqual(c.offset, 2.5)
+        c.endSession()
+    }
+    func testOnlyCurrentPushCanReplaceAutomaticAndNeverManualSelection() async throws {
+        let (c, _, store) = try fixture()
+        var ctx = context(34); ctx.upstreamRequestID = UUID()
+        c.begin(context: ctx, playbackSessionID: UUID(), database: store)
+        try await wait { self.ready(c) }
+        let payload = JSONValue.string("<i><d p=\"2,1,25,16777215\">推送</d></i>")
+        DanmakuPushEvent.publish(.init(requestID: UUID(), siteKey: "test", baseURL: URL(string: "https://danmaku.example/")!, payload: payload))
+        XCTAssertEqual(c.timeline.comments.first?.text, "10034")
+        DanmakuPushEvent.publish(.init(requestID: ctx.upstreamRequestID!, siteKey: "test", baseURL: URL(string: "https://danmaku.example/")!, payload: payload))
+        try await wait { self.ready(c) && c.timeline.comments.first?.text == "推送" }
+        c.select(try XCTUnwrap(c.selectedSource))
+        try await wait { self.ready(c) }
+        DanmakuPushEvent.publish(.init(requestID: ctx.upstreamRequestID!, siteKey: "test", baseURL: URL(string: "https://danmaku.example/")!, payload: .string("<i/>")))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(c.timeline.comments.first?.text, "推送")
+        c.endSession()
     }
 }

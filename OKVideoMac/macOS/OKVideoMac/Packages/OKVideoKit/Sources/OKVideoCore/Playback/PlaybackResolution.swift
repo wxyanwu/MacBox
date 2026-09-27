@@ -69,6 +69,13 @@ public enum PlaybackCompatibilityPolicy: Equatable, Sendable {
     case nativeXtreamLive
 }
 
+/// Runtime intent supplied by a native provider, never a saved proxy endpoint
+/// or an option decoded from an untrusted provider response.
+public enum MediaNetworkPolicy: Equatable, Sendable {
+    case inherited
+    case systemHTTPProxy
+}
+
 public struct ResolvedMedia: Equatable, Sendable {
     public var url: URL
     public var headers: HTTPHeaders
@@ -82,6 +89,7 @@ public struct ResolvedMedia: Equatable, Sendable {
     public var nativeStartupBudgetSeconds: Int?
     public var hlsStartupSelection: HLSStartupSelection?
     public var compatibilityPolicy: PlaybackCompatibilityPolicy
+    public var networkPolicy: MediaNetworkPolicy
     public var transferReceipt: TransferReceipt?
     public var danmakuContext: DanmakuPlaybackContext?
 
@@ -98,6 +106,7 @@ public struct ResolvedMedia: Equatable, Sendable {
         nativeStartupBudgetSeconds: Int? = nil,
         hlsStartupSelection: HLSStartupSelection? = nil,
         compatibilityPolicy: PlaybackCompatibilityPolicy = .existing,
+        networkPolicy: MediaNetworkPolicy = .inherited,
         transferReceipt: TransferReceipt? = nil,
         danmakuContext: DanmakuPlaybackContext? = nil
     ) {
@@ -113,6 +122,7 @@ public struct ResolvedMedia: Equatable, Sendable {
         self.nativeStartupBudgetSeconds = nativeStartupBudgetSeconds
         self.hlsStartupSelection = hlsStartupSelection
         self.compatibilityPolicy = compatibilityPolicy
+        self.networkPolicy = networkPolicy
         self.transferReceipt = transferReceipt
         self.danmakuContext = danmakuContext
     }
@@ -578,6 +588,7 @@ public struct PlaybackResolver {
                         sourceName: candidate.sourceName,
                         episodeName: candidate.episodeName,
                         parserName: parser?.name,
+                        networkPolicy: candidate.result.networkPolicy,
                         transferReceipt: candidate.result.transferReceipt,
                         danmakuContext: candidate.danmakuContext
                     )

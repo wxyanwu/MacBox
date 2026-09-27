@@ -13,7 +13,7 @@ selected TVBox/CatVod/CatPaw-style providers, and libmpv playback.**
 Built with Swift and SwiftUI/AppKit. Android is an optional compatibility layer
 for selected Java/Dex providers.
 
-The current source version is **0.7.0 (Build 102)**. The latest notarized
+The current release candidate is **0.7.3 (Build 129)**. The latest notarized
 stable release remains listed below.
 
 **Native macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · Multi-provider Search ·
@@ -37,6 +37,26 @@ and notices are published with each release.
 > OKVideoMac is a player and provider client. It does not include third-party
 > video sources, accounts, cookies, parsing services, or DRM keys.
 
+## 0.7.3 release candidate
+
+- **Native Full Guide:** browse bounded XMLTV and Native Xtream programme data
+  with date navigation, Now repositioning, virtualized channel rows and programme
+  details.
+- **Native danmaku:** load source-provided XML/JSON comments, import Bilibili XML,
+  select a matching episode, calibrate timing and render through a display-synced
+  AppKit overlay.
+- **History and Favorites:** source-aware native lists, safer resume and deletion,
+  accurate progress, migration of older records and portable backup schema v4.
+- **Browsing and playback reliability:** resumable category/search pagination,
+  bounded detail caching, stronger async ownership, remembered volume, proxy-aware
+  Native Xtream media, smoother full-screen transitions and full-screen recovery.
+- **Interface polish:** consistent native hover and selection across poster, live,
+  History and Favorites views; populated rows keep separators while empty space
+  stays clean.
+
+This source candidate has not yet replaced the notarized 0.6.1 download. See the
+[0.7.3 release notes](Docs/RELEASE_NOTES_0.7.3.md) for scope and limitations.
+
 ## New in 0.6.1
 
 - **Android storage categories:** view managed components, installation cache,
@@ -51,8 +71,9 @@ and notices are published with each release.
   and Chinese project descriptions now give existing Native Xtream equal visibility.
 
 Native Xtream was introduced in 0.6.0, including authentication, Movies, Series,
-Movie/Series search and Basic Live. Xtream EPG, catch-up/timeshift and `direct_source`
-remain unsupported. See the [0.6.1 release notes](Docs/RELEASE_NOTES_0.6.1.md).
+Movie/Series search and Basic Live. The 0.6.1 release did not yet include Xtream
+EPG, catch-up/timeshift or `direct_source`. See the
+[0.6.1 release notes](Docs/RELEASE_NOTES_0.6.1.md).
 
 ## Screenshots
 
@@ -109,8 +130,8 @@ file map and image-processing notes.
 | Native macOS UI | Supported | SwiftUI/AppKit; no Android UI shell |
 | Apple Silicon | Supported | `arm64`, macOS 12.0 or later |
 | VOD and libmpv playback | Supported | Media behavior still depends on the source/server |
-| Live TV and XMLTV EPG | Supported | M3U, TXT, and JSON import paths |
-| Native Xtream | Supported | Authentication, Movies, Series, Movie/Series search and Basic Live; server differences apply |
+| Live TV and programme guide | Supported | M3U/TXT/JSON import, XMLTV and Native Xtream short EPG/Full Guide |
+| Native Xtream | Supported | Authentication, Movies, Series, search, Basic Live and short EPG; server differences apply |
 | Native CMS JSON | Supported | Home, category, filter, detail, search, and play handoff |
 | QuickJS Spider | Selected | Compatible scripts matching the implemented API |
 | Node Spider | Selected | CatVod/CatPaw-style video-interface subset |
@@ -168,7 +189,7 @@ validation limits are documented in [Android Bridge Setup](OKVideoMac/macOS/OKVi
 
 | Source / runtime | Level | Current scope |
 | --- | --- | --- |
-| Native Xtream | Supported | Authentication, Movies, Series, Movie/Series search and Basic Live; server differences apply |
+| Native Xtream | Supported | Authentication, Movies, Series, search, Basic Live and short EPG; no catch-up/timeshift or `direct_source` |
 | Native CMS JSON | Supported | Main provider path |
 | CMS XML / native type 4 | Partial | Narrower coverage than CMS JSON |
 | TVBox/CatVod-style QuickJS | Selected | `home`, `category`, `detail`, `search`, `play`, and selected helpers |
@@ -288,6 +309,7 @@ and [source release process](Docs/SOURCE_RELEASE_PROCESS.md).
 - [Build from source](OKVideoMac/macOS/OKVideoMac/Docs/BUILDING.md)
 - [Architecture](OKVideoMac/macOS/OKVideoMac/Docs/ARCHITECTURE.md)
 - [Android storage and uninstall](Docs/ANDROID_MANAGED_UNINSTALL.md)
+- [0.7.3 release notes](Docs/RELEASE_NOTES_0.7.3.md)
 - [0.6.1 release notes](Docs/RELEASE_NOTES_0.6.1.md)
 - [Changelog](CHANGELOG.md)
 - [Security policy](SECURITY.md)

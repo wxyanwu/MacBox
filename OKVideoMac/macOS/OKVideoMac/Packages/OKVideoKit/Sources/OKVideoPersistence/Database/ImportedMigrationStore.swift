@@ -61,8 +61,8 @@ import OKVideoCore
             try connection.query("PRAGMA secure_delete=ON") { _ in }
             guard try connection.scalarInt("PRAGMA foreign_keys") == 1 else { throw ImportedMigrationStoreError.corruption }
             let schema = try connection.scalarInt("PRAGMA user_version")
-            guard [9, 10, 11].contains(schema) else { throw ImportedMigrationStoreError.unsupportedVersion }
-            if schema < 11 {
+            guard [9, 10, 11, 13].contains(schema) else { throw ImportedMigrationStoreError.unsupportedVersion }
+            if schema < 11 || schema == 13 {
                 try connection.transaction {
                     if schema == 9 { try ImportedIdentityRegistrySQL.createSchema(connection) }
                     try Self.createAuthoritySchema(connection)

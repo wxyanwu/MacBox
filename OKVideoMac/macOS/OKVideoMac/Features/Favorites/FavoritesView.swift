@@ -2,389 +2,101 @@ import AppKit
 import OKVideoPersistence
 import SwiftUI
 
+enum FavoriteScope: Hashable {
+    case all, current, unresolved, configuration(UUID)
+}
+
 struct FavoritesView: View {
     @EnvironmentObject private var state: AppState
-    @Environment(\.primaryToolbarLayout) private var toolbarLayout
-    @State private var isSelecting = false
-    @State private var selectedIDs: Set<FavoriteRecord.ID> = []
-    @State private var pendingDeletion: FavoriteDeletion?
-    @State private var focusedID: FavoriteRecord.ID?
-    private let scrollCoordinateSpace = "favorites-scroll"
-
+    @State private var isDeleting = false
+    private var visible: [FavoriteRecord] {
+        state.favorites.filter { item in
+            switch state.favoritesScope {
+            case .all: return true
+            case .current: return item.configurationID != nil && item.configurationID == state.activeConfigurationRecord?.id
+            case .unresolved: return item.configurationID == nil
+            case .configuration(let id): return item.configurationID == id
+            }
+        }
+    }
+    private var rows: [NativeLibraryRow] {
+        visible.map { item in
+            NativeLibraryRow(id: item.id, title: item.title, subtitle: state.favoriteSourceDescription(item),
+                summary: (item.synopsis ?? "").split(whereSeparator: \.isWhitespace).joined(separator: " "),
+                posterURL: item.posterURL, date: item.createdAt, isLoading: state.favoriteLoadingID == item.id)
+        }
+    }
     var body: some View {
-        Group {
-            if state.favorites.isEmpty {
-                EmptyStateView(
-                    systemImage: "star",
-                    title: L10n.string("favorites.empty.title", fallback: "No Favorites"),
-                    message: L10n.string("favorites.empty.message", fallback: "Movies and shows you add to Favorites appear here.")
-                )
-            } else {
-                favoritesList
+        NativeLibraryList(rows: rows, selection: $state.favoriteSelection, repository: state.imageRepository,
+            openTitle: L10n.string("favorites.open", fallback: "Open Details"), openSymbol: "info.circle",
+            onOpen: { state.requestOpenFavorite($0) }, onDelete: requestDeletion,
+            onRepairSource: { id, _ in state.requestOpenFavorite(id, repairSource: true) })
+        .overlay {
+            if rows.isEmpty {
+                VStack(spacing: 8) {
+                    Text(L10n.string("favorites.empty.title", fallback: "No Favorites")).font(.headline)
+                    Text(L10n.string("favorites.empty.message", fallback: "Add a title to Favorites from its details page.")).foregroundColor(.secondary)
+                }.padding()
             }
         }
         .navigationTitle("")
         .toolbar {
-            PrimaryPageToolbarLeadingContent(title: L10n.string(.sectionFavorites))
+            PrimaryPageToolbarLeadingContent(title: L10n.string(.sectionFavorites) + " (\(rows.count))")
             ToolbarItemGroup(placement: .primaryAction) {
-                if !state.isDetailPagePresented,
-                   !state.favorites.isEmpty {
-                    favoriteManagementControls
-                }
-            }
-        }
-        .alert(
-            deletionTitle,
-            isPresented: deletionAlertIsPresented
-        ) {
-            Button(L10n.string(.commonCancel), role: .cancel) {}
-            Button(L10n.string("common.delete", fallback: "Delete"), role: .destructive) {
-                performDeletion()
-            }
-        } message: {
-            Text(deletionMessage)
-        }
-        .onChange(of: state.favorites.map(\.id)) { availableIDs in
-            selectedIDs.formIntersection(availableIDs)
-            if focusedID.map({ availableIDs.contains($0) }) != true {
-                focusedID = availableIDs.first
-            }
-            if state.favorites.isEmpty {
-                isSelecting = false
-            }
-        }
-        .onAppear {
-            focusedID = focusedID ?? state.favorites.first?.id
-        }
-        .background {
-            AppKeyCommandMonitor(handler: handleKeyCommand)
-                .frame(width: 0, height: 0)
-        }
-    }
-
-    @ViewBuilder
-    private var favoritesList: some View {
-        ScrollView {
-            BrowserToolbarScrollMarker(
-                coordinateSpaceName: scrollCoordinateSpace
-            )
-            LazyVStack(spacing: 0) {
-                ForEach(state.favorites) { favorite in
-                    favoriteRow(favorite)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 8)
-                    Divider()
-                        .padding(.leading, isSelecting ? 56 : 20)
-                }
-            }
-        }
-        .browserToolbarScrollSurface(named: scrollCoordinateSpace)
-    }
-
-    @ViewBuilder
-    private func favoriteRow(_ favorite: FavoriteRecord) -> some View {
-        HStack(spacing: 6) {
-            Button {
-                if isSelecting {
-                    toggleSelection(favorite.id)
-                } else {
-                    Task { await state.openFavorite(favorite) }
-                }
-            } label: {
-                HStack(spacing: 12) {
-                    if isSelecting {
-                        Image(
-                            systemName: selectedIDs.contains(favorite.id)
-                                ? "checkmark.circle.fill"
-                                : "circle"
-                        )
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(
-                            selectedIDs.contains(favorite.id)
-                                ? Color.accentColor
-                                : Color.secondary
-                        )
-                        .frame(width: 22)
+                Picker(L10n.string("favorites.scope", fallback: "Scope"), selection: $state.favoritesScope) {
+                    Text(L10n.string("favorites.scope.all", fallback: "All Favorites")).tag(FavoriteScope.all)
+                    Text(L10n.string("favorites.scope.current", fallback: "Current Configuration")).tag(FavoriteScope.current)
+                    Text(L10n.string("favorites.source.unresolved", fallback: "Source needs confirmation")).tag(FavoriteScope.unresolved)
+                    ForEach(state.configurations) { configuration in
+                        Text(configuration.name).tag(FavoriteScope.configuration(configuration.id))
                     }
-
-                    RemoteImage(url: favorite.posterURL) { image in
-                        image.resizable().scaledToFill()
-                    } placeholder: {
-                        Image(systemName: "film")
-                    }
-                    .frame(width: 48, height: 72)
-                    .background(Color.secondary.opacity(0.12))
-                    .clipped()
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(favorite.title)
-                            .font(.headline)
-                        Text(L10n.string("favorites.provider", fallback: "Provider: %@", favorite.siteKey))
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        if let synopsis = favorite.synopsis {
-                            Text(synopsis)
-                                .lineLimit(2)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    Spacer()
                 }
-                .contentShape(Rectangle())
+                .labelsHidden()
+                .frame(width: 200)
+                .controlSize(.regular)
+                .frame(height: PrimaryToolbarMetrics.itemHeight)
+                .help(L10n.string("favorites.scope", fallback: "Scope"))
+                Menu {
+                    Button(L10n.string("common.select-all", fallback: "Select All")) { state.favoriteSelection = Set(visible.map(\.id)) }
+                    Button(L10n.string("favorites.source.choose", fallback: "Confirm Favorite Source")) {
+                        if let id = state.favoriteSelection.first { state.requestOpenFavorite(id, repairSource: true) }
+                    }.disabled(state.favoriteSelection.count != 1)
+                    Button(L10n.string("favorites.clear-scope", fallback: "Remove All in This Scope")) { requestDeletion(Set(visible.map(\.id)), nil) }
+                } label: { Label(L10n.string("favorites.manage", fallback: "Manage Favorites"), systemImage: "ellipsis.circle") }
+                .primaryToolbarMenuControl()
+                .frame(height: PrimaryToolbarMetrics.itemHeight)
+                .help(L10n.string("favorites.manage", fallback: "Manage Favorites"))
+                Button { requestDeletion(state.favoriteSelection, nil) } label: {
+                    Label(L10n.string("common.delete-selected", fallback: "Delete Selected"), systemImage: "trash")
+                }
+                .primaryToolbarIconControl()
+                .frame(height: PrimaryToolbarMetrics.itemHeight)
+                .help(L10n.string("common.delete-selected", fallback: "Delete Selected"))
+                .disabled(state.favoriteSelection.isEmpty || isDeleting)
             }
-            .buttonStyle(.plain)
-            .appInteractiveHover(
-                cornerRadius: 10,
-                selected: selectedIDs.contains(favorite.id)
-                    || focusedID == favorite.id
-            )
-            .contextMenu {
-                Button(role: .destructive) {
-                    pendingDeletion = .items([favorite.id])
-                } label: {
-                    Label(L10n.string("favorites.delete-one", fallback: "Remove Favorite"), systemImage: "trash")
+        }
+        .task { await state.refreshFavoritesPresentation() }
+        .onChange(of: state.isBrowserWindowKey) { key in if key { Task { await state.refreshFavoritesPresentation() } } }
+        .onChange(of: visible.map(\.id)) { state.favoriteSelection.formIntersection($0) }
+    }
+    private func requestDeletion(_ ids: Set<String>, _ window: NSWindow?) {
+        guard !isDeleting else { return }
+        let captured = Set(visible.filter { ids.contains($0.id) }.map(\.id))
+        guard !captured.isEmpty else { return }
+        let scope: String
+        switch state.favoritesScope {
+        case .all: scope = L10n.string("favorites.scope.all", fallback: "All Favorites")
+        case .current: scope = state.activeConfigurationRecord?.name ?? ""
+        case .unresolved: scope = L10n.string("favorites.source.unresolved", fallback: "Source needs confirmation")
+        case .configuration(let id): scope = state.configurations.first { $0.id == id }?.name ?? ""
+        }
+        NativeLibraryConfirmation.present(title: L10n.string("favorites.delete.title", fallback: "Remove Favorites?"),
+            message: L10n.string("favorites.delete.scope-message", fallback: "Remove %d selected favorites from %@? Watch history is preserved.", captured.count, scope), window: window) {
+                isDeleting = true
+                Task {
+                    if await state.deleteFavorites(ids: captured) { state.favoriteSelection.subtract(captured) }
+                    isDeleting = false
                 }
             }
-
-            if !isSelecting {
-                Button(role: .destructive) {
-                    pendingDeletion = .items([favorite.id])
-                } label: {
-                    Image(systemName: "trash")
-                        .frame(width: 30, height: 30)
-                }
-                .buttonStyle(.plain)
-                .appInteractiveHover(cornerRadius: 8, destructive: true)
-                .foregroundStyle(.secondary)
-                .help(L10n.string("favorites.delete-one", fallback: "Remove Favorite"))
-            }
-        }
     }
-
-    @ViewBuilder
-    private var favoriteManagementControls: some View {
-        if isSelecting {
-            switch toolbarLayout {
-            case .expanded, .compact:
-                selectAllButton
-                    .primaryToolbarIconControl(isSelected: allItemsSelected)
-                deleteSelectedButton
-                    .primaryToolbarIconControl(destructive: true)
-                finishSelectionButton
-                    .primaryToolbarTextControl()
-            case .minimal:
-                selectionManagementMenu
-                    .primaryToolbarMenuControl()
-                finishSelectionButton
-                    .primaryToolbarTextControl()
-            }
-        } else {
-            switch toolbarLayout {
-            case .expanded, .compact:
-                beginSelectionButton
-                    .primaryToolbarIconControl()
-                clearAllButton
-                    .primaryToolbarIconControl(destructive: true)
-            case .minimal:
-                normalManagementMenu
-                    .primaryToolbarMenuControl()
-            }
-        }
-    }
-
-    private var selectAllButton: some View {
-        Button {
-            selectedIDs = allItemsSelected
-                ? []
-                : Set(state.favorites.map(\.id))
-        } label: {
-            Label(
-                allItemsSelected
-                    ? L10n.string("common.deselect-all", fallback: "Deselect All")
-                    : L10n.string("common.select-all", fallback: "Select All"),
-                systemImage: allItemsSelected
-                    ? "checkmark.circle.badge.xmark"
-                    : "checkmark.circle"
-            )
-        }
-        .help(
-            allItemsSelected
-                ? L10n.string("common.deselect-all", fallback: "Deselect All")
-                : L10n.string("common.select-all", fallback: "Select All")
-        )
-    }
-
-    private var deleteSelectedButton: some View {
-        Button(role: .destructive) {
-            pendingDeletion = .items(selectedIDs)
-        } label: {
-            Label(
-                selectedIDs.isEmpty
-                    ? L10n.string("common.delete-selected", fallback: "Delete Selected")
-                    : L10n.string("common.delete-selected-count", fallback: "Delete Selected (%d)", selectedIDs.count),
-                systemImage: "trash"
-            )
-        }
-        .disabled(selectedIDs.isEmpty)
-        .help(
-            selectedIDs.isEmpty
-                ? L10n.string("favorites.select-first", fallback: "Select favorites first")
-                : L10n.string("favorites.delete-selected", fallback: "Delete Selected Favorites")
-        )
-    }
-
-    private var finishSelectionButton: some View {
-        Button(L10n.string("common.done", fallback: "Done")) {
-            isSelecting = false
-            selectedIDs.removeAll()
-        }
-    }
-
-    private var beginSelectionButton: some View {
-        Button {
-            isSelecting = true
-        } label: {
-            Label(L10n.string("common.select", fallback: "Select"), systemImage: "checklist")
-        }
-        .help(L10n.string("favorites.select", fallback: "Select Favorites"))
-    }
-
-    private var clearAllButton: some View {
-        Button(role: .destructive) {
-            pendingDeletion = .all
-        } label: {
-            Label(L10n.string("favorites.clear", fallback: "Clear Favorites"), systemImage: "trash")
-        }
-        .help(L10n.string("favorites.clear", fallback: "Clear Favorites"))
-    }
-
-    private var selectionManagementMenu: some View {
-        Menu {
-            selectAllButton
-            deleteSelectedButton
-        } label: {
-            Label(L10n.string("common.selection-actions", fallback: "Selection Actions"), systemImage: "ellipsis.circle")
-                .labelStyle(.iconOnly)
-        }
-        .help(L10n.string("common.selection-actions", fallback: "Selection Actions"))
-    }
-
-    private var normalManagementMenu: some View {
-        Menu {
-            beginSelectionButton
-            clearAllButton
-        } label: {
-            Label(L10n.string("favorites.manage", fallback: "Manage Favorites"), systemImage: "ellipsis.circle")
-                .labelStyle(.iconOnly)
-        }
-        .help(L10n.string("favorites.manage", fallback: "Manage Favorites"))
-    }
-
-    private var allItemsSelected: Bool {
-        !state.favorites.isEmpty && selectedIDs.count == state.favorites.count
-    }
-
-    private var deletionAlertIsPresented: Binding<Bool> {
-        Binding(
-            get: { pendingDeletion != nil },
-            set: { if !$0 { pendingDeletion = nil } }
-        )
-    }
-
-    private var deletionTitle: String {
-        if case .some(.all) = pendingDeletion {
-            return L10n.string("favorites.clear.title", fallback: "Clear All Favorites?")
-        }
-        return L10n.string("favorites.delete.title", fallback: "Delete Favorites?")
-    }
-
-    private var deletionMessage: String {
-        switch pendingDeletion {
-        case .some(.all):
-            return L10n.string("favorites.clear.message", fallback: "All movie and show favorites will be removed. This cannot be undone.")
-        case let .some(.items(ids)):
-            return L10n.string("favorites.delete.message", fallback: "%d selected favorites will be removed. This cannot be undone.", ids.count)
-        case nil:
-            return ""
-        }
-    }
-
-    private func toggleSelection(_ id: FavoriteRecord.ID) {
-        if selectedIDs.contains(id) {
-            selectedIDs.remove(id)
-        } else {
-            selectedIDs.insert(id)
-        }
-    }
-
-    private func performDeletion() {
-        let deletion = pendingDeletion
-        pendingDeletion = nil
-        Task {
-            switch deletion {
-            case .some(.all):
-                await state.clearFavorites()
-            case let .some(.items(ids)):
-                await state.deleteFavorites(ids: ids)
-            case nil:
-                break
-            }
-            selectedIDs.removeAll()
-            isSelecting = false
-        }
-    }
-
-    private func handleKeyCommand(_ event: NSEvent) -> Bool {
-        let modifiers = event.modifierFlags.intersection(
-            [.command, .option, .control, .shift]
-        )
-        if modifiers == .command,
-           event.charactersIgnoringModifiers?.lowercased() == "a" {
-            isSelecting = true
-            selectedIDs = Set(state.favorites.map(\.id))
-            return true
-        }
-        guard modifiers.isEmpty else { return false }
-        switch event.keyCode {
-        case 125:
-            moveFocus(by: 1)
-        case 126:
-            moveFocus(by: -1)
-        case 36, 76:
-            guard let focusedID,
-                  let item = state.favorites.first(where: {
-                      $0.id == focusedID
-                  }) else { return false }
-            if isSelecting {
-                toggleSelection(focusedID)
-            } else {
-                Task { await state.openFavorite(item) }
-            }
-        case 51, 117:
-            guard let focusedID else { return false }
-            pendingDeletion = .items(
-                isSelecting && !selectedIDs.isEmpty
-                    ? selectedIDs : [focusedID]
-            )
-        case 53:
-            guard isSelecting else { return false }
-            isSelecting = false
-            selectedIDs.removeAll()
-        default:
-            return false
-        }
-        return true
-    }
-
-    private func moveFocus(by offset: Int) {
-        let ids = state.favorites.map(\.id)
-        guard !ids.isEmpty else { return }
-        let currentIndex = focusedID.flatMap { ids.firstIndex(of: $0) } ?? 0
-        focusedID = ids[min(max(currentIndex + offset, 0), ids.count - 1)]
-    }
-}
-
-private enum FavoriteDeletion {
-    case items(Set<FavoriteRecord.ID>)
-    case all
 }

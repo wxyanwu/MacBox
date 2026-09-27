@@ -75,7 +75,7 @@ public final class StandardSiteProvider: SiteProvider {
                 site: site,
                 baseURL: configurationBaseURL
             ),
-            pagination: Pagination(page: page, pageCount: response.pageCount)
+            pagination: try response.categoryPagination(requestedPage: page)
         )
     }
 
@@ -118,7 +118,7 @@ public final class StandardSiteProvider: SiteProvider {
                 site: site,
                 baseURL: configurationBaseURL
             ),
-            pagination: Pagination(page: page, pageCount: response.pageCount)
+            pagination: try response.searchPagination(requestedPage: page)
         )
     }
 

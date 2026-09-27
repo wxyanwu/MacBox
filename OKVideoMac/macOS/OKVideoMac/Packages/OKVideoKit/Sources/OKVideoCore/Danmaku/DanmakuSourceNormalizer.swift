@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public enum DanmakuSourceNormalizer {
     private static let containerKeys = [
@@ -58,6 +59,10 @@ public enum DanmakuSourceNormalizer {
                 )
                 return
             }
+            if string.hasPrefix("<"), let data = string.data(using: .utf8), data.count <= 32 * 1_024 * 1_024 {
+                output.append(inlineSource(data, provider: provider, generation: runtimeGeneration))
+                return
+            }
             if let source = makeSource(
                 rawURL: string,
                 name: nil,
@@ -85,6 +90,10 @@ public enum DanmakuSourceNormalizer {
             }
 
         case .object(let object):
+            if object["comments"] != nil, let data = try? JSONEncoder().encode(value), data.count <= 32 * 1_024 * 1_024 {
+                output.append(inlineSource(data, provider: provider, generation: runtimeGeneration))
+                return
+            }
             let headers = inheritedHeaders.merging(headers(from: object["headers"]))
             let rawURL = firstString(in: object, keys: urlKeys)
             let name = firstString(in: object, keys: nameKeys)
@@ -121,6 +130,13 @@ public enum DanmakuSourceNormalizer {
         case .null, .bool, .integer, .number:
             break
         }
+    }
+
+    private static func inlineSource(_ data: Data, provider: String, generation: UInt64) -> DanmakuSourceDescriptor {
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        var runtime = RuntimeDanmakuLocator(url: URL(string: "danmaku-inline://payload/" + digest)!, runtimeGeneration: generation)
+        runtime.inlineData = data
+        return .init(stable: .init(kind: .providerURLIdentity, provider: provider, resourceID: digest, displayName: "本集弹幕"), runtime: runtime)
     }
 
     private static func makeSource(

@@ -148,7 +148,7 @@ final class BridgeMediaSessionRegistry {
         prune();
         Session session = SESSIONS.get(id == null ? "" : id.trim());
         if (session == null) return null;
-        if (session.expiresAt < System.currentTimeMillis()) {
+        if (session.expiresAt < System.currentTimeMillis() || !session.isCurrent()) {
             SESSIONS.remove(session.id);
             return null;
         }
@@ -439,6 +439,7 @@ final class BridgeMediaSessionRegistry {
         final String id;
         final String upstreamURL;
         final BridgeProviderOwnerRegistry.Binding owner;
+        final long providerEpoch;
         final Map<String, String> headers;
         volatile String upstreamFingerprint;
         // Runtime-only representation proof, owned by this exact session and
@@ -457,8 +458,17 @@ final class BridgeMediaSessionRegistry {
             this.id = id;
             this.upstreamURL = upstreamURL;
             this.owner = owner;
+            this.providerEpoch = owner == null ? 0 : ProviderMediaEpoch.current(owner.jarKey);
             this.headers = new ConcurrentHashMap<>();
             mergeHeaders(headers);
+        }
+
+        boolean isCurrent() {
+            return owner == null || providerEpoch == ProviderMediaEpoch.current(owner.jarKey);
+        }
+
+        java.io.InputStream guardStream(java.io.InputStream input) {
+            return owner == null ? input : ProviderMediaEpoch.guard(input, owner.jarKey, providerEpoch);
         }
 
         synchronized void mergeHeaders(Map<String, String> additional) {

@@ -2,10 +2,20 @@ import AppKit
 import SwiftUI
 import OKVideoCore
 
+private struct CategoryBrowsePresentationKey: Hashable {
+    let query: CategoryQueryKey?
+    let revision: UInt64
+}
+
+private struct HomePosterGridIdentity: Hashable {
+    let configurationID: UUID?
+    let siteKey: String?
+    let query: CategoryQueryKey?
+}
+
 struct HomeView: View {
     @EnvironmentObject private var state: AppState
     @State private var filterSelection: [String: String] = [:]
-    @State private var filterLoadTask: Task<Void, Never>?
     private let categoryScrollCoordinateSpace = "home-category-scroll"
 
     var body: some View {
@@ -61,20 +71,111 @@ struct HomeView: View {
             if home.recommendations.isEmpty
                 && mediaCategories.isEmpty
                 && home.actionItems.isEmpty {
-                EmptyStateView(
-                    systemImage: "tray",
-                    title: L10n.string("home.no-playable-content.title", fallback: "No Playable Content"),
-                    message: L10n.string("home.no-playable-content.message", fallback: "Refresh to try again, or check the configuration and provider status.")
-                )
+                if let message = state.homeLoadErrorMessage {
+                    VStack(spacing: 16) {
+                        EmptyStateView(
+                            systemImage: "wifi.exclamationmark",
+                            title: L10n.string("provider.load.failed", fallback: "Provider Failed to Load"),
+                            message: message
+                        )
+
+                    }
+                } else {
+                    EmptyStateView(
+                        systemImage: "tray",
+                        title: L10n.string("home.no-playable-content.title", fallback: "No Playable Content"),
+                        message: L10n.string("home.no-playable-content.message", fallback: "Refresh to try again, or check the configuration and provider status.")
+                    )
+                }
             } else if state.homePresentationNeedsRecovery {
                 homeRecoveryContent
+            } else if let category = selectedCategory,
+                      let page = state.categoryPage,
+                      !page.items.isEmpty,
+                      page.items.allSatisfy({ $0.resolvedContentKind == .media }),
+                      home.actionItems.isEmpty,
+                      !HomeItemPresentationPolicy.prefersCompactCards(page.items) {
+                let tokens = HomeFilterPresentationPolicy.activeTokens(
+                    filters: category.filters,
+                    selection: filterSelection
+                )
+                let headerKey = PosterNativeHeaderKey(
+                    categories: mediaCategories,
+                    selectedCategoryID: state.selectedCategoryID,
+                    showsRecommendations: !home.recommendations.isEmpty,
+                    filterSelection: filterSelection
+                )
+                let footerKey = PosterNativeFooterKey(
+                    hasMore: page.pagination.hasMore,
+                    isLoading: state.isLoadingNextCategoryPage,
+                    isRefreshing: state.isLoading,
+                    errorMessage: state.categoryPaginationError,
+                    itemCount: page.items.count,
+                    hasPendingUpdate: state.categoryHasPendingUpdate,
+                    issueKind: state.categoryPaginationIssueKind
+                )
+                PosterNativePage(
+                    items: page.items,
+                    headerKey: headerKey,
+                    headerHeight: HomeBrowseGridMetrics.headerHeight(hasFilters: !tokens.isEmpty),
+                    activeFilters: tokens,
+                    footerKey: footerKey,
+                    nextPage: page.pagination.page + 1,
+                    initialAnchor: state.categoryBrowseAnchor,
+                    presentationRevision: state.categoryPresentationRevision,
+                    onCategorySelect: { categoryID in
+                        selectHomeCategory(categoryID,
+                            categories: mediaCategories)
+                    },
+                    onFilterReset: { filterID in
+                        let selection = HomeFilterPresentationPolicy.resetting(
+                            filterID: filterID,
+                            filters: category.filters,
+                            selection: filterSelection)
+                        filterSelection = selection
+                        scheduleFilterLoad(categoryID: category.id,
+                            filters: selection)
+                    },
+                    onClearFilters: {
+                        let selection = HomeFilterPresentationPolicy.defaultSelection(
+                            filters: category.filters)
+                        filterSelection = selection
+                        scheduleFilterLoad(categoryID: category.id,
+                            filters: selection)
+                    },
+                    onAcceptUpdate: { state.acceptCategoryUpdate() },
+                    onBrowse: { anchor, atTop, interacted in
+                        if let key = state.categoryBrowsingKey {
+                            state.recordCategoryViewport(for: key,
+                                anchor: anchor, atTop: atTop,
+                                interacted: interacted)
+                        }
+                    },
+                    onLoad: {
+                        await state.loadCategory(id: category.id,
+                            page: page.pagination.page + 1,
+                            filters: filterSelection)
+                    },
+                    onSelect: { summary in
+                        Task { await state.openHomeItem(summary) }
+                    }
+                )
+                .id(HomePosterGridIdentity(
+                    configurationID: state.activeConfigurationRecord?.id,
+                    siteKey: state.selectedSiteKey,
+                    query: state.categoryBrowsingKey
+                ))
+                .onAppear(perform: synchronizeFilterSelection)
+                .onChange(of: state.selectedCategoryID) { _ in
+                    synchronizeFilterSelection()
+                }
+                .onChange(of: state.selectedCategoryFilters) { _ in
+                    synchronizeFilterSelection()
+                }
             } else {
                 GeometryReader { viewport in
                     ScrollView {
-                        BrowserToolbarScrollMarker(
-                            coordinateSpaceName: categoryScrollCoordinateSpace
-                        )
-                        VStack(alignment: .leading, spacing: 20) {
+                        HomeBrowseScrollContent(coordinateSpaceName: categoryScrollCoordinateSpace) {
                             if !home.recommendations.isEmpty
                                 || !mediaCategories.isEmpty {
                                 VStack(spacing: 0) {
@@ -135,47 +236,36 @@ struct HomeView: View {
                                         tokens: activeFilters
                                     )
                                 }
-                                if state.isLoading,
-                                   state.categoryPage != nil {
-                                    HStack(spacing: 8) {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                        Text(L10n.string("common.updating", fallback: "Updating…"))
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                    .padding(
-                                        .leading,
-                                        HomeContentAlignment.visualLeadingInset
-                                    )
-                                }
                                 if let page = state.categoryPage {
-                                    homeItemGrid(page.items)
-                                    if page.pagination.hasMore,
-                                       !state.isLoading {
-                                        AutomaticPageLoader(
-                                            isLoading: state.isLoadingNextCategoryPage,
-                                            errorMessage: state.categoryPaginationError,
-                                            viewportHeight: viewport.size.height,
-                                            coordinateSpaceName: categoryScrollCoordinateSpace
-                                        ) {
-                                            Task {
-                                                await state.loadCategory(
-                                                    id: category.id,
-                                                    page: page.pagination.page + 1,
-                                                    filters: filterSelection
-                                                )
-                                            }
-                                        }
-                                        .id("\(category.id):\(page.pagination.page)")
+                                    if page.items.isEmpty {
+                                        Text(L10n.string("home.category.empty", fallback: "No titles in this category."))
+                                            .foregroundColor(.secondary)
+                                            .frame(maxWidth: .infinity, minHeight: 180)
                                     } else {
-                                        PaginationCompletionFooter(
-                                            itemCount: page.items.count
-                                        )
+                                        homeItemGrid(page.items)
                                     }
+                                    HomePaginationFooter(
+                                        hasMore: page.pagination.hasMore,
+                                        isLoading: state.isLoadingNextCategoryPage,
+                                        isRefreshing: state.isLoading,
+                                        errorMessage: state.categoryPaginationError,
+                                        itemCount: page.items.count,
+                                        viewportHeight: viewport.size.height,
+                                        coordinateSpaceName: categoryScrollCoordinateSpace,
+                                        nextPage: page.pagination.page + 1,
+                                        issueKind: state.categoryPaginationIssueKind,
+                                        hasPendingUpdate: state.categoryHasPendingUpdate,
+                                        onAcceptUpdate: { state.acceptCategoryUpdate() }
+                                    ) {
+                                        await state.loadCategory(id: category.id, page: page.pagination.page + 1, filters: filterSelection)
+                                    }
+                                    .id(CategoryBrowsePresentationKey(query: state.categoryBrowsingKey, revision: state.categoryPresentationRevision))
                                 } else if state.isLoading
                                     || state.isRecoveringHome {
-                                    AppActivityLabel(L10n.string("home.loading-categories", fallback: "Loading categories…"))
+                                    PosterInitialSkeleton(
+                                        width: max(0, viewport.size.width - HomeBrowseGridMetrics.contentPadding * 2),
+                                        height: max(0, viewport.size.height - 70)
+                                    )
                                 } else if let message = state.homeLoadErrorMessage {
                                     categoryRecoveryError(
                                         message: message
@@ -192,26 +282,28 @@ struct HomeView: View {
                                 homeItemGrid(home.recommendations)
                             }
                         }
-                        .padding(
-                            .horizontal,
-                            HomeBrowseGridMetrics.contentPadding
-                        )
-                        .padding(.bottom, HomeBrowseGridMetrics.contentPadding)
                     }
                     .browserToolbarScrollSurface(
                         named: categoryScrollCoordinateSpace
                     )
+                    .overlay(alignment: .topTrailing) {
+                        if state.categoryHasPendingUpdate {
+                            Button(L10n.string("home.category.view-update", fallback: "Content Updated — View")) {
+                                state.acceptCategoryUpdate()
+                            }
+                            .buttonStyle(.bordered)
+                            .padding(8)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                            .padding(10)
+                        }
+                    }
                 }
                 .onAppear(perform: synchronizeFilterSelection)
                 .onChange(of: state.selectedCategoryID) { _ in
-                    filterLoadTask?.cancel()
                     synchronizeFilterSelection()
                 }
                 .onChange(of: state.selectedCategoryFilters) { _ in
                     synchronizeFilterSelection()
-                }
-                .onDisappear {
-                    filterLoadTask?.cancel()
                 }
             }
         } else if state.isHomeLoading || !state.hasCompletedStartup {
@@ -219,8 +311,12 @@ struct HomeView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let message = state.homeLoadErrorMessage {
             EmptyStateView(
-                systemImage: "wifi.exclamationmark",
-                title: L10n.string("home.provider-temporarily-unavailable.title", fallback: "Provider Temporarily Unavailable"),
+                systemImage: state.homeLoadErrorIsLocalPluginCache
+                    ? "externaldrive.badge.exclamationmark"
+                    : "wifi.exclamationmark",
+                title: state.homeLoadErrorIsLocalPluginCache
+                    ? L10n.string("home.dex-cache-failed.title", fallback: "Local Plugin Cache Failed")
+                    : L10n.string("home.provider-temporarily-unavailable.title", fallback: "Provider Temporarily Unavailable"),
                 message: L10n.string("home.provider-temporarily-unavailable.message", fallback: "Your local configuration was preserved. Use Refresh in the upper-right corner to try again.\n%@", message)
             )
         } else {
@@ -294,7 +390,6 @@ struct HomeView: View {
         _ categoryID: String?,
         categories: [VideoCategory]
     ) {
-        filterLoadTask?.cancel()
         guard let categoryID,
               let category = categories.first(where: {
                   $0.id == categoryID
@@ -348,9 +443,16 @@ struct HomeView: View {
                     }
                 }
             } else {
-                VideoGrid(items: mediaItems) { summary in
+                let browseKey = state.categoryBrowsingKey
+                VideoGrid(items: mediaItems, initialAnchor: state.categoryBrowseAnchor,
+                          presentationRevision: state.categoryPresentationRevision,
+                          onBrowse: { anchor, atTop, interacted in
+                    if let browseKey { state.recordCategoryViewport(for: browseKey, anchor: anchor, atTop: atTop, interacted: interacted) }
+                }) { summary in
                     Task { await state.openHomeItem(summary) }
                 }
+                .id(HomePosterGridIdentity(configurationID: state.activeConfigurationRecord?.id,
+                                           siteKey: state.selectedSiteKey, query: browseKey))
             }
         }
     }
@@ -409,20 +511,7 @@ struct HomeView: View {
         categoryID: String,
         filters: [String: String]
     ) {
-        filterLoadTask?.cancel()
-        state.stageCategoryFilters(id: categoryID, filters: filters)
-        filterLoadTask = Task { @MainActor in
-            do {
-                try await Task.sleep(nanoseconds: 150_000_000)
-            } catch {
-                return
-            }
-            guard !Task.isCancelled,
-                  state.selectedCategoryID == categoryID else {
-                return
-            }
-            await state.loadCategory(id: categoryID, filters: filters)
-        }
+        state.scheduleCategoryFilterLoad(id: categoryID, filters: filters)
     }
 }
 
@@ -433,7 +522,32 @@ private enum HomeContentAlignment {
 /// One shared horizontal rhythm for the category strip, filter rows, and card
 /// grid. The filter labels stay on the cards' visible leading edge while every
 /// category cell starts on the same column as its corresponding filter chip.
+/// The observer is a background, so a zero-height bridge cannot introduce
+/// ScrollView's implicit spacing above the category row.
+struct HomeBrowseScrollContent<Content: View>: View {
+    let coordinateSpaceName: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: HomeBrowseGridMetrics.sectionSpacing) {
+            content
+        }
+        .padding(.horizontal, HomeBrowseGridMetrics.contentPadding)
+        .padding(.bottom, HomeBrowseGridMetrics.contentPadding)
+        .background(alignment: .top) {
+            BrowserToolbarScrollMarker(coordinateSpaceName: coordinateSpaceName)
+        }
+    }
+}
+
 enum HomeBrowseGridMetrics {
+    static let categoryRowHeight: CGFloat = 64
+    static let sectionSpacing: CGFloat = 20
+    static let dividerHeight: CGFloat = 0.5
+    static func headerHeight(hasFilters: Bool) -> CGFloat {
+        categoryRowHeight + dividerHeight + sectionSpacing
+            + (hasFilters ? chipHeight + sectionSpacing : 0)
+    }
     static let contentPadding: CGFloat = 16
     static let labelWidth: CGFloat = 54
     static let labelContentSpacing: CGFloat = 10
@@ -466,7 +580,10 @@ enum HomeCategoryNavigationLayoutPolicy {
     static func partition(
         candidates: [HomeCategoryNavigationCandidate],
         selectedID: String?,
-        availableWidth: CGFloat
+        availableWidth: CGFloat,
+        spacing: CGFloat = BrowseSegmentedNavigationMetrics.separatorWidth,
+        containerInset: CGFloat = BrowseSegmentedNavigationMetrics.containerInset,
+        moreWidth: CGFloat = BrowseSegmentedNavigationMetrics.moreWidth
     ) -> HomeCategoryNavigationPartition {
         guard !candidates.isEmpty else {
             return HomeCategoryNavigationPartition(
@@ -474,9 +591,7 @@ enum HomeCategoryNavigationLayoutPolicy {
                 hiddenIDs: []
             )
         }
-        let spacing = BrowseSegmentedNavigationMetrics.separatorWidth
-        let availableWidth = BrowseSegmentedNavigationMetrics
-            .innerAvailableWidth(availableWidth)
+        let availableWidth = max(0, availableWidth - containerInset * 2)
         let allWidth = candidates.reduce(0) { $0 + $1.width }
             + spacing * CGFloat(max(0, candidates.count - 1))
         if allWidth <= availableWidth {
@@ -489,7 +604,7 @@ enum HomeCategoryNavigationLayoutPolicy {
         let tabBudget = max(
             0,
             availableWidth
-                - BrowseSegmentedNavigationMetrics.moreWidth
+                - moreWidth
                 - spacing
         )
         var visible = [candidates[0].id]
@@ -559,109 +674,13 @@ private struct HomeCategoryNavigation: View {
     }
 
     var body: some View {
-        GeometryReader { proxy in
-            let currentItems = items
-            let partition = HomeCategoryNavigationLayoutPolicy.partition(
-                candidates: currentItems.map {
-                    HomeCategoryNavigationCandidate(
-                        id: $0.id,
-                        width: Self.measuredWidth(for: $0.title)
-                    )
-                },
-                selectedID: selectedID,
-                availableWidth: max(
-                    0,
-                    proxy.size.width
-                        - HomeBrowseGridMetrics.categoryLeadingInset
-                        - 8
-                )
-            )
-            let itemsByID = Dictionary(
-                uniqueKeysWithValues: currentItems.map { ($0.id, $0) }
-            )
-
-            HStack(spacing: 0) {
-                BrowseSegmentedNavigationContainer {
-                    ForEach(
-                        Array(partition.visibleIDs.enumerated()),
-                        id: \.element
-                    ) { index, id in
-                        if index > 0 {
-                            BrowseSegmentedNavigationDivider()
-                        }
-                        if let item = itemsByID[id] {
-                            categoryButton(item)
-                        }
-                    }
-
-                    if !partition.hiddenIDs.isEmpty {
-                        BrowseSegmentedNavigationDivider()
-                        Menu {
-                            ForEach(partition.hiddenIDs, id: \.self) { id in
-                                if let item = itemsByID[id] {
-                                    Button {
-                                        onSelect(item.categoryID)
-                                    } label: {
-                                        if item.id == selectedID {
-                                            Label(
-                                                item.title,
-                                                systemImage: "checkmark"
-                                            )
-                                        } else {
-                                            Text(item.title)
-                                        }
-                                    }
-                                }
-                            }
-                        } label: {
-                            BrowseSegmentedMoreLabel()
-                        }
-                        .menuIndicator(.hidden)
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
-                        .help(L10n.string("home.categories.more", fallback: "Show %d more categories", partition.hiddenIDs.count))
-                    }
-                }
-
-                Spacer(minLength: 0)
-            }
+        NativeBrowseCategoryNavigationRepresentable(items: items, selectedID: selectedID, onSelect: onSelect)
             .padding(.leading, HomeBrowseGridMetrics.categoryLeadingInset)
             .padding(.trailing, 8)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .frame(height: BrowseSegmentedNavigationMetrics.rowHeight)
+            .frame(height: HomeBrowseGridMetrics.categoryRowHeight)
     }
 
-    private func categoryButton(_ item: Item) -> some View {
-        Button {
-            onSelect(item.categoryID)
-        } label: {
-            BrowseSegmentedNavigationLabel(
-                title: item.title,
-                isSelected: item.id == selectedID
-            )
-        }
-        .buttonStyle(
-            BrowseSegmentedNavigationButtonStyle(
-                isSelected: item.id == selectedID
-            )
-        )
-    }
-
-    private static func measuredWidth(for title: String) -> CGFloat {
-        let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        return BrowseSegmentedNavigationMetrics.segmentWidth(
-            textWidth: (title as NSString)
-                .size(withAttributes: [.font: font])
-                .width
-        )
-    }
-
-    private struct Item: Identifiable {
-        let id: String
-        let title: String
-        let categoryID: String?
-    }
+    private typealias Item = BrowseCategoryNavigationItem
 }
 
 struct HomeActiveFilterToken: Equatable, Identifiable, Sendable {
@@ -1229,7 +1248,6 @@ struct HomeFilterToolbarItem: View {
     let layout: HomeToolbarLayout
 
     @State private var isPresented = false
-    @State private var filterLoadTask: Task<Void, Never>?
 
     private var category: VideoCategory? {
         guard let categoryID = state.selectedCategoryID else { return nil }
@@ -1280,11 +1298,7 @@ struct HomeFilterToolbarItem: View {
             }
         }
         .onChange(of: state.selectedCategoryID) { _ in
-            filterLoadTask?.cancel()
             isPresented = false
-        }
-        .onDisappear {
-            filterLoadTask?.cancel()
         }
     }
 
@@ -1301,20 +1315,7 @@ struct HomeFilterToolbarItem: View {
         categoryID: String,
         filters: [String: String]
     ) {
-        filterLoadTask?.cancel()
-        state.stageCategoryFilters(id: categoryID, filters: filters)
-        filterLoadTask = Task { @MainActor in
-            do {
-                try await Task.sleep(nanoseconds: 150_000_000)
-            } catch {
-                return
-            }
-            guard !Task.isCancelled,
-                  state.selectedCategoryID == categoryID else {
-                return
-            }
-            await state.loadCategory(id: categoryID, filters: filters)
-        }
+        state.scheduleCategoryFilterLoad(id: categoryID, filters: filters)
     }
 }
 
@@ -1500,28 +1501,13 @@ struct HomeRefreshToolbarItem: View {
     let layout: HomeToolbarLayout
 
     var body: some View {
-        Button {
-            Task { await state.refreshHome() }
-        } label: {
-            if state.isLoading || state.isHomeLoading {
-                ProgressView()
-                    .controlSize(.small)
-            } else {
-                Label(L10n.string("common.refresh", fallback: "Refresh"), systemImage: "arrow.clockwise")
-            }
-        }
-        .primaryToolbarIconControl()
-        .disabled(state.currentSite == nil || state.isHomeLoading)
-        .help(
-            layout == .minimal
-                ? L10n.string("home.refresh.compact.help", fallback: "Refresh the current provider (⌘R; this action may move to More)")
-                : L10n.string("home.refresh.help", fallback: "Refresh the current provider (⌘R)")
+        BrowserRefreshToolbarControl(
+            isLoading: state.isLoading || state.isHomeLoading || state.isLoadingNextCategoryPage,
+            error: state.homeLoadErrorMessage ?? state.categoryPaginationError,
+            action: { Task { await state.refreshHomePage() } }
         )
-        .accessibilityLabel(
-            state.isHomeLoading
-                ? L10n.string("home.refreshing", fallback: "Refreshing Current Provider")
-                : L10n.string("home.refresh", fallback: "Refresh Current Provider")
-        )
+        .disabled(state.currentSite == nil)
+
     }
 }
 

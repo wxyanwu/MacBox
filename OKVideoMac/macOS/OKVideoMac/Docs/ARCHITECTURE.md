@@ -2,8 +2,8 @@
 
 ## 模块
 
-- `OKVideoCore`：配置、网络协议、站点 DTO/领域模型、搜索、播放解析状态机、
-  Spider 接口、直播和 XMLTV。
+- `OKVideoCore`：配置、网络协议、站点 DTO/领域模型、搜索/续页、播放解析状态机、
+  Spider 接口、直播、XMLTV 和弹幕匹配/解析。
 - `OKVideoPersistence`：SQLite 连接、迁移和 Repository。
 - `OKVideoMac`：SwiftUI/AppKit、文件选择、WKWebView 和运行时依赖装配。
 - `AndroidRuntimeKit`：Managed Runtime Catalog、检测、下载、事务安装、Generation、
@@ -52,12 +52,43 @@ Native Xtream 通过 `XtreamClient` 和无共享 Cookie/URL 凭据缓存的 API 
 保存在 Keychain；数据库、历史和备份保存描述符与不透明资源引用，播放前才生成 URL。
 Basic Live 使用独立 catalog 与频道引用，恢复只在当前频道格式候选之间进行。
 
+Native Xtream short EPG 以频道和有限时间窗按需加载；XMLTV 使用全局解析代际和
+频道映射。`LiveGuideDemandCoordinator` 把两种来源统一为可见频道附近的 demand，
+限制活跃行、时间片、请求数和并发。节目数据进入固定时间几何的 AppKit 视口，
+日期导航、Now 重定位和刷新都保留经过验证的频道/时间锚点。
+
 `ResolvedMedia.compatibilityPolicy` 默认保持既有行为。Native Live 显式选择独立
 mpv 实例的网络策略；跨策略切换先释放旧实例，请求代际约束异步加载、关闭和事件。
 受控 HLS master 只在内存中存在，不改变其他 Provider 的媒体解析、代理或超时。
 
 UI 使用 `AppLocalizer` 和 String Catalog，持久化稳定语言值，重启后选定语言 bundle。
 翻译不参与站点、频道、影片、历史或搜索会话的身份判定。
+
+## 浏览、资料库与弹幕所有权
+
+分类和搜索续页由 route、query、Provider session 与 continuation 共同标识；详情缓存
+还包含配置/站点/影片身份和授权代际。页面卸载只取消自己拥有的任务，不能清理已经
+替换它的新页面请求。
+
+历史和收藏把展示字段与稳定资源身份分开保存。恢复播放时重新解析原来源并核验
+影片/季集/版本，不使用列表位置推测。删除、完成标记和批量收藏变更在数据库事务中
+执行；播放器写入携带 session ownership，旧 session 不能重建已删除项目。便携备份
+schema v4 只保存可迁移身份，不保存账号凭据或临时媒体会话。
+
+弹幕数据流与媒体启动解耦：
+
+```text
+source declaration / imported XML / configured service
+  -> payload normalization and XML/JSON parsing
+  -> movie + edition + season/episode candidate matching
+  -> stable binding and time calibration
+  -> player-authoritative smoothed media clock
+  -> display-linked lane scheduler
+  -> cached text bitmap composition
+```
+
+每次播放请求和媒体代际拥有自己的弹幕加载与绑定。手动选择高于保存/来源/自动匹配；
+换片、Seek、暂停和缓存不会复用旧的运动状态。弹幕失败不阻塞视频起播。
 
 ## Android Runtime 边界
 
@@ -104,4 +135,6 @@ AVD 和 ADB server 不在清理范围。
 - WebView 使用非持久化数据存储，消息桥只有媒体候选上报。
 - 日志对 Authorization、Cookie、Token、密码和敏感 Query 脱敏。
 - 原始配置只保存一份离线副本；Application Support 目录权限为当前用户独占。
-- Spider 不获得本地文件和 Shell API。
+- QuickJS Spider 只获得显式提供的受限辅助 API，不获得本地文件或 Shell API。
+- Node bundle 在独立子进程中运行并具有 Node 的文件/进程能力；它属于可信配置边界，
+  只应加载用户信任且可核验的 bundle。Android/Dex 代码隔离在私有 Emulator/Bridge。

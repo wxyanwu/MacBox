@@ -649,6 +649,43 @@ struct AndroidBridgeUIRequired: Error {
     }
 }
 
+enum AndroidDexJarCacheFailure: Error, Equatable, LocalizedError, Sendable {
+    case write
+    case download
+    case integrity
+    case cancelled
+
+    init?(bridgeMessage: String) {
+        guard bridgeMessage.hasPrefix("Failure: DEX_CACHE_") else {
+            return nil
+        }
+        if bridgeMessage.hasPrefix("Failure: DEX_CACHE_WRITE:") {
+            self = .write
+        } else if bridgeMessage.hasPrefix("Failure: DEX_CACHE_DOWNLOAD:") {
+            self = .download
+        } else if bridgeMessage.hasPrefix("Failure: DEX_CACHE_INTEGRITY:") {
+            self = .integrity
+        } else if bridgeMessage.hasPrefix("Failure: DEX_CACHE_CANCELLED:") {
+            self = .cancelled
+        } else {
+            return nil
+        }
+    }
+
+    var errorDescription: String? {
+        switch self {
+        case .write:
+            return L10n.string("android.dex-cache.write", fallback: "The local plugin cache could not be updated. Try again.")
+        case .download:
+            return L10n.string("android.dex-cache.download", fallback: "The plugin download was interrupted. Check the connection and try again.")
+        case .integrity:
+            return L10n.string("android.dex-cache.integrity", fallback: "The downloaded plugin did not pass verification. Try again later.")
+        case .cancelled:
+            return L10n.string("android.dex-cache.cancelled", fallback: "The plugin download was cancelled.")
+        }
+    }
+}
+
 /// A TVBox Spider can return an episode token which is valid only while the
 /// exact provider instance that created it remains alive. Treat the provider's
 /// explicit missing-UUID code as lifecycle state, not as a media or network
@@ -756,7 +793,7 @@ final class JavaScriptSpiderSiteProvider: SiteProvider {
         page: Int,
         filters: [String: String]
     ) async throws -> VideoPage {
-        try SpiderResponseMapper.page(
+        try SpiderResponseMapper.categoryPage(
             await session.category(id: id, page: page, filters: filters),
             site: site,
             baseURL: baseURL,
@@ -797,7 +834,7 @@ final class JavaScriptSpiderSiteProvider: SiteProvider {
         guard site.searchable != 0, !quick || site.quickSearch == 1 else {
             return VideoPage(items: [], pagination: Pagination(page: page, pageCount: 0))
         }
-        return try SpiderResponseMapper.page(
+        return try SpiderResponseMapper.searchPage(
             await session.search(keyword: keyword, quick: quick, page: page),
             site: site,
             baseURL: baseURL,
@@ -963,6 +1000,24 @@ enum MyDriveGuardActionContract {
     }
 }
 
+/// A plugin may swallow a transport exception and return an empty home.
+/// Never let that empty result replace a valid snapshot while the guest is offline.
+enum AndroidHomeNetworkLoadPolicy {
+    static func load(
+        checkNetwork: (_ allowRecovery: Bool) async throws -> Void,
+        fetch: () async throws -> SiteHome
+    ) async throws -> SiteHome {
+        try Task.checkCancellation()
+        try await checkNetwork(true)
+        let home = try await fetch()
+        try Task.checkCancellation()
+        if home.categories.isEmpty && home.recommendations.isEmpty && home.actionItems.isEmpty {
+            try await checkNetwork(false)
+        }
+        return home
+    }
+}
+
 final class AndroidDexSpiderSiteProvider: SiteProvider {
     let site: SiteConfiguration
     let capability: SiteCapability = .javaDexSpider
@@ -1014,11 +1069,19 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     }
 
     func home() async throws -> SiteHome {
+        try await AndroidHomeNetworkLoadPolicy.load(
+            checkNetwork: { try await self.bridge.verifyHomeNetwork(allowRecovery: $0) },
+            fetch: { try await self.loadHome() }
+        )
+    }
+
+    private func loadHome() async throws -> SiteHome {
         var values = try await loadHomeValues()
         if Self.shouldResetSpider(
             homeValue: values.home,
             homeVideoValue: values.homeVideo
         ) {
+            try await bridge.verifyHomeNetwork()
             // Guard-style spiders can finish init with an unavailable delegate
             // and then remain cached as an empty provider. Recreate that one
             // site once before treating it as a legitimate search-only site.
@@ -1319,79 +1382,14 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         } else {
             arguments = [.string(keyword), .bool(quick), .string(String(page))]
         }
-        var didRetry = false
-        let value: JSONValue
-        do {
-            value = try await invoke(
-                method: "search",
-                arguments: arguments
-            )
-        } catch {
-            guard page <= 1 else { throw error }
-            await resetSpiderForSearchRetry()
-            didRetry = true
-            value = try await invoke(
-                method: "search",
-                arguments: arguments
-            )
-        }
-
-        var recoveredValue = value
-        if !didRetry, Self.shouldRetrySearch(page: page, value: recoveredValue) {
-            await resetSpiderForSearchRetry()
-            didRetry = true
-            recoveredValue = try await invoke(
-                method: "search",
-                arguments: arguments
-            )
-        }
-        var mapped = try SpiderResponseMapper.page(
-            recoveredValue,
-            site: site,
-            baseURL: baseURL,
-            page: page
+        // Empty search results are valid. In particular, a background search
+        // must never destroy the provider used by an active detail or player.
+        try Task.checkCancellation()
+        let value = try await invoke(method: "search", arguments: arguments)
+        try Task.checkCancellation()
+        return try SpiderResponseMapper.searchPage(
+            value, site: site, baseURL: baseURL, page: page
         )
-        if !didRetry, page <= 1, mapped.items.isEmpty {
-            await resetSpiderForSearchRetry()
-            recoveredValue = try await invoke(
-                method: "search",
-                arguments: arguments
-            )
-            mapped = try SpiderResponseMapper.page(
-                recoveredValue,
-                site: site,
-                baseURL: baseURL,
-                page: page
-            )
-        }
-        return mapped
-    }
-
-    static func shouldRetrySearch(page: Int, value: JSONValue) -> Bool {
-        guard page <= 1 else { return false }
-        if value.nonEmptySpiderValue == nil { return true }
-        switch value {
-        case .array(let values):
-            return values.isEmpty
-        case .object(let object):
-            for key in ["list", "data", "videos"] {
-                guard let nested = object[key] else { continue }
-                if case .array(let values) = nested, values.isEmpty {
-                    return true
-                }
-            }
-            return false
-        default:
-            return false
-        }
-    }
-
-    private func resetSpiderForSearchRetry() async {
-        // Search can be the first call made to a site. Guard spiders such as
-        // WoGG need the same destroy -> home lifecycle recovery used by their
-        // home/category entry points before a second search attempt.
-        _ = try? await invoke(method: "destroy", arguments: [])
-        _ = try? await home()
     }
 
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult {
@@ -2377,6 +2375,18 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         interactionSession = URLSession(configuration: interactionConfiguration)
     }
 
+    func verifyHomeNetwork(allowRecovery: Bool = false) async throws {
+        try await operationAdmission.perform { [self] in
+            try await runtimePrerequisite()
+            if allowRecovery {
+                try await runtime.ensureReady(forceNetworkCheck: true)
+            }
+            // After an empty response, observation must not repair the network
+            // and then mistake the earlier failed result for a valid empty home.
+            try await runtime.verifyHomeNetwork()
+        }
+    }
+
     func runtimeStatus() async -> AndroidRuntimeStatus {
         await runtime.status()
     }
@@ -2803,6 +2813,15 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                 throw ProviderPlaybackError(
                     terminalResponse.error ?? "Spider 没有返回可播放媒体"
                 )
+            }
+            if let bridgeMessage = terminalResponse.error,
+               let cacheFailure = AndroidDexJarCacheFailure(
+                   bridgeMessage: bridgeMessage
+               ) {
+                if cacheFailure == .cancelled {
+                    throw CancellationError()
+                }
+                throw cacheFailure
             }
             throw AppError.spider(
                 Self.userFacingBridgeError(
@@ -5990,8 +6009,8 @@ actor AndroidRuntimeStartupSingleFlight {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.44"
-    static let bridgeVersionCode = 56
+    static let bridgeVersion = "0.3.45"
+    static let bridgeVersionCode = 57
     static let bridgeApplicationID = "com.okvideomac.dexbridge"
     static let bridgeCertificateSHA256 =
         "33e95ef23b662f2629a23df892aaff52ae6216f7492cfb559a63d37247a059e0"
@@ -6942,7 +6961,6 @@ actor AndroidDexBridgeRuntime {
                 )) == true {
                     ready = true
                     acceptsNewerBridge = true
-                    lastNetworkCheck = Date()
                     return .running
                 }
                 return .starting(progress: 0.70)
@@ -8016,7 +8034,7 @@ actor AndroidDexBridgeRuntime {
         )
     }
 
-    func ensureReady() async throws {
+    func ensureReady(forceNetworkCheck: Bool = false) async throws {
         try RuntimeMaintenanceService.requireNoPendingTransaction(layout: AndroidRuntimeLayout(applicationSupportDirectory: applicationSupportDirectory))
         guard !(await Self.startupSingleFlight.isRejectingStartup()) else {
             throw AndroidRuntimeAdmissionError.terminating
@@ -8054,7 +8072,7 @@ actor AndroidDexBridgeRuntime {
                             toolchain: toolchain
                         )
                     }
-                    if let lastNetworkCheck,
+                    if !forceNetworkCheck, let lastNetworkCheck,
                        Date().timeIntervalSince(lastNetworkCheck)
                             < Self.networkCheckInterval {
                         return
@@ -8063,11 +8081,12 @@ actor AndroidDexBridgeRuntime {
                         identity,
                         toolchain: toolchain,
                         acceptVersionMismatch: acceptsNewerBridge
-                    ) {
+                    ), observeNetwork(identity, toolchain: toolchain) {
                         lastNetworkCheck = Date()
                         return
                     }
                 }
+                lastNetworkCheck = nil
                 ready = false
             }
         }
@@ -8121,7 +8140,6 @@ actor AndroidDexBridgeRuntime {
                 acceptVersionMismatch: acceptsNewerBridge
             ) {
                 ready = true
-                lastNetworkCheck = Date()
                 return
             }
             try await Task.sleep(nanoseconds: 250_000_000)
@@ -8486,13 +8504,12 @@ actor AndroidDexBridgeRuntime {
             try configurePortForwards(identity, toolchain: toolchain)
 
             transition(to: .checkingEmulatorNetwork)
-            let networkWasRepaired: Bool
             if let lastNetworkCheck,
                Date().timeIntervalSince(lastNetworkCheck)
                     < Self.networkCheckInterval {
-                networkWasRepaired = false
+                // The most recent route observation is still fresh.
             } else {
-                networkWasRepaired = try await ensureEmulatorNetwork(
+                _ = try await ensureEmulatorNetwork(
                     identity,
                     toolchain: toolchain,
                     allowRecoveryCommand: retryKnownFailedNetworkCommand
@@ -8518,7 +8535,6 @@ actor AndroidDexBridgeRuntime {
                     ) {
                         ready = true
                         acceptsNewerBridge = true
-                        lastNetworkCheck = Date()
                         lastFailure = nil
                         lastSuccessfulStartAt = Date()
                         try await verifyAndRecordBridgeContinuity()
@@ -8535,7 +8551,7 @@ actor AndroidDexBridgeRuntime {
                         + "但启动验证失败；为保留网盘登录数据，未执行降级或卸载"
                 )
             }
-            if !forceInstall, !networkWasRepaired,
+            if !forceInstall,
                !requiresBundledInstall,
                try await isHealthy(
                     identity,
@@ -8548,7 +8564,6 @@ actor AndroidDexBridgeRuntime {
                 )
                 ready = true
                 acceptsNewerBridge = hasNewerBridge
-                lastNetworkCheck = Date()
                 lastFailure = nil
                 lastSuccessfulStartAt = Date()
                 try await verifyAndRecordBridgeContinuity()
@@ -8598,7 +8613,6 @@ actor AndroidDexBridgeRuntime {
                 if try await isHealthy(identity, toolchain: toolchain) {
                     ready = true
                     acceptsNewerBridge = false
-                    lastNetworkCheck = Date()
                     lastFailure = nil
                     lastSuccessfulStartAt = Date()
                     try await verifyAndRecordBridgeContinuity()
@@ -8626,7 +8640,6 @@ actor AndroidDexBridgeRuntime {
                 if try await isHealthy(identity, toolchain: toolchain) {
                     ready = true
                     acceptsNewerBridge = false
-                    lastNetworkCheck = Date()
                     lastFailure = nil
                     lastSuccessfulStartAt = Date()
                     try await verifyAndRecordBridgeContinuity()
@@ -8772,6 +8785,32 @@ actor AndroidDexBridgeRuntime {
         }
     }
 
+    /// Force a fresh observation for home publication, even within the normal
+    /// readiness TTL. Recheck briefly without disrupting playback or login UI.
+    func verifyHomeNetwork() async throws {
+        for attempt in 0..<3 {
+            try Task.checkCancellation()
+            guard maintenanceStopToken == nil,
+                  !(await Self.startupSingleFlight.isRejectingStartup()),
+                  let identity = loadIdentity(),
+                  let toolchain = resolver().toolchain(at: identity.sdkRoot),
+                  observeRuntimeOwnership(identity, toolchain: toolchain).deviceOwned else {
+                throw AppError.spider("Android 运行实例不可用，请重试")
+            }
+            if observeNetwork(identity, toolchain: toolchain) {
+                lastNetworkCheck = Date()
+                return
+            }
+            lastNetworkCheck = nil
+            if attempt < 2 {
+                try await Task.sleep(nanoseconds: AndroidRuntimeRecoveryPolicy.networkPollNanoseconds)
+            }
+        }
+        appendEvent(stage: .checkingEmulatorNetwork, event: "home_network_unavailable",
+                    detail: "IPv4 gateway route missing; home publication rejected")
+        throw AppError.spider("Android 兼容运行时网络未就绪，首页暂时无法加载。请重试；若仍失败，请退出并重新打开应用。")
+    }
+
     private func ensureEmulatorNetwork(
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain,
@@ -8907,14 +8946,7 @@ actor AndroidDexBridgeRuntime {
     }
 
     static func hasUsableDefaultRoute(_ routes: String) -> Bool {
-        routes.split(whereSeparator: \.isNewline).contains { line in
-            let value = String(line)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased()
-            return value.hasPrefix("default ")
-                && value.contains(" via ")
-                && !value.contains(" dev dummy")
-        }
+        defaultGateway(from: routes) != nil
     }
 
     static func containsSecurityException(_ output: String) -> Bool {
@@ -8944,12 +8976,21 @@ actor AndroidDexBridgeRuntime {
     }
 
     static func defaultGateway(from routes: String) -> String? {
+        // This managed emulator uses an IPv4 host gateway and DNS proxy.
+        // An IPv6 RA can survive failed IPv4 provisioning; it is not proof
+        // that the private guest can reach its host or resolve plugin hosts.
         for line in routes.split(whereSeparator: \.isNewline) {
             let parts = line.split(whereSeparator: \.isWhitespace).map(String.init)
             guard parts.first == "default",
-                  let via = parts.firstIndex(of: "via"),
-                  parts.indices.contains(via + 1) else { continue }
-            return parts[via + 1]
+                  !parts.contains("linkdown"),
+                  let via = parts.firstIndex(of: "via"), parts.indices.contains(via + 1),
+                  let dev = parts.firstIndex(of: "dev"), parts.indices.contains(dev + 1),
+                  !parts[dev + 1].hasPrefix("dummy"), parts[dev + 1] != "lo" else { continue }
+            let gateway = parts[via + 1]
+            var address = in_addr()
+            if inet_pton(AF_INET, gateway, &address) == 1, gateway != "0.0.0.0" {
+                return gateway
+            }
         }
         return nil
     }

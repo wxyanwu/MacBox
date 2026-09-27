@@ -4,9 +4,10 @@ import OKVideoCore
 import SwiftUI
 
 private enum DetailPageLayout {
-    static let maximumContentWidth: CGFloat = 1120
+    static let maximumContentWidth: CGFloat = 1600
     static let horizontalPadding: CGFloat = 28
-    static let posterWidth: CGFloat = 172
+    static let readingWidth: CGFloat = 620
+    static let posterWidth: CGFloat = 192
     static let coordinateSpaceName = "browser-detail-scroll"
 }
 
@@ -14,53 +15,67 @@ struct DetailLoadingView: View {
     let summary: VideoSummary
 
     var body: some View {
-        ScrollView {
-            BrowserToolbarScrollMarker(
-                coordinateSpaceName: DetailPageLayout.coordinateSpaceName
-            )
-            HStack(alignment: .top, spacing: 26) {
-                DetailPosterView(summary: summary)
-                    .frame(width: DetailPageLayout.posterWidth)
-
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(summary.title)
-                        .font(.system(size: 30, weight: .bold))
-                        .lineLimit(3)
-                    Label(summary.siteName, systemImage: "network")
-                        .foregroundColor(.secondary)
-                    if let remarks = VideoCardMetadata.secondaryText(
-                        from: summary.remarks
-                    ) {
-                        Text(remarks)
-                            .foregroundColor(.secondary)
-                    }
-                    HStack(spacing: 10) {
-                        AppActivityIndicator(size: .small)
-                        Text(L10n.string("detail.loading", fallback: "Loading details and streams…"))
-                            .foregroundColor(.secondary)
-                    }
+        GeometryReader { viewport in
+            ScrollView {
+                BrowserToolbarScrollMarker(
+                    coordinateSpaceName: DetailPageLayout.coordinateSpaceName
+                )
+                DetailHeroHeader(summary: summary, availableWidth: min(viewport.size.width, DetailPageLayout.maximumContentWidth), description: {
+                    DetailRequestStatusView()
                     .padding(.top, 12)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("detail.loading-status")
+                }, actions: {
+                    Color.clear.frame(height: 32).accessibilityHidden(true)
+                })
+                .frame(maxWidth: DetailPageLayout.maximumContentWidth)
+                .frame(maxWidth: .infinity, alignment: .top)
             }
-            .frame(maxWidth: DetailPageLayout.maximumContentWidth)
-            .padding(.horizontal, DetailPageLayout.horizontalPadding)
-            .padding(.vertical, 30)
-            .frame(maxWidth: .infinity, alignment: .top)
+            .browserToolbarScrollSurface(named: DetailPageLayout.coordinateSpaceName)
         }
-        .browserToolbarScrollSurface(named: DetailPageLayout.coordinateSpaceName)
         .background(AppSurfacePalette.background.ignoresSafeArea())
     }
 }
 
-/// The route hosts this control alongside Back so changing detail content
-/// never replaces the window's navigation toolbar.
+struct DetailRequestStatusView: View {
+    @EnvironmentObject private var state: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if state.detailLoadState == .loading {
+                HStack(spacing: 12) {
+                    AppActivityIndicator(size: .regular)
+                    Text(L10n.string("detail.loading", fallback: "Loading details and streams…"))
+                }
+            } else if let message = state.detailLoadState.message {
+                Text(message).textSelection(.enabled)
+                HStack {
+                    Button(L10n.string("common.retry", fallback: "Retry")) {
+                        Task { await state.refreshDetail() }
+                    }
+                    .disabled(state.isRefreshingDetail)
+                    if state.detailSuggestedSearch != nil {
+                        Button(L10n.string("detail.continue-search", fallback: "Continue Searching")) {
+                            state.continueDetailSearch()
+                        }
+                    }
+                }
+            }
+        }
+        .font(.callout)
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: 620, alignment: .leading)
+        .accessibilityIdentifier("detail.request-status")
+    }
+}
+
+/// A secondary action beside the primary Play button.
 struct DetailFavoriteButton: View {
     @EnvironmentObject private var state: AppState
     let detail: VideoDetail
 
     private var isFavorite: Bool {
-        state.favorites.contains { $0.id == detail.summary.id }
+        state.isFavorite(detail)
     }
 
     private var title: String {
@@ -71,13 +86,95 @@ struct DetailFavoriteButton: View {
 
     var body: some View {
         Button {
-            Task { await state.toggleFavorite(detail) }
+            let desired = !isFavorite
+            Task { await state.setFavorite(detail, isFavorite: desired) }
         } label: {
             Label(title, systemImage: isFavorite ? "star.fill" : "star")
         }
+        .disabled(!state.canChangeFavorite(detail))
         .help(title)
         .accessibilityLabel(title)
+        if state.pendingFavoriteRepairID != nil {
+            Button(L10n.string("favorites.repair.link", fallback: "Associate with Saved Favorite")) { state.confirmFavoriteRepair(detail) }
+            Button(L10n.string(.commonCancel)) { state.cancelFavoriteRepair() }
+        }
     }
+}
+
+/// Default system control: no custom timeline or rotation animation.
+struct DetailRefreshButton: NSViewRepresentable {
+    let isLoading: Bool
+    var title: String = L10n.string("common.refresh", fallback: "Refresh")
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> DetailRefreshControl {
+        let view = DetailRefreshControl()
+        view.update(isLoading: isLoading, title: title, action: action)
+        return view
+    }
+
+    func updateNSView(_ view: DetailRefreshControl, context: Context) {
+        view.update(isLoading: isLoading, title: title, action: action)
+    }
+}
+
+/// Keep a single toolbar view across state changes. Replacing a SwiftUI
+/// toolbar's root Button with ProgressView can leave its AppKit item stale.
+final class DetailRefreshControl: NSView {
+    let refreshButton = NSButton()
+    let progressIndicator = NSProgressIndicator()
+    private var onRefresh: () -> Void = {}
+
+    init() {
+        let size = PrimaryToolbarMetrics.iconControlSize
+        super.init(frame: NSRect(x: 0, y: 0, width: size, height: size))
+        refreshButton.title = ""
+        refreshButton.bezelStyle = .texturedRounded
+        refreshButton.isBordered = false
+        refreshButton.imagePosition = .imageOnly
+        refreshButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
+        refreshButton.toolTip = L10n.string("common.refresh", fallback: "Refresh")
+        refreshButton.setAccessibilityLabel(refreshButton.toolTip)
+        refreshButton.setAccessibilityIdentifier("detail.refresh")
+        refreshButton.target = self
+        refreshButton.action = #selector(refresh)
+        progressIndicator.style = .spinning
+        progressIndicator.controlSize = .small
+        progressIndicator.isIndeterminate = true
+        progressIndicator.isDisplayedWhenStopped = false
+        progressIndicator.setAccessibilityLabel(L10n.string("browser.refresh.loading", fallback: "Loading…"))
+        for child in [refreshButton, progressIndicator] as [NSView] {
+            child.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(child)
+            NSLayoutConstraint.activate([
+                child.centerXAnchor.constraint(equalTo: centerXAnchor),
+                child.centerYAnchor.constraint(equalTo: centerYAnchor)
+            ])
+        }
+        NSLayoutConstraint.activate([
+            refreshButton.widthAnchor.constraint(equalToConstant: size),
+            refreshButton.heightAnchor.constraint(equalToConstant: size)
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: PrimaryToolbarMetrics.iconControlSize, height: PrimaryToolbarMetrics.iconControlSize)
+    }
+
+    func update(isLoading: Bool, title: String = L10n.string("common.refresh", fallback: "Refresh"), action: @escaping () -> Void) {
+        onRefresh = action
+        refreshButton.toolTip = title
+        refreshButton.setAccessibilityLabel(title)
+        refreshButton.isHidden = isLoading
+        refreshButton.isEnabled = !isLoading
+        progressIndicator.isHidden = !isLoading
+        if isLoading { progressIndicator.startAnimation(nil) }
+        else { progressIndicator.stopAnimation(nil) }
+    }
+
+    @objc private func refresh() { onRefresh() }
 }
 
 struct DetailView: View {
@@ -95,38 +192,38 @@ struct DetailView: View {
     @State private var showsFullSynopsis = false
 
     var body: some View {
-        ScrollView {
-            BrowserToolbarScrollMarker(
-                coordinateSpaceName: DetailPageLayout.coordinateSpaceName
-            )
-            VStack(alignment: .leading, spacing: 0) {
-                detailHero
+        GeometryReader { viewport in
+            ScrollView {
+                BrowserToolbarScrollMarker(
+                    coordinateSpaceName: DetailPageLayout.coordinateSpaceName
+                )
+                VStack(alignment: .leading, spacing: 0) {
+                    detailHero(availableWidth: min(viewport.size.width, DetailPageLayout.maximumContentWidth))
 
-                if !detailFacts.isEmpty {
-                    Divider()
-                        .padding(.horizontal, DetailPageLayout.horizontalPadding)
-                    detailFactStrip
+                    if !detailFacts.isEmpty {
+                        Divider().padding(.horizontal, DetailPageLayout.horizontalPadding)
+                        detailFactStrip(availableWidth: min(viewport.size.width, DetailPageLayout.maximumContentWidth))
+                    }
+
+                    Divider().padding(.horizontal, DetailPageLayout.horizontalPadding)
+
+                    if detail.playSources.isEmpty {
+                        EmptyStateView(
+                            systemImage: "play.slash",
+                            title: L10n.string("detail.no-streams.title", fallback: "No Streams"),
+                            message: L10n.string("detail.no-streams.message", fallback: "This provider did not return any playable episodes.")
+                        )
+                        .frame(minHeight: 260)
+                    } else {
+                        playbackBrowser
+                    }
                 }
-
-                Divider()
-                    .padding(.horizontal, DetailPageLayout.horizontalPadding)
-
-                if detail.playSources.isEmpty {
-                    EmptyStateView(
-                        systemImage: "play.slash",
-                        title: L10n.string("detail.no-streams.title", fallback: "No Streams"),
-                        message: L10n.string("detail.no-streams.message", fallback: "This provider did not return any playable episodes.")
-                    )
-                    .frame(minHeight: 260)
-                } else {
-                    playbackBrowser
-                }
+                .frame(maxWidth: DetailPageLayout.maximumContentWidth)
+                .frame(maxWidth: .infinity, alignment: .top)
+                .padding(.bottom, 30)
             }
-            .frame(maxWidth: DetailPageLayout.maximumContentWidth)
-            .frame(maxWidth: .infinity, alignment: .top)
-            .padding(.bottom, 30)
+            .browserToolbarScrollSurface(named: DetailPageLayout.coordinateSpaceName)
         }
-        .browserToolbarScrollSurface(named: DetailPageLayout.coordinateSpaceName)
         .background(AppSurfacePalette.background.ignoresSafeArea())
         .onAppear {
             performInitialSelection()
@@ -136,8 +233,14 @@ struct DetailView: View {
                 state.recordDetailFirstRender(detail)
             }
         }
-        .task(id: selectedSource?.id) {
+        .task(id: "\(state.detailRevision):\(selectedSource?.id ?? "")") {
             await prepareSelectedSourceEpisodes()
+        }
+        .onChange(of: state.detailRevision) { _ in
+            DispatchQueue.main.async { state.recordDetailFirstRender(detail) }
+            if let index = detail.playSources.firstIndex(where: { $0.name == lastPlaySourceName }) {
+                if selectedSourceIndex != index { selectedSourceIndex = index }
+            } else { performInitialSelection() }
         }
         .onChange(of: selectedSourceIndex) { newValue in
             guard detail.playSources.indices.contains(newValue) else { return }
@@ -151,73 +254,11 @@ struct DetailView: View {
         }
     }
 
-    private var detailHero: some View {
-        HStack(alignment: .top, spacing: 26) {
-            DetailPosterView(summary: detail.summary)
-                .frame(width: DetailPageLayout.posterWidth)
-
-            VStack(alignment: .leading, spacing: 12) {
-                Text(detail.summary.title)
-                    .font(.system(size: 30, weight: .bold))
-                    .lineLimit(3)
-
-                HStack(spacing: 7) {
-                    DetailMetadataBadge(
-                        title: detail.summary.siteName,
-                        systemImage: "network"
-                    )
-                    if let year = detail.summary.year?.trimmedNonEmpty {
-                        DetailMetadataBadge(
-                            title: year,
-                            systemImage: "calendar"
-                        )
-                    }
-                    if let category = detail.summary.categoryName?.trimmedNonEmpty {
-                        DetailMetadataBadge(
-                            title: category,
-                            systemImage: "tag"
-                        )
-                    }
-                }
-
-                if let synopsis = detail.synopsis?.trimmedNonEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(synopsis)
-                            .font(.callout)
-                            .foregroundColor(.secondary)
-                            .lineLimit(showsFullSynopsis ? nil : 3)
-                        if synopsis.count > 120 {
-                            DetailExpandButton(
-                                isExpanded: showsFullSynopsis,
-                                expandTitle: L10n.string("common.more", fallback: "More"),
-                                collapseTitle: L10n.string("common.collapse", fallback: "Show Less")
-                            ) {
-                                showsFullSynopsis.toggle()
-                            }
-                        }
-                    }
-                }
-
-                if let actors = displayActors {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(L10n.string("detail.cast", fallback: "Cast"))
-                            .font(.callout.weight(.semibold))
-                        Text(actors)
-                            .font(.callout)
-                            .foregroundColor(.secondary)
-                            .lineLimit(showsAllActors ? nil : 2)
-                        if actors.count > 90 {
-                            DetailExpandButton(
-                                isExpanded: showsAllActors,
-                                expandTitle: L10n.string("common.more", fallback: "More"),
-                                collapseTitle: L10n.string("common.collapse", fallback: "Show Less")
-                            ) {
-                                showsAllActors.toggle()
-                            }
-                        }
-                    }
-                }
-
+    private func detailHero(availableWidth: CGFloat) -> some View {
+        DetailHeroHeader(summary: detail.summary, availableWidth: availableWidth, description: {
+            detailDescription
+        }, actions: {
+            HStack(spacing: 10) {
                 Button(action: playPrimaryEpisode) {
                     Label(L10n.string("common.play", fallback: "Play"), systemImage: "play.fill")
                 }
@@ -229,23 +270,47 @@ struct DetailView: View {
                         ? L10n.string("detail.no-playable-episode", fallback: "No playable episodes")
                         : L10n.string("detail.play-first", fallback: "Play the first available episode")
                 )
+                DetailFavoriteButton(detail: detail)
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.horizontal, DetailPageLayout.horizontalPadding)
-        .padding(.vertical, 26)
+            .accessibilityIdentifier("detail.primary-actions")
+        })
     }
 
-    private var detailFactStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+    private var detailDescription: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let synopsis = detail.synopsis?.trimmedNonEmpty {
+                DetailSummaryText(title: L10n.string("detail.synopsis-title", fallback: "Synopsis"), text: synopsis, lines: 3,
+                    isExpanded: $showsFullSynopsis)
+                    .accessibilityIdentifier("detail.synopsis")
+            }
+            if let actors = displayActors {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(L10n.string("detail.cast", fallback: "Cast"))
+                        .font(.callout.weight(.semibold))
+                    DetailSummaryText(title: L10n.string("detail.cast", fallback: "Cast"), text: actors, lines: 1,
+                        isExpanded: $showsAllActors)
+                }
+            }
+
+        }
+        .frame(maxWidth: DetailPageLayout.readingWidth, alignment: .leading)
+    }
+
+    private func detailFactStrip(availableWidth: CGFloat) -> some View {
+        let facts = detailFacts
+        let cellWidth = max(154, (availableWidth - 2 * DetailPageLayout.horizontalPadding) / CGFloat(max(1, facts.count)))
+        return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 0) {
-                ForEach(Array(detailFacts.enumerated()), id: \.element.id) {
-                    index, fact in
+                ForEach(Array(facts.enumerated()), id: \.element.id) { index, fact in
                     DetailFactCell(fact: fact)
-                    if index < detailFacts.count - 1 {
-                        Divider()
-                            .frame(height: 54)
-                    }
+                        .frame(width: cellWidth)
+                        .overlay(alignment: .trailing) {
+                            if index < facts.count - 1 {
+                                Color(nsColor: .separatorColor).frame(width: 1, height: 54)
+                            }
+                        }
                 }
             }
             .padding(.vertical, 16)
@@ -295,6 +360,7 @@ struct DetailView: View {
                                         isSelected: selectedSourceIndex == index
                                     )
                                 )
+                                .accessibilityIdentifier("detail.source.\(index)")
                                 .id(index)
                             }
                         }
@@ -305,9 +371,7 @@ struct DetailView: View {
                         sourceProxy.scrollTo(selectedSourceIndex, anchor: .center)
                     }
                     .onChange(of: selectedSourceIndex) { selectedIndex in
-                        withAnimation(.easeOut(duration: 0.16)) {
-                            sourceProxy.scrollTo(selectedIndex, anchor: .center)
-                        }
+                        sourceProxy.scrollTo(selectedIndex, anchor: .center)
                     }
                 }
 
@@ -372,15 +436,18 @@ struct DetailView: View {
 
     @ViewBuilder
     private var episodeContent: some View {
+        let visible = filteredPresentations
+        let regular = visible.filter { $0.episodeNumber != nil }
+        let other = visible.filter { $0.episodeNumber == nil }
         if isPreparingEpisodes {
             VStack(spacing: 10) {
-                AppActivityIndicator(size: .small)
+                ProgressView().progressViewStyle(.circular).controlSize(.small)
                 Text(L10n.string("detail.organizing-episodes", fallback: "Organizing %d episodes…", selectedSource?.episodes.count ?? 0))
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
             .frame(maxWidth: .infinity, minHeight: 180)
-        } else if filteredPresentations.isEmpty {
+        } else if visible.isEmpty {
             EmptyStateView(
                 systemImage: "magnifyingglass",
                 title: L10n.string("detail.no-matching-episodes.title", fallback: "No Matching Episodes"),
@@ -388,22 +455,22 @@ struct DetailView: View {
             )
         } else {
             VStack(alignment: .leading, spacing: 18) {
-                if !regularPresentations.isEmpty {
+                if !regular.isEmpty {
                     EpisodeSection(
                         title: L10n.string("detail.episodes", fallback: "Episodes"),
-                        episodes: regularPresentations,
+                        episodes: regular,
                         onPlay: playSelectedEpisode
                     )
                 }
 
-                if !otherPresentations.isEmpty {
+                if !other.isEmpty {
                     EpisodeSection(
                         title: isSingleEpisode
                             ? L10n.string("common.play", fallback: "Play")
-                            : regularPresentations.isEmpty
+                            : regular.isEmpty
                                 ? L10n.string("detail.playable-resources", fallback: "Playable Resources")
                                 : L10n.string("detail.other-resources", fallback: "Other Resources"),
-                        episodes: otherPresentations,
+                        episodes: other,
                         onPlay: playSelectedEpisode
                     )
                 }
@@ -422,6 +489,14 @@ struct DetailView: View {
                 systemImage: "network"
             )
         ]
+        if let area = detail.area?.trimmedNonEmpty {
+            facts.append(DetailFact(title: L10n.string("detail.area", fallback: "Region"),
+                value: area, systemImage: "globe"))
+        }
+        if let director = SpiderDisplayTextNormalizer.people(detail.director) {
+            facts.append(DetailFact(title: L10n.string("detail.director", fallback: "Director"),
+                value: director, systemImage: "person"))
+        }
         if let year = detail.summary.year?.trimmedNonEmpty {
             facts.append(
                 DetailFact(title: L10n.string("detail.year", fallback: "Year"), value: year, systemImage: "calendar")
@@ -482,14 +557,6 @@ struct DetailView: View {
         }
     }
 
-    private var regularPresentations: [EpisodePresentation] {
-        filteredPresentations.filter { $0.episodeNumber != nil }
-    }
-
-    private var otherPresentations: [EpisodePresentation] {
-        filteredPresentations.filter { $0.episodeNumber == nil }
-    }
-
     private var rangeOptions: [EpisodeRangeOption] {
         preparedRangeOptions
     }
@@ -525,11 +592,16 @@ struct DetailView: View {
         isPreparingEpisodes = true
         let snapshot = await EpisodePresentationRepository.shared.snapshot(
             videoID: detail.summary.id,
-            source: source
+            source: source,
+            categoryName: detail.summary.categoryName
         )
         guard !Task.isCancelled, selectedSource?.id == sourceID else { return }
         preparedPresentations = snapshot.values
         preparedRangeOptions = snapshot.rangeOptions
+        if let rangeID = selectedRangeID,
+           !snapshot.rangeOptions.contains(where: { $0.id == rangeID }) {
+            selectedRangeID = nil
+        }
         if selectedRangeID == nil,
            EpisodeInitialRangePolicy.shouldSelectRecentRange(
                episodeCount: snapshot.values.count,
@@ -593,8 +665,9 @@ private struct DetailFactCell: View {
                 .font(.headline)
                 .lineLimit(1)
         }
-        .frame(width: 154)
-        .frame(minHeight: 54)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, minHeight: 54)
+        .help(fact.value)
     }
 }
 
@@ -623,7 +696,7 @@ private struct DetailExpandButton: View {
         Button(isExpanded ? collapseTitle : expandTitle, action: action)
             .buttonStyle(.plain)
             .font(.caption)
-            .foregroundColor(.accentColor)
+            .foregroundColor(.primary)
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
             .appInteractiveHover(cornerRadius: 6)
@@ -728,9 +801,14 @@ struct EpisodePresentationSnapshot: Sendable {
     let values: [EpisodePresentation]
     let valuesByEpisodeID: [String: EpisodePresentation]
     let rangeOptions: [EpisodeRangeOption]
+    let playbackOrder: [PlayEpisode]
+    let versionOrders: [String: [PlayEpisode]]
 }
 
 private struct EpisodePresentationRepositoryKey: Hashable, Sendable {
+    let rulesVersion: Int = PlaybackResourceAnalyzer.rulesVersion
+    let localeIdentifier: String = L10n.locale.identifier
+    let categoryName: String?
     let videoID: String
     let sourceID: String
     let episodeCount: Int
@@ -741,30 +819,37 @@ private struct EpisodePresentationRepositoryKey: Hashable, Sendable {
 actor EpisodePresentationRepository {
     static let shared = EpisodePresentationRepository()
 
+    private struct CachedSnapshot {
+        let source: PlaySource
+        let snapshot: EpisodePresentationSnapshot
+    }
     private var snapshots: [
-        EpisodePresentationRepositoryKey: EpisodePresentationSnapshot
+        EpisodePresentationRepositoryKey: CachedSnapshot
     ] = [:]
     private let capacity = 24
 
     func snapshot(
         videoID: String,
-        source: PlaySource
+        source: PlaySource,
+        categoryName: String? = nil
     ) -> EpisodePresentationSnapshot {
         let key = EpisodePresentationRepositoryKey(
+            categoryName: categoryName,
             videoID: videoID,
             sourceID: source.id,
             episodeCount: source.episodes.count,
             firstEpisodeID: source.episodes.first?.id,
             lastEpisodeID: source.episodes.last?.id
         )
-        if let snapshot = snapshots[key] {
-            return snapshot
+        if let cached = snapshots[key], cached.source == source {
+            return cached.snapshot
         }
 
         let values = EpisodeListPresentation.presentations(
             from: source.episodes,
             query: "",
-            sortOrder: .sourceOrder
+            sortOrder: .sourceOrder,
+            categoryName: categoryName
         )
         let snapshot = EpisodePresentationSnapshot(
             values: values,
@@ -772,12 +857,14 @@ actor EpisodePresentationRepository {
                 values.map { ($0.id, $0) },
                 uniquingKeysWith: { current, _ in current }
             ),
-            rangeOptions: EpisodeListPresentation.rangeOptions(from: values)
+            rangeOptions: EpisodeListPresentation.rangeOptions(from: values),
+            playbackOrder: PlayerEpisodeAdvancePolicy.orderedEpisodes(in: source.episodes, categoryName: categoryName),
+            versionOrders: PlayerEpisodeAdvancePolicy.versionOrders(in: source.episodes, categoryName: categoryName)
         )
         if snapshots.count >= capacity, let oldestKey = snapshots.keys.first {
             snapshots.removeValue(forKey: oldestKey)
         }
-        snapshots[key] = snapshot
+        snapshots[key] = CachedSnapshot(source: source, snapshot: snapshot)
         return snapshot
     }
 }
@@ -791,20 +878,6 @@ enum EpisodeInitialRangePolicy {
     ) -> Bool {
         episodeCount > largeEpisodeThreshold && rangeCount > 1
     }
-}
-
-private struct EpisodeSequenceCandidate: Hashable {
-    enum Key: Hashable {
-        case seasonEpisode(Int)
-        case episodeCode
-        case explicitUnit
-        case bareUnit
-        case numericSlot(Int)
-    }
-
-    let key: Key
-    let number: Int
-    let seasonNumber: Int?
 }
 
 private struct EpisodeRangePicker: View {
@@ -1136,24 +1209,6 @@ enum DetailEpisodeOriginalNameActions {
     }
 }
 
-private final class EpisodeRegexCache: @unchecked Sendable {
-    static let shared = EpisodeRegexCache()
-
-    private let cache = NSCache<NSString, NSRegularExpression>()
-
-    func regex(for pattern: String) -> NSRegularExpression? {
-        let key = pattern as NSString
-        if let regex = cache.object(forKey: key) {
-            return regex
-        }
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return nil
-        }
-        cache.setObject(regex, forKey: key)
-        return regex
-    }
-}
-
 private struct DetailEpisodeButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         DetailEpisodeButtonBody(configuration: configuration)
@@ -1199,468 +1254,89 @@ private struct DetailEpisodeButtonBody: View {
 }
 
 enum EpisodeNameParser {
-    static func presentation(
-        for episode: PlayEpisode,
-        sourceIndex: Int = 0
-    ) -> EpisodePresentation {
-        let original = episode.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let nameCandidate = original.isEmpty ? episode.url : original
-        let compact = compactName(nameCandidate)
-        let isMediaFilename = firstMatch(
-            in: nameCandidate,
-            pattern: #"(?i)\.(?:mkv|mp4|m4v|mov|avi|ts|m2ts|flv|webm)(?:$|[?#\s【\[])"#
-        ) != nil
-
-        if let special = specialName(in: compact) {
-            return EpisodePresentation(
-                episode: episode,
-                displayName: special,
-                originalName: original.isEmpty ? compact : original,
-                seasonNumber: nil,
-                episodeNumber: nil,
-                isSpecial: true,
-                sourceIndex: sourceIndex
-            )
-        }
-
-        if let values = captures(
-            in: compact,
-            pattern: #"(?i)(?:^|[^A-Z0-9])S(\d{1,2})[ ._-]*E(\d{1,4})(?:[^0-9]|$)"#,
-            captureCount: 2
-        ), let season = Int(values[0]), let number = Int(values[1]) {
-            return EpisodePresentation(
-                episode: episode,
-                displayName: L10n.string("episode.season-and-number", fallback: "Season %d · Episode %d", season, number),
-                originalName: original.isEmpty ? compact : original,
-                seasonNumber: season,
-                episodeNumber: number,
-                isSpecial: false,
-                sourceIndex: sourceIndex
-            )
-        }
-
-        // Some providers append the series description after the real file name,
-        // for example: "05.mp4【你好，旧时光.全30集】".  Read the number
-        // immediately before the media extension before considering descriptive
-        // text such as "全30集", otherwise every item is mislabeled as episode 30.
-        if isMediaFilename, let values = captures(
-            in: compact,
-            pattern: #"(?i)(?:^|[/\\._\-\]\s])(\d{1,4})(?=\.(?:mkv|mp4|m4v|mov|avi|ts|m2ts|flv|webm)(?:$|[?#\s【\[]))"#,
-            captureCount: 1
-        ), let number = Int(values[0]), (1...999).contains(number) {
-            return regularPresentation(
-                episode: episode,
-                compact: compact,
-                original: original,
-                number: number,
-                displayName: L10n.string("episode.number", fallback: "Episode %d", number),
-                sourceIndex: sourceIndex
-            )
-        }
-
-        if let values = captures(
-            in: compact,
-            pattern: #"(?i)(?:^|[^A-Z])(?:EP|E)[ ._-]*(\d{1,4})(?:[^0-9]|$)"#,
-            captureCount: 1
-        ), let number = Int(values[0]) {
-            return regularPresentation(
-                episode: episode,
-                compact: compact,
-                original: original,
-                number: number,
-                displayName: L10n.string("episode.number", fallback: "Episode %d", number),
-                sourceIndex: sourceIndex
-            )
-        }
-
-        if let values = captures(
-            in: compact,
-            pattern: #"(?:^|[^全共\d])第?\s*(\d{1,4})\s*(集|话)"#,
-            captureCount: 2
-        ), let number = Int(values[0]) {
-            let unit = values[1] == "话" ? "话" : "集"
-            return regularPresentation(
-                episode: episode,
-                compact: compact,
-                original: original,
-                number: number,
-                displayName: L10n.string(
-                    unit == "话" ? "episode.number.chapter" : "episode.number",
-                    fallback: unit == "话" ? "Chapter %d" : "Episode %d",
-                    number
-                ),
-                sourceIndex: sourceIndex
-            )
-        }
-
-        if let values = captures(
-            in: compact,
-            pattern: #"^(\d{1,4})$"#,
-            captureCount: 1
-        ), let number = Int(values[0]), (1...999).contains(number) {
-            return regularPresentation(
-                episode: episode,
-                compact: compact,
-                original: original,
-                number: number,
-                displayName: L10n.string("episode.number", fallback: "Episode %d", number),
-                sourceIndex: sourceIndex
-            )
-        }
-
-        if isMediaFilename, let values = captures(
-            in: compact,
-            pattern: #"(?:^|[._\-\s])(\d{1,4})$"#,
-            captureCount: 1
-        ), let number = Int(values[0]), (1...999).contains(number) {
-            return regularPresentation(
-                episode: episode,
-                compact: compact,
-                original: original,
-                number: number,
-                displayName: L10n.string("episode.number", fallback: "Episode %d", number),
-                sourceIndex: sourceIndex
-            )
-        }
-
-        return EpisodePresentation(
-            episode: episode,
-            displayName: compact,
-            originalName: original.isEmpty ? compact : original,
-            seasonNumber: nil,
-            episodeNumber: nil,
-            isSpecial: false,
-            sourceIndex: sourceIndex
-        )
+    static func compactName(_ value: String) -> String {
+        let name = PlaybackResourceAnalyzer.compactName(value)
+        return name.isEmpty ? L10n.string("detail.unnamed-resource", fallback: "Unnamed Resource") : name
     }
 
-    static func compactName(_ rawValue: String) -> String {
-        var value = rawValue.removingPercentEncoding ?? rawValue
-        if let mediaMatch = firstMatch(
-            in: value,
-            pattern: #"(?i)\.(?:mkv|mp4|m4v|mov|avi|ts|m2ts|flv|webm|m3u8)(?=$|[?#\s【\[])"#
-        ) {
-            // Cloud-drive providers append the containing folder after the
-            // real file name, for example "S01E01.mkv【Show/4K HDR】".
-            // Taking lastPathComponent from the whole label mistakes that
-            // descriptive slash for a URL path and discards the episode code.
-            // Limit path compaction to the actual media-file portion first.
-            let text = value as NSString
-            value = text.substring(to: NSMaxRange(mediaMatch.range))
-            if let last = value.split(separator: "/").last, !last.isEmpty {
-                value = String(last)
+    static func presentation(for episode: PlayEpisode, sourceIndex: Int = 0,
+                             categoryName: String? = nil, semantics: PlaybackResourceSemantics? = nil) -> EpisodePresentation {
+        let value = semantics ?? PlaybackResourceAnalyzer.analyze(episode, categoryName: categoryName)
+        var title = compactName(episode.name)
+        if value.role == .main, let number = value.episode {
+            if let end = value.endEpisode {
+                title = value.season.map { L10n.string("episode.range.season", fallback: "Season %d · Episodes %d–%d", $0, number, end) }
+                    ?? L10n.string("episode.range", fallback: "Episodes %d–%d", number, end)
+            } else if let season = value.season {
+                title = L10n.string("episode.season-and-number", fallback: "Season %d · Episode %d", season, number)
+            } else {
+                title = L10n.string(value.unit == "话" ? "episode.number.chapter" : "episode.number",
+                    fallback: value.unit == "话" ? "Chapter %d" : "Episode %d", number)
             }
-        } else if let components = URLComponents(string: value),
-                  let url = components.url,
-                  !url.lastPathComponent.isEmpty {
-            value = url.lastPathComponent
-        } else {
-            value = value.components(separatedBy: "?").first ?? value
-            value = value.components(separatedBy: "#").first ?? value
-            if let last = value.split(separator: "/").last {
-                value = String(last)
-            }
+            if value.finale { title += " · " + L10n.string("episode.finale", fallback: "Finale") }
+        } else if value.role == .main, let issue = value.issue {
+            title = L10n.string("episode.issue", fallback: "Issue %d", issue)
+        } else if let date = value.date {
+            title = date
         }
-        value = value.replacingOccurrences(
-            of: #"\.(?:mkv|mp4|m4v|mov|avi|ts|m2ts|flv|webm|m3u8)$"#,
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
-        )
-        value = value.replacingOccurrences(
-            of: #"^\s*\[[^\]]{1,24}\]\s*"#,
-            with: "",
-            options: .regularExpression
-        )
-        value = value.replacingOccurrences(
-            of: #"\s+"#,
-            with: " ",
-            options: .regularExpression
-        )
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty
-            ? L10n.string("detail.unnamed-resource", fallback: "Unnamed Resource")
-            : trimmed
+        return EpisodePresentation(episode: episode, displayName: title,
+            originalName: episode.name, seasonNumber: value.season,
+            episodeNumber: value.role == .main && value.endEpisode == nil ? value.episode : nil,
+            isSpecial: value.role != .main, sourceIndex: sourceIndex)
     }
+}
 
-    fileprivate static func sequenceCandidates(
-        for episode: PlayEpisode
-    ) -> [EpisodeSequenceCandidate] {
-        let original = episode.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let nameCandidate = original.isEmpty ? episode.url : original
-        let compact = compactName(nameCandidate)
-        guard specialName(in: compact) == nil else { return [] }
-
-        var candidates: [EpisodeSequenceCandidate] = []
-        if let values = captures(
-            in: compact,
-            pattern: #"(?i)(?:^|[^A-Z0-9])S(\d{1,2})[ ._-]*E(\d{1,4})(?:[^0-9]|$)"#,
-            captureCount: 2
-        ), let season = Int(values[0]), let number = Int(values[1]),
-           isPlausibleEpisodeNumber(number) {
-            candidates.append(
-                EpisodeSequenceCandidate(
-                    key: .seasonEpisode(season),
-                    number: number,
-                    seasonNumber: season
-                )
-            )
+enum EpisodeContentPresentationKind: Equatable {
+    case movie, series, unknown
+    init(categoryName: String?) {
+        switch PlaybackContentForm.category(categoryName) {
+        case .movie: self = .movie
+        case .series: self = .series
+        default: self = .unknown
         }
-
-        if let values = captures(
-            in: compact,
-            pattern: #"(?i)(?:^|[^A-Z0-9])(?:EP|E)[ ._-]*(\d{1,4})(?:[^0-9]|$)"#,
-            captureCount: 1
-        ), let number = Int(values[0]), isPlausibleEpisodeNumber(number) {
-            candidates.append(
-                EpisodeSequenceCandidate(
-                    key: .episodeCode,
-                    number: number,
-                    seasonNumber: nil
-                )
-            )
-        }
-
-        let unitPattern = #"(?:^|[^全共\d])(第)?\s*(\d{1,4})\s*(集|话)"#
-        if let regex = EpisodeRegexCache.shared.regex(for: unitPattern) {
-            let text = compact as NSString
-            let matches = regex.matches(
-                in: compact,
-                range: NSRange(location: 0, length: text.length)
-            )
-            for match in matches {
-                let prefixRange = match.range(at: 1)
-                let numberRange = match.range(at: 2)
-                guard numberRange.location != NSNotFound,
-                      let number = Int(text.substring(with: numberRange)),
-                      isPlausibleEpisodeNumber(number) else {
-                    continue
-                }
-                candidates.append(
-                    EpisodeSequenceCandidate(
-                        key: prefixRange.location == NSNotFound
-                            ? .bareUnit
-                            : .explicitUnit,
-                        number: number,
-                        seasonNumber: nil
-                    )
-                )
-            }
-        }
-
-        let stem = filenameStem(from: compact)
-        if let regex = EpisodeRegexCache.shared.regex(for: #"\d{1,4}"#) {
-            let text = stem as NSString
-            let matches = regex.matches(
-                in: stem,
-                range: NSRange(location: 0, length: text.length)
-            )
-            var slot = 0
-            for match in matches {
-                guard let number = Int(text.substring(with: match.range)),
-                      isPlausibleEpisodeNumber(number),
-                      isGenericEpisodeToken(in: text, range: match.range) else {
-                    continue
-                }
-                candidates.append(
-                    EpisodeSequenceCandidate(
-                        key: .numericSlot(slot),
-                        number: number,
-                        seasonNumber: nil
-                    )
-                )
-                slot += 1
-            }
-        }
-
-        var unique: [EpisodeSequenceCandidate.Key: EpisodeSequenceCandidate] = [:]
-        for candidate in candidates where unique[candidate.key] == nil {
-            unique[candidate.key] = candidate
-        }
-        return Array(unique.values)
-    }
-
-    private static func filenameStem(from compact: String) -> String {
-        guard let match = firstMatch(
-            in: compact,
-            pattern: #"(?i)\.(?:mkv|mp4|m4v|mov|avi|ts|m2ts|flv|webm)(?:$|[?#\s【\[])"#
-        ) else {
-            return compact
-        }
-        let text = compact as NSString
-        return text.substring(to: match.range.location)
-    }
-
-    private static func isPlausibleEpisodeNumber(_ number: Int) -> Bool {
-        (1...999).contains(number)
-    }
-
-    private static func isGenericEpisodeToken(
-        in text: NSString,
-        range: NSRange
-    ) -> Bool {
-        let before = range.location > 0
-            ? text.substring(with: NSRange(location: range.location - 1, length: 1))
-            : ""
-        let afterLocation = NSMaxRange(range)
-        let after = afterLocation < text.length
-            ? text.substring(with: NSRange(location: afterLocation, length: 1))
-            : ""
-        let beforeTwo = range.location > 1
-            ? text.substring(with: NSRange(location: range.location - 2, length: 2))
-            : before
-
-        if before.range(of: #"[A-Za-z]"#, options: .regularExpression) != nil
-            || after.range(of: #"[A-Za-z]"#, options: .regularExpression) != nil {
-            return false
-        }
-        if beforeTwo.range(
-            of: #"(?i)(?:H\.|X)$"#,
-            options: .regularExpression
-        ) != nil {
-            return false
-        }
-        return true
-    }
-
-    private static func regularPresentation(
-        episode: PlayEpisode,
-        compact: String,
-        original: String,
-        number: Int,
-        displayName: String,
-        sourceIndex: Int
-    ) -> EpisodePresentation {
-        EpisodePresentation(
-            episode: episode,
-            displayName: displayName,
-            originalName: original.isEmpty ? compact : original,
-            seasonNumber: nil,
-            episodeNumber: number,
-            isSpecial: false,
-            sourceIndex: sourceIndex
-        )
-    }
-
-    private static func specialName(in compact: String) -> String? {
-        let specialWords = [
-            "番外", "花絮", "预告", "特别篇", "特辑", "彩蛋", "幕后",
-            "上篇", "中篇", "下篇", "上集", "下集", "大结局"
-        ]
-        let containsSpecialWord = specialWords.contains { compact.contains($0) }
-        let containsSpecialCode = firstMatch(
-            in: compact,
-            pattern: #"(?i)(?:^|[^A-Z0-9])(?:SP|OVA)[ ._-]*\d{0,3}(?:[^A-Z0-9]|$)"#
-        ) != nil
-        guard containsSpecialWord || containsSpecialCode else { return nil }
-        return compact
-    }
-
-    private static func captures(
-        in value: String,
-        pattern: String,
-        captureCount: Int
-    ) -> [String]? {
-        guard let match = firstMatch(in: value, pattern: pattern) else { return nil }
-        let text = value as NSString
-        let captures = (1...captureCount).compactMap { index -> String? in
-            let range = match.range(at: index)
-            guard range.location != NSNotFound else { return nil }
-            return text.substring(with: range)
-        }
-        return captures.count == captureCount ? captures : nil
-    }
-
-    private static func firstMatch(
-        in value: String,
-        pattern: String
-    ) -> NSTextCheckingResult? {
-        guard let regex = EpisodeRegexCache.shared.regex(for: pattern) else {
-            return nil
-        }
-        return regex.firstMatch(
-            in: value,
-            range: NSRange(location: 0, length: (value as NSString).length)
-        )
     }
 }
 
 enum EpisodeListPresentation {
-    private struct SequenceInference {
-        let key: EpisodeSequenceCandidate.Key
-        let candidatesByIndex: [Int: EpisodeSequenceCandidate]
-        let score: Int
+    static func presentations(from episodes: [PlayEpisode], query: String,
+                              sortOrder: EpisodeSortOrder, categoryName: String? = nil) -> [EpisodePresentation] {
+        let semantics = PlaybackResourceAnalyzer.analyzeList(episodes, categoryName: categoryName)
+        let mainCount = semantics.filter { $0.role == .main }.count
+        var values = episodes.enumerated().map { index, episode in
+            let parsed = EpisodeNameParser.presentation(for: episode, sourceIndex: index, categoryName: categoryName, semantics: semantics[index])
+            let value = semantics[index]
+            guard value.form == .movie, value.role == .main else { return parsed }
+            let labels = value.versionLabels.joined(separator: " · ")
+            let title: String
+            if mainCount == 1 {
+                title = L10n.string("episode.feature", fallback: "Feature") + (labels.isEmpty ? "" : " · " + labels)
+            } else {
+                title = labels.isEmpty ? parsed.displayName : labels
+            }
+            return renaming(parsed, title)
+        }
+        // Two versions of the same episode must remain distinguishable in every UI.
+        let counts = Dictionary(values.map { ($0.displayName, 1) }, uniquingKeysWith: +)
+        values = values.map { value in
+            guard counts[value.displayName, default: 0] > 1 else { return value }
+            return renaming(value, compactOriginal(value))
+        }
+        let originalCounts = Dictionary(values.map { ($0.displayName, 1) }, uniquingKeysWith: +)
+        values = values.map { value in
+            originalCounts[value.displayName, default: 0] > 1
+                ? renaming(value, "\(value.displayName) · \(value.sourceIndex + 1)") : value
+        }
+        return filterAndSort(values, query: query, sortOrder: sortOrder)
     }
 
-    static func presentations(
-        from episodes: [PlayEpisode],
-        query: String,
-        sortOrder: EpisodeSortOrder
-    ) -> [EpisodePresentation] {
-        let keyword = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let candidatesByIndex = episodes.map(EpisodeNameParser.sequenceCandidates)
-        let inference = sequenceInference(
-            episodeCount: episodes.count,
-            candidatesByIndex: candidatesByIndex
-        )
-        let repeatedBareUnitNumbers = repeatedNumbers(
-            for: .bareUnit,
-            candidatesByIndex: candidatesByIndex
-        )
-        var values = episodes.enumerated().map { index, episode in
-            let parsed = EpisodeNameParser.presentation(
-                for: episode,
-                sourceIndex: index
-            )
-            guard !parsed.isSpecial else { return parsed }
+    private static func compactOriginal(_ value: EpisodePresentation) -> String {
+        EpisodeNameParser.compactName(value.originalName)
+    }
 
-            if let inference,
-               let candidate = inference.candidatesByIndex[index] {
-                return presentation(
-                    replacing: parsed,
-                    with: candidate
-                )
-            }
-
-            if let number = parsed.episodeNumber,
-               repeatedBareUnitNumbers.contains(number),
-               candidatesByIndex[index].contains(where: {
-                   $0.key == .bareUnit && $0.number == number
-               }) {
-                return presentationWithoutEpisodeNumber(parsed)
-            }
-
-            return parsed
-        }
-        if values.count == 1, let only = values.first {
-            values[0] = EpisodePresentation(
-                episode: only.episode,
-                displayName: L10n.string("episode.feature", fallback: "Feature"),
-                originalName: only.originalName,
-                seasonNumber: nil,
-                episodeNumber: nil,
-                isSpecial: false,
-                sourceIndex: only.sourceIndex
-            )
-        }
-        if !keyword.isEmpty {
-            values = values.filter {
-                $0.displayName.localizedCaseInsensitiveContains(keyword)
-                    || $0.originalName.localizedCaseInsensitiveContains(keyword)
-            }
-        }
-
-        switch sortOrder {
-        case .sourceOrder:
-            return values
-        case .episodeAscending:
-            return values.sorted { lhs, rhs in
-                compare(lhs, rhs, ascending: true)
-            }
-        case .episodeDescending:
-            return values.sorted { lhs, rhs in
-                compare(lhs, rhs, ascending: false)
-            }
-        }
+    private static func renaming(_ value: EpisodePresentation, _ title: String) -> EpisodePresentation {
+        EpisodePresentation(episode: value.episode, displayName: title, originalName: value.originalName,
+            seasonNumber: value.seasonNumber, episodeNumber: value.episodeNumber,
+            isSpecial: value.isSpecial, sourceIndex: value.sourceIndex)
     }
 
     static func filterAndSort(
@@ -1689,133 +1365,6 @@ enum EpisodeListPresentation {
         }
     }
 
-    private static func sequenceInference(
-        episodeCount: Int,
-        candidatesByIndex: [[EpisodeSequenceCandidate]]
-    ) -> SequenceInference? {
-        guard episodeCount > 1 else { return nil }
-        var occurrences: [EpisodeSequenceCandidate.Key: [Int: EpisodeSequenceCandidate]] = [:]
-        for (index, candidates) in candidatesByIndex.enumerated() {
-            for candidate in candidates {
-                occurrences[candidate.key, default: [:]][index] = candidate
-            }
-        }
-
-        let minimumCoverage = episodeCount == 2
-            ? 2
-            : max(3, Int(ceil(Double(episodeCount) * 0.5)))
-        return occurrences.compactMap { key, byIndex -> SequenceInference? in
-            let ordered = byIndex.sorted { $0.key < $1.key }
-            guard ordered.count >= minimumCoverage else { return nil }
-
-            let numbers = ordered.map { $0.value.number }
-            let differences = zip(numbers, numbers.dropFirst()).map { $1 - $0 }
-            guard let firstDifference = differences.first(where: { $0 != 0 }) else {
-                return nil
-            }
-            let direction = firstDifference > 0 ? 1 : -1
-            guard differences.allSatisfy({ difference in
-                difference != 0 && (difference > 0 ? 1 : -1) == direction
-            }) else {
-                return nil
-            }
-
-            let steps = differences.map { abs($0) }
-            if ordered.count == 2 {
-                guard steps[0] <= 10 else { return nil }
-            } else {
-                let consecutiveCount = steps.filter { $0 == 1 }.count
-                guard consecutiveCount * 2 >= steps.count else { return nil }
-            }
-
-            guard let minimum = numbers.min(), let maximum = numbers.max(),
-                  maximum - minimum <= max(100, episodeCount * 3) else {
-                return nil
-            }
-
-            let consecutiveCount = steps.filter { $0 == 1 }.count
-            let gapPenalty = steps.reduce(0) { $0 + max(0, $1 - 1) }
-            let score = ordered.count * 100
-                + consecutiveCount * 30
-                + priority(for: key)
-                - min(gapPenalty, 100)
-            return SequenceInference(
-                key: key,
-                candidatesByIndex: byIndex,
-                score: score
-            )
-        }
-        .max { lhs, rhs in
-            if lhs.score == rhs.score {
-                return priority(for: lhs.key) < priority(for: rhs.key)
-            }
-            return lhs.score < rhs.score
-        }
-    }
-
-    private static func repeatedNumbers(
-        for key: EpisodeSequenceCandidate.Key,
-        candidatesByIndex: [[EpisodeSequenceCandidate]]
-    ) -> Set<Int> {
-        let values = candidatesByIndex.flatMap { candidates in
-            candidates.filter { $0.key == key }.map(\.number)
-        }
-        let counts = Dictionary(values.map { ($0, 1) }, uniquingKeysWith: +)
-        return Set(counts.compactMap { $0.value > 1 ? $0.key : nil })
-    }
-
-    private static func priority(
-        for key: EpisodeSequenceCandidate.Key
-    ) -> Int {
-        switch key {
-        case .seasonEpisode:
-            return 50
-        case .episodeCode:
-            return 40
-        case .explicitUnit:
-            return 30
-        case .bareUnit:
-            return 10
-        case .numericSlot:
-            return 0
-        }
-    }
-
-    private static func presentation(
-        replacing original: EpisodePresentation,
-        with candidate: EpisodeSequenceCandidate
-    ) -> EpisodePresentation {
-        let displayName: String
-        if let season = candidate.seasonNumber {
-            displayName = L10n.string("episode.season-and-number", fallback: "Season %d · Episode %d", season, candidate.number)
-        } else {
-            displayName = L10n.string("episode.number", fallback: "Episode %d", candidate.number)
-        }
-        return EpisodePresentation(
-            episode: original.episode,
-            displayName: displayName,
-            originalName: original.originalName,
-            seasonNumber: candidate.seasonNumber,
-            episodeNumber: candidate.number,
-            isSpecial: false,
-            sourceIndex: original.sourceIndex
-        )
-    }
-
-    private static func presentationWithoutEpisodeNumber(
-        _ original: EpisodePresentation
-    ) -> EpisodePresentation {
-        EpisodePresentation(
-            episode: original.episode,
-            displayName: EpisodeNameParser.compactName(original.originalName),
-            originalName: original.originalName,
-            seasonNumber: nil,
-            episodeNumber: nil,
-            isSpecial: false,
-            sourceIndex: original.sourceIndex
-        )
-    }
-
     static func rangeOptions(
         from presentations: [EpisodePresentation]
     ) -> [EpisodeRangeOption] {
@@ -1824,25 +1373,17 @@ enum EpisodeListPresentation {
             .sorted { compare($0, $1, ascending: true) }
         guard numbered.count > 40 else { return [] }
 
-        return stride(from: 0, to: numbered.count, by: 20).map { start in
-            let end = min(start + 20, numbered.count)
-            let chunk = Array(numbered[start..<end])
-            let first = chunk.first!
-            let last = chunk.last!
-            let firstNumber = first.episodeNumber!
-            let lastNumber = last.episodeNumber!
-            let title: String
-            if first.seasonNumber == last.seasonNumber,
-               let season = first.seasonNumber {
-                title = L10n.string("episode.range.season", fallback: "Season %d · Episodes %d–%d", season, firstNumber, lastNumber)
-            } else {
-                title = L10n.string("episode.range", fallback: "Episodes %d–%d", firstNumber, lastNumber)
+        let seasons = Dictionary(grouping: numbered, by: { $0.seasonNumber ?? -1 })
+        return seasons.keys.sorted().flatMap { seasonKey in
+            let items = seasons[seasonKey]!
+            return stride(from: 0, to: items.count, by: 20).map { start in
+                let chunk = Array(items[start..<min(start + 20, items.count)])
+                let first = chunk.first!.episodeNumber!, last = chunk.last!.episodeNumber!
+                let title = seasonKey >= 0
+                    ? L10n.string("episode.range.season", fallback: "Season %d · Episodes %d–%d", seasonKey, first, last)
+                    : L10n.string("episode.range", fallback: "Episodes %d–%d", first, last)
+                return EpisodeRangeOption(id: "\(seasonKey)-\(start)", title: title, episodeIDs: Set(chunk.map(\.id)))
             }
-            return EpisodeRangeOption(
-                id: "\(start)-\(end)",
-                title: title,
-                episodeIDs: Set(chunk.map(\.id))
-            )
         }
     }
 
@@ -1868,5 +1409,113 @@ private extension String {
     var trimmedNonEmpty: String? {
         let value = trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value
+    }
+}
+
+/// Loading and loaded pages share viewport-based geometry. No content measurement
+/// writes back to state while resizing; expansion state belongs to DetailView.
+private struct DetailHeroHeader<Description: View, Actions: View>: View {
+    let summary: VideoSummary
+    let availableWidth: CGFloat
+    @ViewBuilder var description: () -> Description
+    @ViewBuilder var actions: () -> Actions
+
+    private var isStacked: Bool { availableWidth < 560 }
+    private var posterWidth: CGFloat { DetailPageLayout.posterWidth }
+    private var informationWidth: CGFloat {
+        min(DetailPageLayout.readingWidth, max(1, availableWidth - 2 * DetailPageLayout.horizontalPadding
+            - (isStacked ? 0 : posterWidth + 26)))
+    }
+
+    var body: some View {
+        Group {
+            if isStacked {
+                VStack(alignment: .leading, spacing: 20) {
+                    poster
+                    information
+                }
+            } else {
+                HStack(alignment: .top, spacing: 26) {
+                    poster
+                    information
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.horizontal, DetailPageLayout.horizontalPadding)
+        .padding(.vertical, 26)
+    }
+
+    private var poster: some View {
+        DetailPosterView(summary: summary)
+            .frame(width: posterWidth, height: posterWidth * 1.5)
+            .accessibilityIdentifier("detail.poster")
+    }
+
+    private var information: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(summary.title)
+                .font(.system(size: 28, weight: .bold))
+                .lineLimit(2)
+                .help(summary.title)
+                .frame(height: 68, alignment: .topLeading)
+            description()
+                .frame(maxHeight: .infinity, alignment: .topLeading)
+            actions()
+                .frame(height: 32, alignment: .bottomLeading)
+        }
+        .frame(width: informationWidth, height: posterWidth * 1.5, alignment: .topLeading)
+    }
+}
+
+/// Measure text at its actual reading width; opening the popover never changes
+/// the poster/action geometry or pushes the playback list down the page.
+private struct DetailSummaryText: View {
+    let title: String
+    let text: String
+    let lines: Int
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        GeometryReader { geometry in
+            let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+            let lineHeight = ceil(font.ascender - font.descender + font.leading)
+            let height = (text as NSString).boundingRect(with: NSSize(width: max(1, geometry.size.width), height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: font]).height
+            VStack(alignment: .leading, spacing: 2) {
+                Text(text)
+                    .font(.system(size: NSFont.systemFontSize))
+                    .lineLimit(lines)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(height: lineHeight * CGFloat(lines), alignment: .topLeading)
+                if height > lineHeight * CGFloat(lines) + 1 {
+                    Button(L10n.string("common.more", fallback: "More")) { isExpanded = true }
+                        .buttonStyle(.plain)
+                        .font(.caption)
+                        .foregroundStyle(Color.accentColor)
+                        .popover(isPresented: $isExpanded, arrowEdge: .bottom) {
+                            VStack(alignment: .leading, spacing: 12) {
+                                HStack {
+                                    Text(title).font(.headline)
+                                    Spacer()
+                                    Button { isExpanded = false } label: { Image(systemName: "xmark") }
+                                        .buttonStyle(.plain)
+                                        .accessibilityLabel(L10n.string("common.close", fallback: "Close"))
+                                }
+                                ScrollView {
+                                    Text(text).font(.body).textSelection(.enabled)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                            .padding(20)
+                            .frame(width: 440, height: 330)
+                        }
+                }
+            }
+            .foregroundStyle(.secondary)
+        }
+        .frame(height: CGFloat(lines) * ceil(NSFont.systemFont(ofSize: NSFont.systemFontSize).ascender
+            - NSFont.systemFont(ofSize: NSFont.systemFontSize).descender
+            + NSFont.systemFont(ofSize: NSFont.systemFontSize).leading) + 22)
     }
 }

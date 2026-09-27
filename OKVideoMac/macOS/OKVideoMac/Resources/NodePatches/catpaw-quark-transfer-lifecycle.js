@@ -25,6 +25,104 @@ const CLEANABLE_STATES = new Set([
   'retryPending'
 ]);
 
+// One coordinator per profile database. Only server-issued __puus rotation is
+// accepted; a different login (even for the same uid) invalidates old tickets.
+// Cookie values are deliberately never exposed in diagnostic snapshots.
+function createQuarkCredentialCoordinator({ read, compareAndSet }) {
+  let cookie = null;
+  let revision = 0;
+  let epoch = 0;
+  const aliases = new Set();
+  let queue = Promise.resolve();
+  const serial = (operation) => {
+    const result = queue.then(operation, operation);
+    queue = result.catch(() => {});
+    return result;
+  };
+  const uid = (value) => String(value || '').split(';')
+    .map((part) => part.trim()).find((part) => part.startsWith('__uid='))
+    ?.slice(6) || '';
+  async function synchronize() {
+    const stored = String(await read() || '').trim();
+    if (stored !== cookie) {
+      cookie = stored;
+      revision += 1;
+      epoch += 1;
+      aliases.clear();
+      if (cookie) aliases.add(cookie);
+    }
+  }
+  return {
+    begin: (expected) => serial(async () => {
+      await synchronize();
+      if (expected != null && expected !== cookie && !aliases.has(expected)) {
+        const error = new Error('quark account changed; retry the current selection');
+        error.code = 'OKVIDEO_ACCOUNT_CHANGED';
+        throw error;
+      }
+      return { cookie, revision, epoch };
+    }),
+    rotate: (ticket, headers) => serial(async () => {
+      await synchronize();
+      if (!ticket || ticket.epoch !== epoch || ticket.revision !== revision ||
+          ticket.cookie !== cookie || !uid(cookie)) return false;
+      const values = headers?.['set-cookie'];
+      const lines = Array.isArray(values) ? values : typeof values === 'string' ? [values] : [];
+      // Do not split on commas (Expires attributes contain commas).
+      const matches = lines.map((line) => typeof line === 'string'
+        ? /^__puus=([^;\r\n,]+)(?:;|$)/.exec(line.trim()) : null).filter(Boolean);
+      if (matches.length !== 1 || /(?:max-age\s*=\s*0)/i.test(matches[0].input)) return false;
+      const value = matches[0][1];
+      if (value.length > 8192 || /[\s\x00-\x1f\x7f]/.test(value)) return false;
+      const parts = cookie.split(';').map((part) => part.trim()).filter(Boolean);
+      const index = parts.findIndex((part) => part.startsWith('__puus='));
+      if (index < 0) parts.push(`__puus=${value}`); else parts[index] = `__puus=${value}`;
+      const next = parts.join('; ');
+      if (next === cookie) return false;
+      if (!await compareAndSet(cookie, next)) { await synchronize(); return false; }
+      cookie = next;
+      revision += 1;
+      aliases.add(next);
+      while (aliases.size > 64) aliases.delete(aliases.values().next().value);
+      return true;
+    }),
+    snapshot: () => ({ revision, epoch })
+  };
+}
+
+function createQuarkMediaFailureStore(now = Date.now) {
+  const entries = new Map();
+  function key(request) {
+    const id = request?.headers?.['x-okvideo-transfer-request-id'] || request?.query?.__okvideo_playback_request;
+    const generation = Number(request?.headers?.['x-okvideo-transfer-generation'] || request?.query?.__okvideo_playback_generation);
+    return isUUID(id) && positiveInteger(generation) ? `${id.toLowerCase()}:${generation}` : null;
+  }
+  function prune() {
+    for (const [id, value] of entries) if (now() - value.timestamp > 30000) entries.delete(id);
+    while (entries.size > 64) entries.delete(entries.keys().next().value);
+  }
+  return {
+    clear(request) { const id = key(request); if (id) entries.delete(id); },
+    record(request, response, phase = 'media') {
+      const id = key(request);
+      let host;
+      try { host = new URL(response?.config?.url).hostname.toLowerCase(); } catch (_) { return; }
+      if (!id || !/^dl-[a-z0-9-]+\.drive\.quark\.cn$/.test(host)) return;
+      const status = Number(response.status || 0);
+      const contentType = String(response.headers?.['content-type'] || '').split(';')[0].trim().toLowerCase();
+      if (status < 400 && !['text/html', 'application/json'].includes(contentType)) return;
+      prune();
+      const previous = entries.get(id);
+      // An actual media request is stronger evidence than a preparation probe.
+      if (previous?.phase === 'media' && phase === 'probe') return;
+      entries.set(id, { provider: 'quark', status, phase, contentType,
+        reason: status >= 400 ? 'upstreamDenied' : 'nonMediaResponse', timestamp: now() });
+      prune();
+    },
+    consume(request) { prune(); const id = key(request); const entry = entries.get(id); entries.delete(id); return entry || null; }
+  };
+}
+
 function nonEmptyString(value, maximumBytes = 4096) {
   if (typeof value !== 'string') return null;
   const normalized = value.trim();
@@ -348,7 +446,12 @@ function createQuarkTransferLifecycle(options) {
 
   function throwForAccountAuthorization(result, message) {
     const status = statusCode(result);
-    if (status === 401 || status === 403) {
+    const body = responseBody(result);
+    const detail = String(body?.message || body?.msg || '').toLowerCase();
+    const explicitExpiry = /未登录|登录(?:已)?(?:过期|失效)|not[ _-]?logged[ _-]?in|login[ _-]?(?:expired|required)|cookie[ _-]?(?:expired|invalid)/.test(detail);
+    // A bare 403 can mean permissions/quota, not an expired account. Share
+    // stoken errors are independent of login and must remain resource errors.
+    if (status === 401 || (status === 403 && explicitExpiry && !/stoken|41016/.test(detail))) {
       throw authorizationError('unauthorizedHTTP', message, status);
     }
   }
@@ -1204,7 +1307,7 @@ function createQuarkTransferLifecycle(options) {
     }
     const initialize = typeof ensureAccount === 'function'
       ? ensureAccount : async () => {};
-    return async function okvideoLifecycleProxy(request, reply) {
+    const execute = async function okvideoLifecycleProxy(request, reply) {
       const suppliedReceipt = request?.query?.[PROXY_RECEIPT_QUERY];
       // noSaveMode can legitimately return a CatPaw proxy without creating a
       // transfer. Preserve that upstream path when no lifecycle capability is
@@ -1225,6 +1328,18 @@ function createQuarkTransferLifecycle(options) {
         context,
         () => originalProxy(request, reply)
       );
+    };
+    return async (request, reply) => {
+      try {
+        return await execute(request, reply);
+      } catch (error) {
+        if (isAuthorizationError(error)) {
+          try {
+            await publishAuthorizationRequired({ ...clone(error.okvideoAuthorization), phase: 'proxy' });
+          } catch (_) {}
+        }
+        throw error;
+      }
     };
   }
 
@@ -1402,11 +1517,15 @@ function createQuarkTransferLifecycle(options) {
     transcode,
     wrapPlay,
     wrapProxy,
+    requireAccount: accountOrAuthorizationError,
+    validateAccountResponse: throwForAccountAuthorization,
     accountScopeForCookie,
     snapshotForTesting: () => clone(ledger)
   };
 }
 
 module.exports = {
-  createQuarkTransferLifecycle
+  createQuarkTransferLifecycle,
+  createQuarkCredentialCoordinator,
+  createQuarkMediaFailureStore
 };

@@ -37,6 +37,36 @@ final class SQLiteConnection {
         }
     }
 
+    /// SQLite's online backup includes committed WAL pages in one consistent
+    /// snapshot. A normal file copy is not a safe migration recovery point.
+    func verifiedBackup(to destination: URL) throws {
+        guard let handle, !FileManager.default.fileExists(atPath: destination.path) else {
+            throw AppError.database("无法创建数据库安全副本")
+        }
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
+            withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        var target: OpaquePointer?
+        guard sqlite3_open_v2(destination.path, &target, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
+              let target else { throw AppError.database("无法打开数据库安全副本") }
+        defer { sqlite3_close(target) }
+        guard let backup = sqlite3_backup_init(target, "main", handle, "main") else {
+            throw AppError.database("无法开始数据库一致性备份")
+        }
+        let step = sqlite3_backup_step(backup, -1)
+        let finish = sqlite3_backup_finish(backup)
+        guard step == SQLITE_DONE, finish == SQLITE_OK else { throw AppError.database("数据库安全副本未完成，取消升级") }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(target, "PRAGMA quick_check", -1, &statement, nil) == SQLITE_OK else {
+            throw AppError.database("无法验证数据库安全副本")
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW,
+              sqlite3_column_text(statement, 0).map({ String(cString: $0) }) == "ok" else {
+            throw AppError.database("数据库安全副本验证失败，取消升级")
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+    }
+
     func execute(_ sql: String, bindings: [SQLiteBinding] = []) throws {
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }

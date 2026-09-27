@@ -1,6 +1,78 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "live.guide.next-channels": {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Next Channels"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "下一组频道"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "下一組頻道"}}}},
+    "live.guide.previous-channels": {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Previous Channels"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "上一组频道"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "上一組頻道"}}}},
+    "live.guide.channels": {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Channels"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "频道"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "頻道"}}}},
+    "live.programme-progress": {"localizations": {"en": {"stringUnit": {"state": "translated", "value": "Programme Progress"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "节目进度"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "節目進度"}}}},
+    "player.audio.apply.failed": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Audio setting could not be applied; your preference is saved."}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "音量设置未能应用，已保留你的选择，可重试。"}}}},
+    "player.next-resource": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Next Resource"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "下一个资源"}}}},
+    "player.previous-resource": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Previous Resource"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "上一个资源"}}}},
+    "player.resource-count": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "%d resources"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "%d 个资源"}}}},
+    "episode.issue": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Issue %d"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "第 %d 期"}}}},
+    "episode.finale": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Finale"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "大结局"}}}},
+    "player.seek.wait-timeout": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Seeking is taking too long. Retry this position or choose another position."}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "跳转等待较久，可重新尝试或选择其他位置。"}}}},
+    "detail.authorization.pending": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Complete authorization, then retry loading details."}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "完成授权后，可在此重试加载详情。"}}}},
+    "detail.request-cancelled": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Detail loading was interrupted. You can retry here."}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "详情加载已中断，可在此重试。"}}}},
+    "detail.request-timeout": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "This provider is taking too long. Your page is preserved; you can retry."}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "来源响应超时，已保留当前页面，可重试加载。"}}}},
+    "detail.search-returned": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "This provider returned a search suggestion instead of details. Retry or continue searching."}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "来源返回了搜索建议，未取得影片详情。可重试或继续搜索。"}}}},
+    "detail.continue-search": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Continue Searching"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "继续搜索"}}}},
+    "detail.area": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Region"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"地区"}}}},
+    "detail.director": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Director"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"导演"}}}},
+    "browser.refresh.resume": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Continue Search"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"继续搜索"}}}},
+    "browser.refresh.retry": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Retry Failed Requests"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"重试失败请求"}}}},
+    "browser.refresh.loading": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Loading…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在加载…"}}}},
+    "detail.synopsis": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Synopsis"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"简介"}}}},
+    "browser.refresh.again": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Refresh All in This Scope"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"重新刷新当前范围"}}}},
+    "search.filters.all": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"All Results"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"全部结果"}}}},
+    "search.browse.loading": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Searching for more results…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在搜索更多结果…"}}}},
+    "search.browse.stopped": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Search stopped; results retained"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"搜索已停止，已保留现有结果"}}}},
+    "search.browse.paused": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"More sources found; continue loading when ready"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"已补充影片来源，可继续加载"}}}},
+    "search.browse.partial": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Some providers need attention; other results can continue"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"部分来源异常，其他来源可继续加载"}}}},
+    "search.browse.continue": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"More results are available"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"可继续加载搜索结果"}}}},
+    "search.browse.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Some providers failed; results retained"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"部分来源加载失败，已保留现有结果"}}}},
+    "search.browse.limited": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Further paging is not confirmed for this provider"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"部分来源的后续分页尚未确认支持"}}}},
+    "search.browse.complete": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"All results in this scope have loaded"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"当前范围的搜索结果已全部加载"}}}},
+    "search.browse.pending": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"No further page has been confirmed"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"尚未确认后续页面"}}}},
+    "search.browse.resume": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Continue / Retry"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"继续 / 重试"}}}},
+    "search.browse.sources": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"%d sources"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"%d 个来源"}}}},
+    "search.browse.source-empty": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"This provider has no results yet. Check its search status or retry below."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"此来源尚无搜索结果，可查看搜索状态或在下方重试。"}}}},
+    "search.folder.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Folder"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"文件夹"}}}},
+    "search.browse.provider-count": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"%@: %d results"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"%@: %d 条结果"}}}},
+    "pagination.uncertain": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"No new titles; the end of results is not confirmed"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"暂未获得新内容，尚不能确认是否已加载完"}}}},
+    "cloud.authorization.media-check": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Playback failed, but account expiration has not been confirmed. Check cloud authorization here; after saving, the app will verify and resume only the current title once."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"播放未成功，但尚未确认账号授权失效。可以在此检查网盘授权；保存后只验证并恢复当前影片一次。"}}}},
+    "player.quark.media-rejected": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Quark rejected a video request (HTTP %lld). This does not by itself mean your account authorization has expired. Retry or check authorization."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"夸克拒绝了视频请求（HTTP %lld），尚不能据此认定账号授权过期。可以重试或检查授权。"}}}},
+    "player.quark.rate-limited": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Quark is limiting requests. Wait a moment before trying again."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"夸克暂时限制了请求频率，请稍后重试，无需删除授权。"}}}},
+    "player.quark.server-unavailable": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The Quark media server is temporarily unavailable (HTTP %lld). Try again later."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"夸克视频服务器暂不可用（HTTP %lld），请稍后重试。"}}}},
+    "player.quark.resource-unavailable": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The Quark video resource is unavailable (HTTP %lld). Check whether the share or file still exists."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"夸克视频资源不可用（HTTP %lld），请检查分享或文件是否仍然存在。"}}}},
+    "home.category.view-update": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Content Updated — View"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"内容已更新 · 查看"}}}},
+    "pagination.continue": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Continue Loading"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"继续加载"}}}},
+    "pagination.no-progress": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The provider returned no new titles. Automatic loading is paused; you can retry."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"来源未返回新内容，已暂停自动加载，可点击重试。"}}}},
+    "home.category.empty": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"No titles in this category."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"此分类暂无内容"}}}},
+    "live.guide.previous": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Previous 12 Hours"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"前 12 小时"}}}},
+    "live.guide.date": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Guide Date"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"节目单日期"}}}},
+    "live.guide.now": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Now"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"现在"}}}},
+    "live.guide.next": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Next 12 Hours"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"后 12 小时"}}}},
+    "live.guide.channel-page": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Channels %d–%d of %d"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"频道 %d–%d / 共 %d 个"}}}},
+    "live.guide.xtream-nearby-only": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"This source provides nearby programmes only"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"此来源仅提供近期节目"}}}},
+    "live.guide.partial": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"%d rows unavailable"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"%d 个频道暂不可用"}}}},
+    "live.guide.refreshing": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Refreshing…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在更新…"}}}},
+    "live.guide.stale": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Saved schedule"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"已保存的节目单"}}}},
+    "live.guide.short.unsupported": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"This source does not provide a full schedule yet."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"此来源暂不提供完整节目单。"}}}},
+    "live.guide.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The programme guide could not be loaded. Channel playback is still available."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"节目单加载失败，仍可正常播放频道。"}}}},
+    "live.guide.invalid": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The programme guide returned an invalid window."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"节目单返回的时间范围无效。"}}}},
+    "live.guide.loading": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Loading programme guide…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在加载节目单…"}}}},
+    "live.guide.empty": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"No programme entries in this window"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"此时间范围内暂无节目"}}}},
+    "live.guide.play-channel": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Play Channel"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"播放频道"}}}},
+    "live.guide.row.loading": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Loading…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在加载…"}}}},
+    "live.guide.row.empty": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"No programmes"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"暂无节目"}}}},
+    "live.guide.row.unmatched": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Channel not matched"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"未匹配到频道"}}}},
+    "live.guide.row.ambiguous": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Multiple channel matches"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"匹配到多个频道"}}}},
+    "live.guide.row.unsupported": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Not provided"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"来源未提供"}}}},
+    "live.guide.row.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Unavailable"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"暂不可用"}}}},
+    "live.guide.row.truncated": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Partially loaded"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"已加载部分节目"}}}},
+    "live.guide.show": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Show programme guide"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"显示节目单"}}}},
+    "live.guide.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Program Guide"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"节目单"}}}},
     "live.background.native-disabled": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Programme guide is disabled."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"节目单已关闭。"}}}},
     "live.background.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Background Activity"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"后台活动"}}}},
     "live.background.running": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Working"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在处理"}}}},
@@ -500,7 +572,16 @@
     "player.operation.set-volume": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Set volume"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"设置音量"}}}},
     "player.operation.skip-frame": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Skip hidden video frame"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"跳过隐藏视频帧"}}}},
     "player.operation.start-new-media": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Start new media"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"开始播放新媒体"}}}},
-    "player.organizing-episodes": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Organizing episodes…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在整理分集…"}}}},
+    "player.episode.pending": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Current Resource: %@"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"当前资源：%@"}}}},
+    "player.episode.now": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Now Playing: %@"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在播放：%@"}}}},
+    "player.episode.locate": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Locate Current"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"定位当前"}}}},
+    "player.episode.restoring": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Restoring episode list…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在恢复选集…"}}}},
+    "player.episode.partial": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Only the current resource was restored"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"目前仅恢复当前资源"}}}},
+    "player.episode.switching": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Preparing playback; selection will be available shortly"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在准备播放，请稍候再选集"}}}},
+    "player.episode.retry": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Retry Playback"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"重试播放"}}}},
+    "player.episode.current": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Currently Playing"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在播放"}}}},
+    "live.programme-details": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Programme Details"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"节目信息"}}}},
+    "player.organizing-episodes": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Organizing resources…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在整理资源…"}}}},
     "player.original-name.hint": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Right-click an episode to view or copy its original name"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"右键剧集可查看或复制"}}}},
     "player.previous-episode": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Previous Episode"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"上一集"}}}},
     "player.property.invalid-character": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The player property contains an invalid character."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"播放器属性包含无效字符"}}}},
@@ -775,7 +856,7 @@
     "detail.configuration-changed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The configuration associated with these details has changed"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"该详情所属配置已经发生变化"}}}},
     "detail.copy-name": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Copy Name"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"复制名称"}}}},
     "detail.episode-range": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Episode Range"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"分集区间"}}}},
-    "detail.episode-search": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Search episodes or original names"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"搜索集数或原始名称"}}}},
+    "detail.episode-search": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Search resources or original names"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"搜索资源或原始名称"}}}},
     "detail.episodes": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Episodes"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"剧集"}}}},
     "detail.favorite": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Add to Favorites"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"收藏"}}}},
     "detail.file-info": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"File Information"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"文件信息"}}}},
@@ -789,7 +870,7 @@
     "detail.no-playable-episode": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"No playable episodes"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"没有可播放分集"}}}},
     "detail.no-streams.message": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"This provider did not return any playable episodes."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"站点详情未提供可用分集。"}}}},
     "detail.no-streams.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"No Streams"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"没有播放线路"}}}},
-    "detail.organizing-episodes": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Organizing %d episodes…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在整理 %d 集…"}}}},
+    "detail.organizing-episodes": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Organizing %d resources…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在整理 %d 个资源…"}}}},
     "detail.original-name": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Original Name"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"原始名称"}}}},
     "detail.original-name.copy": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Copy Original Name"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"复制原始名称"}}}},
     "detail.original-name.hint": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Right-click to view or copy the original name"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"右键可以查看或复制原始名称"}}}},
@@ -882,6 +963,7 @@
     "home.not-loaded.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Not Loaded"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"尚未加载"}}}},
     "home.open-provider-settings": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Open Video Provider Settings"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"打开点播配置设置"}}}},
     "home.provider-temporarily-unavailable.message": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Your local configuration was preserved. Use Refresh in the upper-right corner to try again.\n%@"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"已保留本地配置，可点击右上角刷新重试。\n%@"}}}},
+    "home.dex-cache-failed.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Local Plugin Cache Failed"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"本地插件缓存加载失败"}}}},
     "home.provider-temporarily-unavailable.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Provider Temporarily Unavailable"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"站点暂时不可用"}}}},
     "home.provider-unavailable.message": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"This provider cannot run on the current Mac version. Choose another provider from the toolbar."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"当前 Mac 版本暂时无法运行这个站点，请从工具栏选择其他站点。"}}}},
     "home.provider-unavailable.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Provider Unavailable"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"该站点暂不可用"}}}},
@@ -1053,6 +1135,7 @@
     "common.reload": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Reload"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"重新加载"}}}},
     "common.reset": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Reset"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"重置"}}}},
     "common.restore-default": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Restore Defaults"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"恢复默认"}}}},
+    "live.guide.inactive": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Programme guide is not loading."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"节目单加载已停止"}}}},
     "common.retry": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Try Again"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"重试"}}}},
     "common.save": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Save"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"保存"}}}},
     "common.sort": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Sort"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"排序"}}}},
@@ -1077,6 +1160,10 @@
     "android.external.issue.avd-incompatible": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The dedicated Android environment is incompatible with the existing SDK (%@). userdata was not modified."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"专用 Android 环境与现有 SDK 不兼容（%@）；未修改 userdata"}}}},
     "android.external.issue.avd-incomplete": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The OKVideoMac Android environment folder is incomplete. Existing data was not overwritten."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"OKVideoMac 专用 Android 环境目录不完整；未自动覆盖现有数据"}}}},
     "android.external.issue.avdmanager-required": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"avdmanager is required to create or repair the dedicated Android environment."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"创建或修复专用 Android 环境需要 avdmanager"}}}},
+    "android.dex-cache.cancelled": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The plugin download was cancelled."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"插件下载已取消。"}}}},
+    "android.dex-cache.download": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The plugin download was interrupted. Check the connection and try again."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"插件下载中断，请检查网络后重试。"}}}},
+    "android.dex-cache.integrity": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The downloaded plugin did not pass verification. Try again later."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"下载的插件未通过校验，请稍后重试。"}}}},
+    "android.dex-cache.write": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The local plugin cache could not be updated. Try again."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"本地插件缓存无法更新，请重试。"}}}},
     "android.external.issue.java-required": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"A Java Runtime is required to create or repair the dedicated Android environment."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"创建或修复专用 Android 环境需要 Java Runtime"}}}},
     "android.external.issue.sdk-folder-missing": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The previously configured Android SDK folder no longer exists."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"以前配置的 Android SDK 文件夹已不存在"}}}},
     "android.external.issue.system-image-missing": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The selected SDK has no usable arm64 Android system image."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"所选 SDK 没有可用的 arm64 Android system image"}}}},
@@ -3288,23 +3375,7 @@
         }
       }
     },
-    "settings.backup.export.title": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Export Current Configuration and History"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "导出当前配置与历史"
-          }
-        }
-      }
-    },
+    "settings.backup.export.title": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Export Current Configuration, History and Favorites"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "导出当前配置、历史与收藏"}}}},
     "settings.backup.history.detail": {
       "extractionState": "manual",
       "localizations": {
@@ -3560,23 +3631,7 @@
         }
       }
     },
-    "settings.backup.subtitle": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Export the current video provider configuration and its watch history"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "导出当前点播配置和对应的观看历史"
-          }
-        }
-      }
-    },
+    "settings.backup.subtitle": {"extractionState": "manual", "localizations": {"en": {"stringUnit": {"state": "translated", "value": "Export the current configuration, watch history, and favorites"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "导出当前点播配置、观看历史与收藏"}}}},
     "settings.cache.images.section": {
       "extractionState": "manual",
       "localizations": {
@@ -4768,7 +4823,15 @@
           }
         }
       }
-    }
+    },
+    "episode.version": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Version %d"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"版本 %d"}},"zh-Hant":{"stringUnit":{"state":"translated","value":"版本 %d"}}}},
+    "player.versions": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Versions"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"版本"}},"zh-Hant":{"stringUnit":{"state":"translated","value":"版本"}}}},
+    "player.version-count": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"%d versions"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"共 %d 个版本"}},"zh-Hant":{"stringUnit":{"state":"translated","value":"共 %d 個版本"}}}},
+    "live.loading-slow": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Connection is taking longer than usual"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"连接较慢，请稍候"}},"zh-Hant":{"stringUnit":{"state":"translated","value":"連線較慢，請稍候"}}}},
+    "live.loading-channel": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Loading %@…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在加载 %@…"}},"zh-Hant":{"stringUnit":{"state":"translated","value":"正在載入 %@…"}}}},
+    "live.next-channel": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Next Channel"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"下一个频道"}},"zh-Hant":{"stringUnit":{"state":"translated","value":"下一個頻道"}}}},
+    "live.channel-unavailable": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"This channel could not be loaded. Try again or choose another channel."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"当前频道暂时无法播放，请重试或切换频道。"}},"zh-Hant":{"stringUnit":{"state":"translated","value":"目前頻道暫時無法播放，請重試或切換頻道。"}}}},
+    "detail.synopsis-title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Synopsis"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"简介"}},"zh-Hant":{"stringUnit":{"state":"translated","value":"簡介"}}}}
   },
   "version": "1.0"
 }

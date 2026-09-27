@@ -11,13 +11,13 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
 ## 当前版本
 
-- 当前版本：0.7.0（Build 102）
-- 当前本地验收包目标 tag 为 `v0.7.0`；本轮不创建 tag 或公开 Release。
-- 当前 source release index：`OKVideoMac-0.7.0-build102-SOURCE_RELEASE_INDEX.json`。
+- 当前发布候选：0.7.3（Build 129）
+- 目标 tag：`v0.7.3`；只有 exact release commit 的正式分发门禁全部通过后才创建。
+- 预期 source release index：`OKVideoMac-0.7.3-build129-SOURCE_RELEASE_INDEX.json`。
 - 最低系统：macOS 12.0
 - 支持架构：Apple Silicon / arm64
-- 播放历史按点播配置源分组；切换同一配置内的站点不会隐藏历史，历史项仍保留
-  实际站点身份用于准确恢复播放
+- 播放历史与收藏保留配置、站点和稳定媒体身份；旧记录经过迁移后仍可准确恢复，
+  无法核验来源时要求用户显式修复
 - 网盘登录状态按 Provider 与账号类型持久化；切换配置源只取消当前二维码交互，
   不会清除已经确认的登录状态；凭据不会写入普通配置、历史或便携备份
 - Android Bridge 运行时固定 AVD 身份与正式签名；发现旧版 AVD 时可在完整备份和
@@ -25,18 +25,28 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 - 左侧导航改用 AppKit 原生 Source List 与 Sidebar 材质，统一 App Store 风格的
   字号、间距、蓝色语义图标、选中状态和窗口激活状态；搜索框支持两段式 Esc
 - 搜索框有文字时第一次 Esc 只清空并保持焦点，空框再次 Esc 才退出搜索
-- Xcode：721 total / 713 passed / 8 intentionally skipped / 0 failed
 - 0.6.0 历史另行执行的 4 项真实 Android 生命周期测试与 API 35 隔离矩阵通过；
-  本轮未重跑真实 Runtime 操作，维护者的卸载人工验证独立记录
-- OKVideoKit：261 passed / 0 failed
-- AndroidRuntimeKit：57 total / 56 passed / 1 intentionally skipped / 0 failed
-- Node / CatPaw / Quark：30 passed / 0 failed
-- Android Release assemble 与 lint：通过；Android JVM unit tests：NO-SOURCE
-- 正式 Release packaging 已验证 29 个 Mach-O 的架构、部署目标、依赖闭包、
-  Developer ID 签名和 Hardened Runtime，并生成 DMG、SBOM 与对应源码集
+  本轮正式收口不把这些历史实机结果冒充为重跑结果
+- 0.7.3 的全量自动测试、静态检查和本地 Release 包体验证结果记录在
+  [发布就绪记录](../Docs/RELEASE_READINESS_0.7.3.md)
 - 对外分发：0.6.1 Build 101 已完成 Developer ID signing、Apple notarization（`Accepted`）、
   staple、`stapler validate`、Gatekeeper 和 DMG 安装 smoke 验收；签名使用临时专用
   keychain，结束后已删除并恢复原 search list。详见[验证记录](../Docs/RELEASE_VALIDATION_0.6.1.md)
+
+## 0.7.3 发布候选
+
+- XMLTV 和 Native Xtream 直播支持原生完整节目单，包括日期导航、回到当前时刻、
+  固定时间比例、虚拟化频道行和节目详情；Native Xtream 短 EPG 已进入支持范围。
+- 播放器加入原生弹幕覆盖层，支持源提供的 XML/JSON、Bilibili XML 导入、服务搜索、
+  本集匹配、手动选择和时间校准；显示刷新驱动与文字位图缓存改善滚动流畅度。
+- 历史和收藏改为来源感知的原生列表，强化续播、进度、删除、迁移与便携备份；
+  便携备份 schema 更新为 v4。
+- 分类、搜索、详情和长剧集导航使用更明确的请求所有权、续页状态和有界缓存；
+  Native Xtream 媒体遵循系统代理，并改进音量记忆、全屏比例与退出全屏恢复。
+- 点播、直播、历史和收藏统一原生悬浮与选中反馈；只有有内容的列表行显示分割线。
+
+详见 [0.7.3 发布说明](../Docs/RELEASE_NOTES_0.7.3.md)。在 Developer ID、Apple
+公证、Staple、Gatekeeper 和安装 smoke 门禁完成前，最新公开稳定版仍为 0.6.1。
 
 ## 0.6.1 新增内容
 
@@ -59,7 +69,8 @@ Android Compatibility 分类显示组件、缓存、用户数据和备份，并�
 - **来源设置与播放器面板**：整合配置入口，选集、音轨、字幕和设置面板按内容高度显示，
   适应普通窗口、缩放窗口和全屏。
 
-Native Xtream 当前不提供 Xtream EPG、回看/时移或 `direct_source`。
+0.6.0 当时不提供 Xtream EPG、回看/时移或 `direct_source`；0.7.3 已加入短 EPG，
+回看/时移与 `direct_source` 仍不在支持范围。
 代理处理不等于完整支持 PAC、SOCKS、认证代理和逐 CDN 动态路由；复杂 HLS 仍可能
 较慢，受控回退只处理已识别的保守子集。详见[发布说明](../Docs/RELEASE_NOTES_0.6.0.md)。
 
@@ -157,7 +168,7 @@ SHA-256；本地开发包或来源不明的副本不属于正式发行 artifact�
 
 | 源 / 运行时 | 状态 | 说明 |
 | --- | --- | --- |
-| Native Xtream | ✅ Supported | 原生认证、Movies、Series、电影/剧集搜索和 Basic Live；不支持 Xtream EPG、回看/时移或 `direct_source` |
+| Native Xtream | ✅ Supported | 原生认证、Movies、Series、搜索、Basic Live 与短 EPG；不支持回看/时移或 `direct_source` |
 | Native CMS JSON | ✅ Supported | 原生 Provider 路径 |
 | CMS XML API 响应 | ◐ Partial | 已覆盖核心响应映射；具体源行为可能不同 |
 | FongMi 风格 JSON 配置 | ◐ Supported with limitations | 部分字段仅解析或保留，并未进入功能执行链 |
@@ -180,7 +191,7 @@ SHA-256；本地开发包或来源不明的副本不属于正式发行 artifact�
 OKVideoMac 的启动和主要 Native Mode 功能**不要求安装 Android SDK 或
 Emulator**。当前 Native 能力包括（具体边界见兼容矩阵）：
 
-- Native Xtream 认证、Movies、Series、电影/剧集搜索和 Basic Live；
+- Native Xtream 认证、Movies、Series、电影/剧集搜索、Basic Live 与短 EPG；
 - Native CMS JSON、部分 CMS XML API 响应和指定的 FongMi 图片/Base64 包装 JSON；
 - M3U、TXT、JSON 直播源和 XMLTV；
 - QuickJS Spider 路径；
@@ -216,10 +227,11 @@ Runtime，或选择并确认 External SDK。历史上由 OKVideoMac 明确保存
 
 ## 主要能力
 
-- Native Xtream 账号接入、Movies、Series、电影/剧集搜索和 Basic Live，无需 Android；
+- Native Xtream 账号接入、Movies、Series、搜索、Basic Live 与短 EPG，无需 Android；
 - 远程 URL、本地文件和粘贴 JSON 配置；
 - 首页、分类、筛选、详情、多站搜索、收藏和历史；
-- M3U/TXT/JSON 直播列表与 XMLTV EPG；
+- M3U/TXT/JSON 直播列表、XMLTV 与 Native Xtream 完整节目单；
+- 源提供的 XML/JSON 弹幕、Bilibili XML 导入、弹幕搜索和本集绑定；
 - libmpv 点播/直播、Seek、音量、倍速、音轨、字幕、截图和全屏；
 - QuickJS、Node.js 和可选 Android Java/DEX 兼容路径；
 - SQLite 持久化、图片内存/磁盘缓存和播放进度恢复；
@@ -227,8 +239,8 @@ Runtime，或选择并确认 External SDK。历史上由 OKVideoMac 明确保存
 
 功能级别状态与证据见
 [`macOS/OKVideoMac/Docs/COMPATIBILITY.md`](macOS/OKVideoMac/Docs/COMPATIBILITY.md)。
-0.6.1 面向用户的变更摘要见
-[`Docs/RELEASE_NOTES_0.6.1.md`](../Docs/RELEASE_NOTES_0.6.1.md)。
+0.7.3 面向用户的变更摘要见
+[`Docs/RELEASE_NOTES_0.7.3.md`](../Docs/RELEASE_NOTES_0.7.3.md)。
 
 ## 当前已知限制与风险
 

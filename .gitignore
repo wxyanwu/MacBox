@@ -11,3 +11,31 @@ OKVideoMac/Releases/**/*.zip
 OKVideoMac/macOS/OKVideoMac/Vendor/Build/
 OKVideoMac/macOS/OKVideoMac/Artifacts/
 OKVideoMac/macOS/OKVideoMac/.xcodegen/
+
+# Local acceptance evidence and one-off visual probes are intentionally kept
+# outside the immutable source release. Curated release records live in the
+# versioned release notes and readiness report instead.
+Docs/*Evidence/
+Docs/LocalRecoveryEvidence/
+Docs/DemoSource/v0.6.1/
+Docs/*_AUDIT_202609*.md
+Docs/*_PLAN_202609*.md
+Docs/*_IMPLEMENTATION_202609*.md
+Docs/*_202609*.md
+Docs/*_BUILD[0-9]*_*.md
+Docs/INTERACTION_0.7.3_ACCEPTANCE.md
+Docs/NAVIGATION_AND_GUIDE_H2_ACCEPTANCE.md
+Docs/PLAYER_STATUS_BUILD*.md
+Docs/QUARK_AUTH_RECOVERY_*.md
+Docs/UX_10A1_IMPLEMENTATION_REPORT.md
+Docs/WINDOW_TILING_FULLSCREEN_*.md
+Docs/RELEASE_NOTES_0.7.1.md
+Docs/RELEASE_NOTES_0.7.2.md
+Tools/SourceAudit/AnalyzeFullscreenCircle.swift
+Tools/SourceAudit/DebugTrace.entitlements
+Tools/SourceAudit/FullscreenCalibration.swift
+Tools/SourceAudit/FullscreenCapture.swift
+Tools/SourceAudit/PosterScrollLab.swift
+Tools/SourceAudit/PosterScrollTrace.m
+Tools/SourceAudit/analyze-poster-scroll-trace.py
+Tools/SourceAudit/build-poster-scroll-lab.sh

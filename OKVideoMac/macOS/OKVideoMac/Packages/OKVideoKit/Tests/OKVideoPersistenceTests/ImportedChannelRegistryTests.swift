@@ -78,14 +78,14 @@ final class ImportedChannelRegistryTests: XCTestCase {
     func testCleanDatabaseCreatesEmptyRegistry() async throws {
         let store = try store()
         try await expectRows(store, [])
-        XCTAssertEqual(try scalar(fixtureURL(for: store), "PRAGMA user_version"), 10)
+        XCTAssertEqual(try scalar(fixtureURL(for: store), "PRAGMA user_version"), 13)
         XCTAssertEqual(try scalar(fixtureURL(for: store), "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='\(table)'"), 1)
     }
     func testVersionNineMigrationAddsEmptyRegistry() async throws {
         let path = try legacyURL()
         let store = try SQLiteStore(databaseURL: path)
         try await expectRows(store, [])
-        XCTAssertEqual(try scalar(path, "PRAGMA user_version"), 10)
+        XCTAssertEqual(try scalar(path, "PRAGMA user_version"), 13)
     }
     func testMigrationReopenIsIdempotentAndRetainsRecords() async throws {
         let path = try legacyURL()
@@ -97,7 +97,7 @@ final class ImportedChannelRegistryTests: XCTestCase {
         for _ in 0..<3 {
             let store = try SQLiteStore(databaseURL: path)
             try await expectRows(store, [expected])
-            XCTAssertEqual(try scalar(path, "PRAGMA user_version"), 10)
+            XCTAssertEqual(try scalar(path, "PRAGMA user_version"), 13)
         }
     }
     func testMigrationFailureRollsBackTableAndVersionThenRetries() async throws {
@@ -115,7 +115,7 @@ final class ImportedChannelRegistryTests: XCTestCase {
         try execute(path, "DROP INDEX imported_channel_identities_source_lifecycle")
         let store = try SQLiteStore(databaseURL: path)
         try await expectRows(store, [])
-        XCTAssertEqual(try scalar(path, "PRAGMA user_version"), 10)
+        XCTAssertEqual(try scalar(path, "PRAGMA user_version"), 13)
     }
     func testInsertAndFetchRoundTrip() async throws {
         let store = try store(), expected = try record(tvg: "CCTV1", upstream: "stable")

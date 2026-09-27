@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import OKVideoCore
 
 public enum StoredConfigurationSourceKind: String, Codable, Sendable {
@@ -92,29 +93,70 @@ public struct StoredLiveSource: Equatable, Identifiable, Sendable {
     }
 }
 
+public struct FavoriteIdentity: Hashable, Sendable {
+    public var configurationID: UUID?
+    public var siteKey: String
+    public var videoID: String
+    public var sourceFingerprint: String
+}
+
 public struct FavoriteRecord: Codable, Equatable, Identifiable, Sendable {
-    public var id: String { "\(siteKey)::\(videoID)" }
+    public var id: String { favoriteID.uuidString.lowercased() }
+    public var favoriteID: UUID
+    public var configurationID: UUID?
+    public var configurationName: String?
+    public var siteName: String?
+    public var sourceFingerprint: String
     public var siteKey: String
     public var videoID: String
     public var title: String
     public var posterURL: URL?
     public var synopsis: String?
     public var createdAt: Date
+    public var year: String?
+    public var categoryName: String?
+    public var identity: FavoriteIdentity {
+        FavoriteIdentity(configurationID: configurationID, siteKey: siteKey,
+                         videoID: videoID, sourceFingerprint: sourceFingerprint)
+    }
 
-    public init(
-        siteKey: String,
-        videoID: String,
-        title: String,
-        posterURL: URL? = nil,
-        synopsis: String? = nil,
-        createdAt: Date = Date()
-    ) {
-        self.siteKey = siteKey
-        self.videoID = videoID
-        self.title = title
-        self.posterURL = posterURL
-        self.synopsis = synopsis
-        self.createdAt = createdAt
+    public init(siteKey: String, videoID: String, title: String,
+                posterURL: URL? = nil, synopsis: String? = nil, createdAt: Date = Date(),
+                favoriteID: UUID = UUID(), configurationID: UUID? = nil,
+                configurationName: String? = nil, siteName: String? = nil,
+                sourceFingerprint: String = "", year: String? = nil, categoryName: String? = nil) {
+        self.favoriteID = favoriteID; self.configurationID = configurationID
+        self.configurationName = configurationName; self.siteName = siteName
+        self.sourceFingerprint = sourceFingerprint
+        self.siteKey = siteKey; self.videoID = videoID; self.title = title
+        self.posterURL = posterURL; self.synopsis = synopsis; self.createdAt = createdAt
+        self.year = year; self.categoryName = categoryName
+    }
+    private enum CodingKeys: String, CodingKey {
+        case favoriteID, configurationID, configurationName, siteName, sourceFingerprint
+        case siteKey, videoID, title, posterURL, synopsis, createdAt, year, categoryName
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        siteKey = try c.decode(String.self, forKey: .siteKey)
+        videoID = try c.decode(String.self, forKey: .videoID)
+        title = try c.decode(String.self, forKey: .title)
+        posterURL = try c.decodeIfPresent(URL.self, forKey: .posterURL)
+        synopsis = try c.decodeIfPresent(String.self, forKey: .synopsis)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        configurationID = try c.decodeIfPresent(UUID.self, forKey: .configurationID)
+        configurationName = try c.decodeIfPresent(String.self, forKey: .configurationName)
+        siteName = try c.decodeIfPresent(String.self, forKey: .siteName)
+        sourceFingerprint = try c.decodeIfPresent(String.self, forKey: .sourceFingerprint) ?? ""
+        year = try c.decodeIfPresent(String.self, forKey: .year)
+        categoryName = try c.decodeIfPresent(String.self, forKey: .categoryName)
+        // Legacy decoding is deterministic. Database migration assigns an ID
+        // once and persists it; merely reading an old document never changes it.
+        let encoded = try JSONEncoder().encode([siteKey, videoID])
+        let bytes = Array(SHA256.hash(data: encoded).prefix(16))
+        favoriteID = try c.decodeIfPresent(UUID.self, forKey: .favoriteID) ?? UUID(uuid:
+            (bytes[0],bytes[1],bytes[2],bytes[3],bytes[4],bytes[5],bytes[6],bytes[7],
+             bytes[8],bytes[9],bytes[10],bytes[11],bytes[12],bytes[13],bytes[14],bytes[15]))
     }
 }
 
@@ -144,6 +186,8 @@ public struct HistoryNavigationEpisode: Codable, Equatable, Sendable {
     public var seasonNumber: Int?
     public var episodeNumber: Int?
     public var index: Int?
+    public var metadata: PlaybackEpisodeMetadata?
+    public var categoryName: String?
 
     public init(
         providerStableID: String? = nil,
@@ -151,7 +195,9 @@ public struct HistoryNavigationEpisode: Codable, Equatable, Sendable {
         normalizedFilename: String,
         seasonNumber: Int? = nil,
         episodeNumber: Int? = nil,
-        index: Int? = nil
+        index: Int? = nil,
+        metadata: PlaybackEpisodeMetadata? = nil,
+        categoryName: String? = nil
     ) {
         self.providerStableID = providerStableID
         self.name = name
@@ -159,6 +205,8 @@ public struct HistoryNavigationEpisode: Codable, Equatable, Sendable {
         self.seasonNumber = seasonNumber
         self.episodeNumber = episodeNumber
         self.index = index
+        self.metadata = metadata
+        self.categoryName = categoryName
     }
 }
 
@@ -232,7 +280,9 @@ public extension HistoryNavigationRecipe {
                 normalizedFilename: normalizedFilename,
                 seasonNumber: Self.safeNumber(episode.seasonNumber),
                 episodeNumber: Self.safeNumber(episode.episodeNumber),
-                index: Self.safeIndex(episode.index)
+                index: Self.safeIndex(episode.index),
+                metadata: episode.metadata.map { .init(form: $0.form, season: $0.season.flatMap { (0...10_000).contains($0) ? $0 : nil }, episode: Self.safeNumber($0.episode)) },
+                categoryName: episode.categoryName.flatMap(Self.safeDisplayValue)
             ),
             resumePosition: resumePosition.isFinite
                 ? max(0, resumePosition)

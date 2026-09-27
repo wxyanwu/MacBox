@@ -89,7 +89,8 @@ public final class URLSessionHTTPClient: HTTPClient {
             maximumRedirects: request.maximumRedirects,
             redirectedHeaders: redirectedHeaders,
             redirectPolicy: request.redirectPolicy,
-            originalURL: request.url
+            originalURL: request.url,
+            timingObserver: HTTPTaskTimingContext.observer
         )
         let (data, response): (Data, URLResponse)
         let redirects: [HTTPRedirectHop]
@@ -209,6 +210,7 @@ final class RedirectDelegate: NSObject, URLSessionTaskDelegate {
     private let redirectedHeaders: HTTPHeaders
     private let redirectPolicy: HTTPRedirectPolicy
     private let originalURL: URL?
+    private let timingObserver: (@Sendable (HTTPTaskTiming) -> Void)?
     private let lock = NSLock()
     private var redirectCount = 0
     private var redirectHops: [HTTPRedirectHop] = []
@@ -236,12 +238,19 @@ final class RedirectDelegate: NSObject, URLSessionTaskDelegate {
         maximumRedirects: Int,
         redirectedHeaders: HTTPHeaders = [:],
         redirectPolicy: HTTPRedirectPolicy = .follow,
-        originalURL: URL? = nil
+        originalURL: URL? = nil,
+        timingObserver: (@Sendable (HTTPTaskTiming) -> Void)? = nil
     ) {
         self.maximumRedirects = max(0, maximumRedirects)
         self.redirectedHeaders = redirectedHeaders
         self.redirectPolicy = redirectPolicy
         self.originalURL = originalURL
+        self.timingObserver = timingObserver
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    didFinishCollecting metrics: URLSessionTaskMetrics) {
+        timingObserver?(HTTPTaskTiming(metrics))
     }
 
     func preparedRedirectRequest(
