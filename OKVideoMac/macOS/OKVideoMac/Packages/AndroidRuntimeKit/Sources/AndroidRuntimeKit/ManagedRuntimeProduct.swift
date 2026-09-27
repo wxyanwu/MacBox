@@ -341,6 +341,8 @@ public actor AndroidManagedRuntimeManager {
     private let materializer: any RuntimeComponentMaterializing
     private let validator: any StagedRuntimeValidating
     private let currentAppVersion: String
+    private let compressInstalledRuntime: Bool
+    private var mountFlight: Task<Void, Error>?
     private var state: ManagedRuntimeInstallationState = .detecting
     private var stateContinuations: [
         UUID: AsyncStream<ManagedRuntimeInstallationState>.Continuation
@@ -364,7 +366,8 @@ public actor AndroidManagedRuntimeManager {
         materializer: any RuntimeComponentMaterializing =
             ArchiveRuntimeComponentMaterializer(),
         validator: any StagedRuntimeValidating =
-            DefaultStagedRuntimeValidator()
+            DefaultStagedRuntimeValidator(),
+        compressInstalledRuntime: Bool = false
     ) {
         layout = AndroidRuntimeLayout(
             applicationSupportDirectory: applicationSupportDirectory
@@ -373,6 +376,7 @@ public actor AndroidManagedRuntimeManager {
         maintenance = RuntimeMaintenanceService(applicationSupportDirectory: applicationSupportDirectory, catalog: catalog)
         self.downloader = downloader
         self.currentAppVersion = currentAppVersion
+        self.compressInstalledRuntime = compressInstalledRuntime
         self.materializer = materializer
         self.validator = validator
     }
@@ -390,7 +394,8 @@ public actor AndroidManagedRuntimeManager {
             downloader: URLSessionRuntimeArtifactDownloader(
                 allowedHosts: Set(catalog.allowedDownloadHosts ?? [])
             ),
-            currentAppVersion: appVersion
+            currentAppVersion: appVersion,
+            compressInstalledRuntime: true
         )
     }
 
@@ -408,8 +413,15 @@ public actor AndroidManagedRuntimeManager {
     public func currentState() -> ManagedRuntimeInstallationState { state }
 
     @discardableResult
-    public func refresh() throws -> ManagedRuntimeInstallationState {
+    public func refresh() async throws -> ManagedRuntimeInstallationState {
         guard installationFlight == nil else { return state }
+        guard !maintenanceActive else { return state }
+        do {
+            try await restoreCompressedRuntime()
+        } catch {
+            publish(.damaged(Self.failure(from: error), try? defaultOffer()))
+            return state
+        }
         switch state {
         case .available, .failed, .cancelled:
             return state
@@ -468,14 +480,15 @@ public actor AndroidManagedRuntimeManager {
         return state
     }
 
-    public func presentInstallOffer() throws {
+    public func presentInstallOffer() async throws {
         guard !maintenanceActive else { throw RuntimeMaintenanceError.busy }
         try RuntimeMaintenanceService.requireNoPendingTransaction(layout: layout)
+        try await restoreCompressedRuntime()
         if (try? ManagedRuntimeSelection.resolve(
             layout: layout,
             catalog: catalog
         )) != nil {
-            _ = try refresh()
+            _ = try await refresh()
             return
         }
         let detection = AndroidRuntimeDetector(layout: layout).detect(
@@ -492,11 +505,12 @@ public actor AndroidManagedRuntimeManager {
     public func ensureReadyForDex() async throws {
         guard !maintenanceActive else { throw RuntimeMaintenanceError.busy }
         try RuntimeMaintenanceService.requireNoPendingTransaction(layout: layout)
+        try await restoreCompressedRuntime()
         if (try? ManagedRuntimeSelection.resolve(
             layout: layout,
             catalog: catalog
         )) != nil {
-            _ = try refresh()
+            _ = try await refresh()
             return
         }
         if let flight = installationFlight {
@@ -587,7 +601,7 @@ public actor AndroidManagedRuntimeManager {
     }
 
     public func repair(acceptingLicenses: Bool) async throws {
-        guard installationFlight == nil else { throw RuntimeMaintenanceError.busy }
+        guard installationFlight == nil, mountFlight == nil else { throw RuntimeMaintenanceError.busy }
         let repairLease = try RuntimeMaintenanceLease(layout: layout)
         defer { withExtendedLifetime(repairLease) {} }
         guard !maintenanceActive else { throw RuntimeMaintenanceError.busy }
@@ -597,7 +611,13 @@ public actor AndroidManagedRuntimeManager {
         }
         let offer = try defaultOffer()
         publish(.repairing(offer))
+        maintenanceActive = true
+        defer { maintenanceActive = false }
         let generation = layout.generation(offer.generationID)
+        if generation.isCompressed {
+            let storage = try RuntimeCompressedStorage(root: layout.root)
+            try await storage.unmount(container: generation.root, at: generation.payloadRoot)
+        }
         var backup: URL?
         let previousPointer = try? Data(
             contentsOf: layout.currentRuntimePointer
@@ -618,9 +638,18 @@ public actor AndroidManagedRuntimeManager {
             backup = value
         }
         do {
+            maintenanceActive = false
             try await installDefault(acceptingLicenses: true)
         } catch {
+            maintenanceActive = true
             if let backup {
+                let failedGeneration = layout.generation(offer.generationID)
+                if failedGeneration.isCompressed {
+                    let storage = try RuntimeCompressedStorage(root: layout.root)
+                    // If a busy volume cannot detach, preserve both containers
+                    // for recovery rather than deleting its backing image.
+                    try await storage.unmount(container: failedGeneration.root, at: failedGeneration.payloadRoot)
+                }
                 let boundary = try? ManagedRuntimePathBoundary(
                     root: layout.root
                 )
@@ -650,17 +679,17 @@ public actor AndroidManagedRuntimeManager {
     }
 
     public func beginMaintenance() async throws {
-        guard !maintenanceActive, !state.isBusy, installationFlight == nil else {
+        guard !maintenanceActive, !state.isBusy, installationFlight == nil, mountFlight == nil else {
             throw RuntimeMaintenanceError.busy
         }
         maintenanceActive = true
         resumeDexWaiters(with: .failure(RuntimeMaintenanceError.busy))
     }
 
-    public func endMaintenance() {
+    public func endMaintenance() async {
         maintenanceActive = false
         state = .detecting
-        _ = try? refresh()
+        _ = try? await refresh()
     }
 
     public func diagnosticReport() -> ManagedRuntimeDiagnosticReport {
@@ -757,10 +786,29 @@ public actor AndroidManagedRuntimeManager {
             catalog: catalog,
             downloader: downloader,
             materializer: materializer,
-            validator: validator
+            validator: validator,
+            compressInstalledRuntime: compressInstalledRuntime
         ) { [weak self] progress in
             Task { await self?.apply(progress, attemptID: attemptID) }
         }
+    }
+
+    /// Startup and resumed Dex requests join one verified mount operation.
+    /// Expanded installations return immediately and keep their existing paths.
+    private func restoreCompressedRuntime() async throws {
+        if let flight = mountFlight { return try await flight.value }
+        guard let data = try? Data(contentsOf: layout.currentRuntimePointer),
+              let pointer = try? JSONDecoder().decode(CurrentRuntimePointer.self, from: data),
+              pointer.schemaVersion == 1, pointer.generationID.isValid else { return }
+        let generation = layout.generation(pointer.generationID)
+        guard generation.isCompressed else { return }
+        let storage = try RuntimeCompressedStorage(root: layout.root)
+        let flight = Task {
+            try await storage.mount(container: generation.root, at: generation.payloadRoot)
+        }
+        mountFlight = flight
+        defer { mountFlight = nil }
+        try await flight.value
     }
 
     private func apply(
@@ -857,7 +905,10 @@ public actor AndroidManagedRuntimeManager {
             generationID: profile.generationID,
             displayName: profile.displayName,
             downloadBytes: profile.expectedDownloadSize,
-            requiredFreeSpace: profile.requiredFreeSpace,
+            requiredFreeSpace: compressInstalledRuntime
+                ? max(profile.requiredFreeSpace, Int64(Double(generation.components.reduce(Int64(0)) {
+                    $0 + $1.compressedSize + $1.installedSize * 3
+                }) * 1.15)) : profile.requiredFreeSpace,
             licenses: licenses,
             verificationNote: profile.verificationNote
         )

@@ -39,9 +39,15 @@ Android Studio 自动发现而静默切换到 External。
 
 App 包内不包含数 GB Runtime。组件按需安装到：
 
+本地兼容版新安装的托管组件使用无损压缩存储，保留原始 Android/JRE 内容。
+首次启动时自动以只读方式挂载；虚拟设备数据、订阅、历史和密钥仍保存在可写目录。
+安装成功后自动清理本次已校验的下载包，因此修复可能需要重新下载。
+旧的展开目录继续受支持，不会在后台擅自改写用户选择的 External SDK。
+
 ```text
 ~/Library/Application Support/OKVideoMac/AndroidRuntime/
-  Generations/<generation>/{sdk,jre}
+  Generations/<generation>/{runtime.dmg,compressed-image.json,generation-manifest.json}
+  Mounts/<generation>/{sdk,jre,...}  # 临时只读挂载，不是第二份展开文件
   current-runtime.json
   Downloads/
   Staging/
@@ -57,6 +63,11 @@ Catalog 固定版本、URL、大小、SHA-256、架构、许可证和 archive la
 Runtime Generation 是不可变目录；更新先安装并验证新 Generation，再原子切换
 `current-runtime.json`。AVD 在 Generation 外单独保存，所以工具升级不会覆盖
 userdata。修复只重装受管组件，并保留 AVD、收藏、历史和普通设置。
+
+压缩后的组件占用、AVD 用户数据、备份和安装峰值空间是不同指标：安装时必须临时
+保留源文件并验证压缩镜像，所需可用空间会高于安装后的组件占用。存储统计只计算
+镜像文件，不重复计入其挂载后的逻辑大小。修复/卸载会先停止会话并正常卸载镜像，
+不会强制卸载正在使用的卷。
 
 ## 安全与隔离
 

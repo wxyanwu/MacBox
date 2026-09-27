@@ -37,6 +37,16 @@ public struct AndroidRuntimeLayout: Equatable, Sendable {
         root.appendingPathComponent("Backups", isDirectory: true)
     }
 
+    /// Ephemeral read-only attachments; never count their expanded contents
+    /// as additional on-disk storage or put mutable Android data here.
+    public var mounts: URL {
+        root.appendingPathComponent("Mounts", isDirectory: true)
+    }
+
+    public func mountPoint(_ generationID: RuntimeGenerationID) -> URL {
+        mounts.appendingPathComponent(generationID.rawValue, isDirectory: true)
+    }
+
     public var logs: URL {
         root.appendingPathComponent("Logs", isDirectory: true)
     }
@@ -77,14 +87,17 @@ public struct AndroidRuntimeLayout: Equatable, Sendable {
             generationID.rawValue,
             isDirectory: true
         )
+        let compressed = FileManager.default.fileExists(atPath: generationRoot
+            .appendingPathComponent(RuntimeCompressedStorage.manifestName).path)
+        let payload = compressed ? mountPoint(generationID) : generationRoot
         return RuntimeGenerationLayout(
             id: generationID,
             root: generationRoot,
-            sdk: generationRoot.appendingPathComponent(
+            sdk: payload.appendingPathComponent(
                 "sdk",
                 isDirectory: true
             ),
-            jre: generationRoot.appendingPathComponent(
+            jre: payload.appendingPathComponent(
                 "jre",
                 isDirectory: true
             ),
@@ -101,6 +114,9 @@ public struct RuntimeGenerationLayout: Equatable, Sendable {
     public let sdk: URL
     public let jre: URL
     public let manifest: URL
+
+    public var payloadRoot: URL { sdk.deletingLastPathComponent() }
+    public var isCompressed: Bool { payloadRoot != root }
 
     public init(
         id: RuntimeGenerationID,

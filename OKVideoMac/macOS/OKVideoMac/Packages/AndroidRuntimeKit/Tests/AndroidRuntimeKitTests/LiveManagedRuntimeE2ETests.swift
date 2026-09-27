@@ -32,7 +32,10 @@ final class LiveManagedRuntimeE2ETests: XCTestCase {
             downloader: URLSessionRuntimeArtifactDownloader(
                 allowedHosts: Set(catalog.allowedDownloadHosts ?? [])
             ),
-            currentAppVersion: "0.5.0"
+            currentAppVersion: "0.6.1",
+            compressInstalledRuntime: ProcessInfo.processInfo.environment[
+                "OKVIDEOMAC_COMPRESSED_RUNTIME_E2E"
+            ] == "1"
         )
         let observer = Task {
             let states = await manager.states()
@@ -56,6 +59,21 @@ final class LiveManagedRuntimeE2ETests: XCTestCase {
             selection.generationID,
             catalog.defaultProfile?.generationID
         )
+        if ProcessInfo.processInfo.environment["OKVIDEOMAC_COMPRESSED_RUNTIME_E2E"] == "1" {
+            let generation = layout.generation(selection.generationID)
+            XCTAssertTrue(generation.isCompressed)
+            let storage = try RuntimeCompressedStorage(root: layout.root)
+            try await storage.unmount(container: generation.root, at: generation.payloadRoot)
+            let restarted = AndroidManagedRuntimeManager(
+                applicationSupportDirectory: support, catalog: catalog,
+                downloader: URLSessionRuntimeArtifactDownloader(allowedHosts: Set(catalog.allowedDownloadHosts ?? [])),
+                currentAppVersion: "0.6.1", compressInstalledRuntime: true
+            )
+            _ = try await restarted.refresh()
+            let restored = try ManagedRuntimeSelection.resolve(layout: layout, catalog: catalog)
+            XCTAssertTrue(restored.purity.passed)
+            XCTAssertEqual(restored.sdkRoot, selection.sdkRoot)
+        }
         print("MANAGED_RUNTIME_E2E_GENERATION \(selection.generationID.rawValue)")
         print("MANAGED_RUNTIME_E2E_SDK \(selection.sdkRoot.path)")
         print("MANAGED_RUNTIME_E2E_JRE \(selection.javaHome.path)")

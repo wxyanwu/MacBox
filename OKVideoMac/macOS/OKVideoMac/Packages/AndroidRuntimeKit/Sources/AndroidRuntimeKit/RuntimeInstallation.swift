@@ -1057,6 +1057,7 @@ public struct AndroidRuntimeInstaller: Sendable {
     private let downloader: any RuntimeArtifactDownloading
     private let materializer: any RuntimeComponentMaterializing
     private let validator: any StagedRuntimeValidating
+    private let compressInstalledRuntime: Bool
     private let progress: @Sendable (RuntimeInstallationProgress) -> Void
 
     public init(
@@ -1068,6 +1069,7 @@ public struct AndroidRuntimeInstaller: Sendable {
             ArchiveRuntimeComponentMaterializer(),
         validator: any StagedRuntimeValidating =
             DefaultStagedRuntimeValidator(),
+        compressInstalledRuntime: Bool = false,
         progress: @escaping @Sendable (RuntimeInstallationProgress) -> Void = {
             _ in
         }
@@ -1077,6 +1079,7 @@ public struct AndroidRuntimeInstaller: Sendable {
         self.downloader = downloader
         self.materializer = materializer
         self.validator = validator
+        self.compressInstalledRuntime = compressInstalledRuntime
         self.progress = progress
     }
 
@@ -1111,6 +1114,7 @@ public struct AndroidRuntimeInstaller: Sendable {
             let lease = try RuntimeMaintenanceLease(layout: layout)
             defer { withExtendedLifetime(lease) {} }
             let previous = readCurrentPointer()?.generationID
+            try await restoreCompressedGeneration(generationID)
             try validateCommittedGeneration(generationID)
             try writePointer(generationID)
             return RuntimeInstallationResult(
@@ -1147,11 +1151,13 @@ public struct AndroidRuntimeInstaller: Sendable {
             at: layout.root.deletingLastPathComponent()
         )
         let previous = readCurrentPointer()?.generationID
+        try await restoreCompressedGeneration(generationID)
         let detection = AndroidRuntimeDetector(layout: layout).detect(
             catalog: catalog
         )
         if detection.status == .ready,
            detection.activeGenerationID == generationID {
+            cleanupVerifiedDownloads(descriptor)
             return RuntimeInstallationResult(
                 generationID: generationID,
                 previousGenerationID: previous,
@@ -1166,6 +1172,7 @@ public struct AndroidRuntimeInstaller: Sendable {
             do {
                 try validateCommittedGeneration(generationID)
                 try writePointer(generationID)
+                cleanupVerifiedDownloads(descriptor)
                 return RuntimeInstallationResult(
                     generationID: generationID,
                     previousGenerationID: previous,
@@ -1334,10 +1341,21 @@ public struct AndroidRuntimeInstaller: Sendable {
                 componentID: nil,
                 startedAt: startedAt
             )
+            // The expanded source remains in this transaction until the
+            // compressed container is verified, committed and activated.
+            var committedSource = stagedGeneration.root
+            if compressInstalledRuntime {
+                let compressed = transactionRoot.appendingPathComponent("compressed", isDirectory: true)
+                let storage = try RuntimeCompressedStorage(root: layout.root)
+                _ = try await storage.create(source: stagedGeneration.root, destination: compressed)
+                try Task.checkCancellation()
+                committedSource = compressed
+            }
             try fileManager.moveItem(
-                at: stagedGeneration.root,
+                at: committedSource,
                 to: finalGeneration.root
             )
+            try await restoreCompressedGeneration(generationID)
             try validateCommittedGeneration(generationID)
             phase = .activating
             progress(RuntimeInstallationProgress(
@@ -1355,6 +1373,7 @@ public struct AndroidRuntimeInstaller: Sendable {
                 startedAt: startedAt
             )
             try writePointer(generationID)
+            cleanupVerifiedDownloads(descriptor)
             phase = .completed
             progress(RuntimeInstallationProgress(
                 phase: phase,
@@ -1399,6 +1418,28 @@ public struct AndroidRuntimeInstaller: Sendable {
             try? fileManager.removeItem(at: transactionRoot)
             throw error
         }
+    }
+
+    private func cleanupVerifiedDownloads(_ descriptor: RuntimeGenerationDescriptor) {
+        guard compressInstalledRuntime,
+              let boundary = try? ManagedRuntimePathBoundary(root: layout.root) else { return }
+        // Reproducible vendor downloads, never AVD/user data. Cache cleanup
+        // failure must not invalidate a ready or recovered installation.
+        for component in descriptor.components {
+            let name = "\(component.sha256)-\(component.id).artifact"
+            if let artifact = try? boundary.descendant(relativePath: name, under: layout.downloads),
+               let attributes = try? FileManager.default.attributesOfItem(atPath: artifact.path),
+               attributes[.type] as? FileAttributeType == .typeRegular {
+                try? FileManager.default.removeItem(at: artifact)
+            }
+        }
+    }
+
+    private func restoreCompressedGeneration(_ id: RuntimeGenerationID) async throws {
+        let generation = layout.generation(id)
+        guard generation.isCompressed else { return }
+        let storage = try RuntimeCompressedStorage(root: layout.root)
+        try await storage.mount(container: generation.root, at: generation.payloadRoot)
     }
 
     private func verifiedArtifact(
@@ -1523,7 +1564,9 @@ public struct AndroidRuntimeInstaller: Sendable {
         let expanded = descriptor.components.reduce(Int64(0)) {
             $0 + $1.installedSize
         }
-        let required = Int64(Double(compressed + expanded * 2) * 1.15)
+        // Compression may temporarily hold the source, image-building scratch
+        // and final container at once. Do not confuse final size with peak use.
+        let required = Int64(Double(compressed + expanded * (compressInstalledRuntime ? 3 : 2)) * 1.15)
         guard available >= required else {
             throw RuntimeInstallationError.insufficientDiskSpace(
                 required: required,
@@ -1630,7 +1673,7 @@ public struct AndroidRuntimeInstaller: Sendable {
                   component.sha256 == installed.sha256,
                   let path = try? boundary.descendant(
                     relativePath: installed.relativePath,
-                    under: generation.root
+                    under: generation.payloadRoot
                   ),
                   fileManager.fileExists(atPath: path.path) else {
                 throw RuntimeInstallationError.committedGenerationInvalid(

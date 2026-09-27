@@ -380,6 +380,7 @@ public actor RuntimeMaintenanceService {
         defer { withExtendedLifetime(lease) {} }
         try Self.requireNoPendingTransaction(layout: layout)
         try await quiesce()
+        try await detachCompressedGenerations()
         guard ProcessInfo.processInfo.systemUptime - created <= lifetime else { throw RuntimeMaintenanceError.expiredPlan }
         let current = try makePlan()
         guard current.items == plan.items, current.selectionDigest == plan.selectionDigest,
@@ -418,6 +419,7 @@ public actor RuntimeMaintenanceService {
         let lease = try RuntimeMaintenanceLease(layout: layout, exclusive: true)
         defer { withExtendedLifetime(lease) {} }
         try await quiesce()
+        try await detachCompressedGenerations()
         let root = try MaintenanceDirectory.root(layout)
         guard try root.entry("Maintenance") != nil else { return [] }
         let maintenance = try root.child("Maintenance")
@@ -519,7 +521,7 @@ public actor RuntimeMaintenanceService {
                 throw RuntimeMaintenanceError.unsafePath
             }
         }
-        var items: [ManagedUninstallItem] = [], preserved = ["avd/", "home/", "runtime-selection.json", "runtime-profile.json", "runtime-continuity.json", "runtime-manifest.json", "Backups/<user-data-or-unrecognized>/"]
+        var items: [ManagedUninstallItem] = [], preserved = ["avd/", "home/", "Mounts/", "runtime-selection.json", "runtime-profile.json", "runtime-continuity.json", "runtime-manifest.json", "Backups/<user-data-or-unrecognized>/"]
         func append(_ path: String, _ category: ManagedUninstallItem.Category) throws {
             if let external {
                 let target = layout.root.appendingPathComponent(path).resolvingSymlinksInPath().path
@@ -563,7 +565,7 @@ public actor RuntimeMaintenanceService {
                           manifest.components.allSatisfy({ installed in descriptor.components.contains {
                               $0.id == installed.id && $0.sha256 == installed.sha256 && $0.role == installed.role
                           } }),
-                          Set(try candidate.names()).isSubset(of: ["sdk", "jre", "generation-manifest.json"]),
+                          try validGenerationFiles(candidate),
                           (category == "Generations" ? name == manifest.generationID.rawValue :
                             (name.hasPrefix(manifest.generationID.rawValue + "-") && UUID(uuidString: String(name.dropFirst(manifest.generationID.rawValue.count + 1))) != nil)) else {
                         preserved.append(path); continue
@@ -591,5 +593,29 @@ public actor RuntimeMaintenanceService {
             userDataPolicy: "KEEP", externalSDKPolicy: "EXCLUDED",
             selectionDigest: SHA256.hash(data: selection).map { String(format: "%02x", $0) }.joined(),
             rootIdentity: try root.entry(".")!)
+    }
+
+    private func validGenerationFiles(_ directory: MaintenanceDirectory) throws -> Bool {
+        let names = Set(try directory.names())
+        if names.isSubset(of: ["sdk", "jre", "generation-manifest.json"]) { return true }
+        guard names == ["runtime.dmg", "compressed-image.json", "generation-manifest.json"],
+              let data = try directory.data("compressed-image.json"),
+              let manifest = try? JSONDecoder().decode(RuntimeCompressedImageManifest.self, from: data),
+              manifest.schemaVersion == 1, ["ULFO/APFS", "ULMO/APFS"].contains(manifest.format),
+              manifest.imageSHA256.count == 64,
+              manifest.imageSHA256.allSatisfy({ "0123456789abcdef".contains($0) }),
+              let image = try directory.entry("runtime.dmg"),
+              !image.isDirectory, !image.isSymlink, image.size == manifest.imageBytes else { return false }
+        return true
+    }
+
+    private func detachCompressedGenerations() async throws {
+        let storage = try RuntimeCompressedStorage(root: layout.root)
+        for descriptor in catalog.generations {
+            let generation = layout.generation(descriptor.generationID)
+            if generation.isCompressed {
+                try await storage.unmount(container: generation.root, at: generation.payloadRoot)
+            }
+        }
     }
 }

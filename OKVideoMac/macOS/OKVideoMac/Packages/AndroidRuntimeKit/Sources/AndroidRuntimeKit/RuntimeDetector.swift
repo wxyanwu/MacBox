@@ -321,7 +321,7 @@ public struct AndroidRuntimeDetector {
             do {
                 path = try boundary.descendant(
                     relativePath: component.relativePath,
-                    under: generation.root
+                    under: generation.payloadRoot
                 )
             } catch {
                 return RuntimeDetectionIssue(

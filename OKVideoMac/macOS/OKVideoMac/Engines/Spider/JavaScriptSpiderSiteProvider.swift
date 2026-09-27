@@ -8798,6 +8798,15 @@ actor AndroidDexBridgeRuntime {
         )
         if allowRecoveryCommand {
             do {
+                // A fresh dedicated AVD can boot with Wi-Fi disabled.
+                // connect-network alone only saves the network in that state.
+                _ = try runVerifiedADB(
+                    identity,
+                    toolchain: toolchain,
+                    ["shell", "svc", "wifi", "enable"],
+                    category: "adb.network.wifi.enable",
+                    timeout: 10
+                )
                 _ = try runVerifiedADB(
                     identity,
                     toolchain: toolchain,
@@ -13105,6 +13114,8 @@ actor AndroidDexBridgeRuntime {
 
     private static func safeCommandDescription(for category: String) -> String {
         switch category {
+        case "adb.network.wifi.enable":
+            return "adb -s <owned-serial> shell svc wifi enable"
         case "adb.network.wifi.connect":
             return "adb -s <owned-serial> shell cmd wifi connect-network AndroidWifi open"
         case "adb.network.wifi.status":

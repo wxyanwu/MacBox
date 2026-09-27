@@ -432,6 +432,66 @@ final class ManagedRuntimeProductTests: XCTestCase {
         XCTAssertFalse(text.contains("/Users/"))
     }
 
+    func testCompressedInstallationRestartRepairAndUninstallPreserveUserData() async throws {
+        guard ProcessInfo.processInfo.environment["OKVIDEOMAC_COMPRESSED_RUNTIME_E2E"] == "1" else {
+            throw XCTSkip("Enable real compressed installation lifecycle tests")
+        }
+        let support = try temporaryDirectory()
+        let catalog = ProductFixture().catalog()
+        let layout = AndroidRuntimeLayout(applicationSupportDirectory: support)
+        let id = try XCTUnwrap(catalog.defaultProfile?.generationID)
+        let storage = try RuntimeCompressedStorage(root: layout.root)
+        func manager() -> AndroidManagedRuntimeManager {
+            AndroidManagedRuntimeManager(applicationSupportDirectory: support, catalog: catalog,
+                downloader: ProductDownloader(counter: ProductCounter()), currentAppVersion: "0.4.2",
+                materializer: ProductMaterializer(), validator: ProductValidator(counter: ProductCounter()),
+                compressInstalledRuntime: true)
+        }
+        do {
+            let first = manager()
+            try await first.installDefault(acceptingLicenses: true)
+            let generation = layout.generation(id)
+            XCTAssertTrue(generation.isCompressed)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: generation.root.appendingPathComponent("sdk").path))
+            XCTAssertTrue(try ManagedRuntimeSelection.resolve(layout: layout, catalog: catalog).purity.passed)
+            let disk = await first.maintenance.storage()
+            XCTAssertEqual(disk.cacheBytes, 0)
+            let imageBytes = try generation.root.appendingPathComponent("runtime.dmg")
+                .resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize ?? 0
+            XCTAssertGreaterThanOrEqual(disk.componentBytes, Int64(imageBytes))
+            XCTAssertLessThan(disk.componentBytes, Int64(imageBytes) + 65_536)
+            try FileManager.default.createDirectory(at: layout.avdDirectory, withIntermediateDirectories: true)
+            let marker = layout.avdDirectory.appendingPathComponent("keep-userdata")
+            try Data("keep".utf8).write(to: marker)
+
+            try await storage.unmount(container: generation.root, at: generation.payloadRoot)
+            let restarted = manager()
+            _ = try await restarted.refresh()
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for _ in 0..<5 { group.addTask { try await restarted.ensureReadyForDex() } }
+                try await group.waitForAll()
+            }
+            XCTAssertTrue(try ManagedRuntimeSelection.resolve(layout: layout, catalog: catalog).purity.passed)
+            try await restarted.repair(acceptingLicenses: true)
+            XCTAssertTrue(layout.generation(id).isCompressed)
+            XCTAssertEqual(try Data(contentsOf: marker), Data("keep".utf8))
+            let plan = try await restarted.maintenance.prepareManagedUninstall()
+            XCTAssertTrue(plan.items.contains { $0.category == .generation })
+            XCTAssertTrue(plan.items.contains { $0.category == .backup })
+            _ = try await restarted.maintenance.execute(planID: plan.id, quiesce: {})
+            XCTAssertFalse(FileManager.default.fileExists(atPath: generation.root.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: generation.payloadRoot.appendingPathComponent("sdk").path))
+            XCTAssertEqual(try Data(contentsOf: marker), Data("keep".utf8))
+            try FileManager.default.removeItem(at: support)
+        } catch {
+            let generation = layout.generation(id)
+            if generation.isCompressed {
+                try? await storage.unmount(container: generation.root, at: generation.payloadRoot)
+            }
+            throw error
+        }
+    }
+
     private func temporaryDirectory() throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(
