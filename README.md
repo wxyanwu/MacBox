@@ -42,7 +42,9 @@ have passed search, detail, and playback checks; this does not guarantee every A
 
 Current builds are locally verified Release builds with ad-hoc signing. They are not
 Developer ID signed or Apple-notarized upstream releases. Upstream downloads do not contain
-this project's modifications. This README does not yet advertise a published MacBox installer.
+this project's modifications.
+
+[Download MacBox 1.0.0 for Apple Silicon Macs](https://github.com/wxyanwu/MacBox/releases/download/v1.0.0/MacBox-1.0.0.dmg) · [Release notes, checksums, and corresponding source](https://github.com/wxyanwu/MacBox/releases/tag/v1.0.0)
 
 1. Use a Release build made from this project.
 2. Import your own TVBox configuration in Settings → VOD Sources; manage live sources in Settings → Live Sources.
