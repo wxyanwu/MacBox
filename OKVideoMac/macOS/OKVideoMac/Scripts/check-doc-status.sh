@@ -67,6 +67,7 @@ assert_exact_line "$PERFORMANCE" "- 对照版本：0.6.1（Build 101）"
 assert_contains "$NOTICES" "OKVideoMac 0.6.1 (Build 101)"
 
 PYTHONDONTWRITEBYTECODE=1 python3 - "$PROJECT_DIR" "$VERSION" "$BUILD" <<'PY'
+import json
 import pathlib
 import plistlib
 import re
@@ -80,6 +81,11 @@ for key, expected in (("MARKETING_VERSION", version), ("CURRENT_PROJECT_VERSION"
     if not values or any(value.strip().strip('"') != expected for value in values):
         raise SystemExit(f"Xcode project {key} disagrees with project.yml: {values}")
 info = plistlib.loads((root / "Supporting/Info.plist").read_bytes())
+localized = json.loads((root / "Resources/InfoPlist.xcstrings").read_text())["strings"]
+for key in ("CFBundleName", "CFBundleDisplayName"):
+    for language, entry in localized[key]["localizations"].items():
+        if entry["stringUnit"]["value"] != "MacBox":
+            raise SystemExit(f"Localized product name is stale: {key} {language}")
 for key in ("CFBundleName", "CFBundleDisplayName"):
     if info.get(key) != "MacBox":
         raise SystemExit(f"Incorrect product name for {key}")
