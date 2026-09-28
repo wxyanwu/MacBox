@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 usage() {
-  echo "Usage: $0 --mode local|distribution --source-index FILE --apk FILE [--require-gatekeeper] /path/to/OKVideoMac-VERSION.dmg" >&2
+  echo "Usage: $0 --mode local|distribution --source-index FILE --apk FILE [--require-gatekeeper] /path/to/MacBox-VERSION.dmg" >&2
 }
 
 MODE=""
@@ -71,7 +71,7 @@ BUILD="$(
   awk '$1 == "CURRENT_PROJECT_VERSION:" { gsub(/["[:space:]]/, "", $2); print $2; exit }' \
     "$PROJECT_DIR/project.yml"
 )"
-EXPECTED_NAME="OKVideoMac-${VERSION}.dmg"
+EXPECTED_NAME="MacBox-${VERSION}.dmg"
 if [[ "$(basename "$DMG")" != "$EXPECTED_NAME" ]]; then
   echo "Unexpected DMG filename: $(basename "$DMG") (expected $EXPECTED_NAME)" >&2
   exit 1
