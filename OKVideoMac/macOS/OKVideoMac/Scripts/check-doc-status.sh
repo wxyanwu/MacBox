@@ -53,24 +53,18 @@ assert_contains() {
   fi
 }
 
-assert_exact_line "$README" "- 当前版本：${VERSION}（Build ${BUILD}）"
-assert_exact_line "$COMPATIBILITY" "- 对照版本：${VERSION}（Build ${BUILD}）"
-assert_exact_line "$PERFORMANCE" "- 对照版本：${VERSION}（Build ${BUILD}）"
-assert_contains "$ROOT_README" "latest stable release is **${VERSION} (Build ${BUILD})**"
-assert_contains "$ROOT_README_ZH" "最新稳定版本为 **${VERSION}（Build ${BUILD}）**"
-assert_exact_line "$CHANGELOG" "## [${VERSION}] - 2026-09-09"
-assert_contains "$NOTICES" "OKVideoMac ${VERSION} (Build ${BUILD})"
-assert_contains "$README" "- Xcode：721 total / 713 passed / 8 intentionally skipped / 0 failed"
-assert_contains "$README" "- OKVideoKit：261 passed / 0 failed"
-assert_contains "$README" "- Node / CatPaw / Quark：30 passed / 0 failed"
-assert_contains "$README" "- Android Release assemble 与 lint：通过；Android JVM unit tests：NO-SOURCE"
-assert_exact_line "$PERFORMANCE" "- 多站搜索全局并发 20；共享同一 Node runtime 的站点并发 20，聚合搜索每站只取第一页；"
-assert_contains "$SOURCE_RELEASE_PROCESS" "OKVideoMac-${VERSION}.dmg"
-assert_contains "$SOURCE_RELEASE_PROCESS" "OKVideoMac-${VERSION}-macOS-arm64.zip"
-assert_exact_line "$REPOSITORY_ROOT/Docs/RELEASE_NOTES_${VERSION}.md" "# OKVideoMac ${VERSION}（Build ${BUILD}）Release Notes"
-assert_contains "$README" "tag \`v${VERSION}\` 指向的 exact"
-assert_contains "$README" "OKVideoMac-${VERSION}-build${BUILD}-SOURCE_RELEASE_INDEX.json"
-assert_contains "$COMPATIBILITY" "tag \`v${VERSION}\`"
+# The upstream evidence documents retain their original 0.6.1 metadata.
+# Check current product metadata separately instead of relabelling old tests.
+assert_exact_line "$ROOT_README" "# MacBox"
+assert_exact_line "$ROOT_README_ZH" "# MacBox"
+assert_exact_line "$ROOT_README" "- Current app version: ${VERSION} (Build ${BUILD})"
+assert_exact_line "$ROOT_README_ZH" "- 当前应用版本：${VERSION}（Build ${BUILD}）"
+assert_exact_line "$REPOSITORY_ROOT/Docs/MACBOX_RELEASE_${VERSION}.md" "# MacBox ${VERSION}（Build ${BUILD}）"
+assert_contains "$CHANGELOG" "## [${VERSION}]"
+assert_contains "$README" "MacBox"
+assert_exact_line "$COMPATIBILITY" "- 对照版本：0.6.1（Build 101）"
+assert_exact_line "$PERFORMANCE" "- 对照版本：0.6.1（Build 101）"
+assert_contains "$NOTICES" "OKVideoMac 0.6.1 (Build 101)"
 
 PYTHONDONTWRITEBYTECODE=1 python3 - "$PROJECT_DIR" "$VERSION" "$BUILD" <<'PY'
 import pathlib
@@ -86,6 +80,9 @@ for key, expected in (("MARKETING_VERSION", version), ("CURRENT_PROJECT_VERSION"
     if not values or any(value.strip().strip('"') != expected for value in values):
         raise SystemExit(f"Xcode project {key} disagrees with project.yml: {values}")
 info = plistlib.loads((root / "Supporting/Info.plist").read_bytes())
+for key in ("CFBundleName", "CFBundleDisplayName"):
+    if info.get(key) != "MacBox":
+        raise SystemExit(f"Incorrect product name for {key}")
 for key, expected in (("CFBundleShortVersionString", "$(MARKETING_VERSION)"),
                       ("CFBundleVersion", "$(CURRENT_PROJECT_VERSION)")):
     if info.get(key) != expected:
@@ -99,7 +96,7 @@ import sys
 path, version, build = sys.argv[1:]
 with open(path, encoding="utf-8") as source:
     release = json.load(source).get("release")
-expected = f"OKVideoMac {version} ({build})"
+expected = f"MacBox {version} ({build})"
 if release != expected:
     raise SystemExit(f"Native lock release metadata is stale: {release!r}; expected {expected!r}")
 PY

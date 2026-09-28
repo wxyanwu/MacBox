@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0] - 2026-09-28
+
+- Start the independently maintained MacBox product branch and version series (Build 102).
+- Rename the app display name and installer outputs while retaining data identity and upstream attribution.
+- Include the existing subscription, playback, layout, sleep, and compressed-runtime improvements.
+- Preserve historical upstream release notes below; they are not MacBox release attestations.
+
 ## [0.6.1] - 2026-09-09
 
 ### Added

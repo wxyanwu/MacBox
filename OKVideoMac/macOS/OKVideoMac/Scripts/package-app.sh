@@ -99,12 +99,12 @@ ARTIFACTS="${OKVIDEOMAC_ARTIFACTS:-$OKVIDEOMAC_BUILD_ROOT/Artifacts}"
 SOURCE_RELEASE_DIR="${OKVIDEOMAC_SOURCE_RELEASE_DIR:-$ARTIFACTS/SourceRelease}"
 SOURCE_RELEASE_CACHE="${OKVIDEOMAC_SOURCE_RELEASE_CACHE:-$OKVIDEOMAC_BUILD_ROOT/Downloads/SourceRelease}"
 APP_SOURCE="$DERIVED_DATA/Build/Products/Release/OKVideoMac.app"
-FINAL_APP_DESTINATION="$ARTIFACTS/OKVideoMac.app"
+FINAL_APP_DESTINATION="$ARTIFACTS/MacBox.app"
 # Documents/Desktop can be backed by File Provider, which may immediately
 # reattach FinderInfo after xattr removes it. Assemble and sign on the local
 # temporary filesystem so the "sanitize + codesign" boundary is deterministic.
 PACKAGE_STAGING="$(mktemp -d "${TMPDIR:-/tmp}/OKVideoMac-Package-Staging.XXXXXX")"
-APP_DESTINATION="$PACKAGE_STAGING/OKVideoMac.app"
+APP_DESTINATION="$PACKAGE_STAGING/MacBox.app"
 LIBMPV_ROOT="$OKVIDEOMAC_BUILD_ROOT/libmpv"
 QUICKJS_ROOT="$OKVIDEOMAC_BUILD_ROOT/QuickJS"
 NODE_RUNTIME="$APP_DESTINATION/Contents/Resources/NodeRuntime/node"
@@ -244,8 +244,8 @@ if [[ -z "$APP_VERSION" || -z "$APP_BUILD" ]]; then
   echo "Packaged app version or build is missing." >&2
   exit 1
 fi
-ARCHIVE="$ARTIFACTS/OKVideoMac-${APP_VERSION}-macOS-arm64.zip"
-DMG="$ARTIFACTS/OKVideoMac-${APP_VERSION}.dmg"
+ARCHIVE="$ARTIFACTS/MacBox-${APP_VERSION}-macOS-arm64.zip"
+DMG="$ARTIFACTS/MacBox-${APP_VERSION}.dmg"
 DMG_STAGING=""
 cleanup_package_staging() {
   if [[ -n "$DMG_STAGING" && -d "$DMG_STAGING" ]]; then
@@ -256,7 +256,7 @@ cleanup_package_staging() {
   fi
 }
 trap cleanup_package_staging EXIT
-SOURCE_RELEASE_BASE="OKVideoMac-${APP_VERSION}-build${APP_BUILD}"
+SOURCE_RELEASE_BASE="MacBox-${APP_VERSION}-build${APP_BUILD}"
 SOURCE_RELEASE_INDEX="$SOURCE_RELEASE_DIR/${SOURCE_RELEASE_BASE}-SOURCE_RELEASE_INDEX.json"
 source_release_arguments=(
   --output-dir "$SOURCE_RELEASE_DIR"
@@ -610,12 +610,12 @@ create_dmg() {
   # be reattached there after the signed App has already passed verification,
   # which makes the otherwise-valid bundle fail when verified from the DMG.
   DMG_STAGING="$(mktemp -d "${TMPDIR:-/tmp}/OKVideoMac-DMG-Staging.XXXXXX")"
-  cp -R "$APP_DESTINATION" "$DMG_STAGING/OKVideoMac.app"
-  /usr/bin/xattr -cr "$DMG_STAGING/OKVideoMac.app"
+  cp -R "$APP_DESTINATION" "$DMG_STAGING/MacBox.app"
+  /usr/bin/xattr -cr "$DMG_STAGING/MacBox.app"
   ln -s /Applications "$DMG_STAGING/Applications"
   rm -f "$DMG" "$DMG.sha256"
   hdiutil create \
-    -volname "OKVideoMac ${APP_VERSION}" \
+    -volname "MacBox ${APP_VERSION}" \
     -srcfolder "$DMG_STAGING" \
     -fs HFS+ \
     -format UDZO \
@@ -644,7 +644,7 @@ create_dmg() {
 create_archive
 create_dmg
 if [[ "$NOTARIZE" -eq 1 ]]; then
-  NOTARY_RESULT="$ARTIFACTS/OKVideoMac-${APP_VERSION}-notarization.json"
+  NOTARY_RESULT="$ARTIFACTS/MacBox-${APP_VERSION}-notarization.json"
   xcrun notarytool submit "$DMG" \
     --keychain-profile "$OKVIDEOMAC_NOTARY_PROFILE" \
     --wait \
@@ -711,7 +711,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 \
 # DMG, signatures, SBOMs, and source-release identity have all passed. The
 # destination may acquire host-local File Provider attributes, but its signed
 # file bytes are copied from the already verified canonical bundle.
-FINAL_APP_STAGING="$ARTIFACTS/.OKVideoMac.app.incoming"
+FINAL_APP_STAGING="$ARTIFACTS/.MacBox.app.incoming"
 rm -rf "$FINAL_APP_STAGING"
 cp -R "$APP_DESTINATION" "$FINAL_APP_STAGING"
 rm -rf "$FINAL_APP_DESTINATION"

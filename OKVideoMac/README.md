@@ -1,3 +1,5 @@
+> 本文为上游 OKVideoMac 0.6.1 的技术与验收记录。MacBox 当前产品信息见[项目首页](../README_zh-CN.md)，下文版本、签名与测试结果仅适用于其记录时的上游版本。
+
 # OKVideoMac
 
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于

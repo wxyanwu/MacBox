@@ -1,295 +1,87 @@
-# OKVideoMac
+# MacBox
+
+**A TVBox-compatible player for Mac**
+
+**Supports Android TVBox subscription configurations**
 
 English | [简体中文](README_zh-CN.md)
 
-**A native macOS IPTV/VOD player for Apple Silicon with Xtream, M3U/XMLTV,
-selected TVBox/CatVod/CatPaw-style providers, and libmpv playback.**
+MacBox is an independently maintained project based on
+[OKVideoMac](https://github.com/yaolin-dev/OKVideoMac), focused on Android TVBox
+configuration compatibility, playback stability, and a native Mac experience.
+OKVideoMac is the code origin; Android TVBox is the compatibility target.
+MacBox is maintained and released independently and is not an official upstream build.
 
-[![Latest release](https://img.shields.io/github/v/release/yaolin-dev/OKVideoMac?display_name=tag&sort=semver)](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 ![macOS 12+](https://img.shields.io/badge/macOS-12%2B-000000?logo=apple&logoColor=white)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-000000?logo=apple&logoColor=white)
-[![GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
+[![GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue)](LICENSE)
 
-Built with Swift and SwiftUI/AppKit. Android is an optional compatibility layer
-for selected Java/Dex providers.
+## Current status
 
-**Native macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · Multi-provider Search ·
-QuickJS/Node Spiders**
+- Current app version: 1.0.0 (Build 102)
+- Upstream baseline: OKVideoMac 0.6.1, commit `9970e2c`.
+- Product branch: `macbox`. The application and installers are named MacBox with independent version numbering; the upstream icon is currently retained.
+- Development and device validation currently focus on Apple Silicon Macs; the minimum deployment target is macOS 12.0.
+- Intel Macs, iPhone, and iPad have not completed adaptation and validation.
 
-## Download
+## Features and improvements
 
-### [Download the latest stable release →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
+- VOD and live TV with Android TVBox configurations and inherited Xtream and M3U/XMLTV support.
+- Native Swift/SwiftUI/AppKit interface and libmpv playback; selected JavaScript providers use QuickJS or Node.
+- Java/DEX providers use a local Android Bridge and compatibility runtime on demand.
+- Improved Gson-style configuration parsing, subscription requests, Android media format detection, and fresh playback retries.
+- Settings layout fixes, isolated live-source validation progress, and prevention of idle display sleep during playback.
+- CoreAudio callback lifetime protection for potential crashes during audio device changes.
+- Losslessly compressed complete Android components: approximately 5.35 GiB to 1.82 GiB in the verified installation.
+  This excludes Android user data, backups, and temporary installation space, and is not the initial download size.
 
-The latest stable release is **0.6.1 (Build 101)** · macOS 12.0+ · Apple Silicon
-(`arm64`) only. This patch adds Android component storage management and uninstall.
+Compatibility depends on each provider, plugin, network, and media service. Selected real samples
+have passed search, detail, and playback checks; this does not guarantee every Android TVBox configuration or provider.
 
-Download the Developer ID signed and Apple-notarized
-[v0.6.1 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.6.1).
-This release passed stapling, Gatekeeper assessment and installation smoke tests.
+## Installation and use
 
-Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to
-disable Gatekeeper or SIP. Checksums, release notes, source archives, SBOMs,
-and notices are published with each release.
+Current builds are locally verified Release builds with ad-hoc signing. They are not
+Developer ID signed or Apple-notarized upstream releases. Upstream downloads do not contain
+this project's modifications. This README does not yet advertise a published MacBox installer.
 
-> OKVideoMac is a player and provider client. It does not include third-party
-> video sources, accounts, cookies, parsing services, or DRM keys.
+1. Use a Release build made from this project.
+2. Import your own TVBox configuration in Settings → VOD Sources; manage live sources in Settings → Live Sources.
+3. Prepare Android compatibility components when prompted for Java/DEX providers. Android Studio is not required.
+4. Select a provider, search or browse, and choose a playback line and episode.
 
-## New in 0.6.1
+Android components are not fully bundled for offline installation. Initial setup requires
+network downloads and acceptance of the component licenses. The upstream internal Bundle ID
+and data directories remain in use to preserve subscriptions, preferences, and history;
+upstream and modified builds should not be treated as two apps with isolated data.
 
-- **Android storage categories:** view managed components, installation cache,
-  Android user data and backups separately, with an estimate for the selected removal.
-- **Safe managed-component uninstall:** remove recognized Android components managed
-  by OKVideoMac after its Android session has been confirmed stopped.
-- **Keep your Android data:** user data and login state, backing/encryption files,
-  Android home, private ADB identity, user-data backups and runtime selection stay.
-  External SDK files are never uninstall targets. Reinstall managed components later
-  when needed; a separate Android user-data deletion action is not offered.
-- **Recovery and documentation:** interrupted maintenance can be resumed; English
-  and Chinese project descriptions now give existing Native Xtream equal visibility.
+## Development and provenance
 
-Native Xtream was introduced in 0.6.0, including authentication, Movies, Series,
-Movie/Series search and Basic Live. Xtream EPG, catch-up/timeshift and `direct_source`
-remain unsupported. See the [0.6.1 release notes](Docs/RELEASE_NOTES_0.6.1.md).
-
-## Screenshots
-
-<p align="center">
-  <img src="Docs/Media/v0.6.1/en/home.jpg" alt="OKVideoMac Browse screen in English" width="100%">
-</p>
-
-<table>
-  <tr>
-    <td width="33%"><img src="Docs/Media/v0.6.1/en/search.jpg" alt="Multi-provider search in English"><br><sub>Multi-provider search</sub></td>
-    <td width="33%"><img src="Docs/Media/v0.6.1/en/series-detail.jpg" alt="Series detail and episode navigation in English"><br><sub>Detail and episode navigation</sub></td>
-    <td width="33%"><img src="Docs/Media/v0.6.1/en/live-channels.jpg" alt="Live TV channel browser in English"><br><sub>Live channel browser</sub></td>
-  </tr>
-</table>
-
-<table>
-  <tr>
-    <td width="50%"><img src="Docs/Media/v0.6.1/en/vod-playback.jpg" alt="VOD playback in English"><br><sub>VOD playback</sub></td>
-    <td width="50%"><img src="Docs/Media/v0.6.1/en/live-playback.jpg" alt="Live TV playback in English"><br><sub>Live TV playback</sub></td>
-  </tr>
-</table>
-
-These 0.6.1 captures use the English interface and fictional scenic demo data;
-they contain no third-party catalogue, account, credential or private URL. See
-the [screenshot manifest](Docs/Media/v0.6.1/README.md) for the complete bilingual
-file map and image-processing notes.
-
-## Why OKVideoMac
-
-- **Native Mac experience.** A SwiftUI/AppKit interface designed for Apple
-  Silicon, with native windows, sheets, keyboard behavior, accessibility, and
-  macOS navigation—not a repackaged mobile interface.
-- **libmpv playback.** VOD and live playback use libmpv/FFmpeg, with seeking,
-  tracks, subtitles, playback speed, screenshots, fullscreen, and bounded
-  fallback between available lines.
-- **Flexible provider runtimes.** Native Xtream and CMS JSON plus selected TVBox/CatVod
-  QuickJS, CatVod/CatPaw-style Node, and Java/Dex `csp_` Spider paths. The
-  compatibility boundary is explicit rather than advertised as universal.
-- **Search and library.** Isolated multi-provider search, details, favorites,
-  history, progress restoration, and long-series episode navigation.
-- **Live TV on macOS.** Import M3U, TXT, or JSON channel lists, use multiple
-  lines, and load XMLTV EPG data without Android.
-- **Managed Android Runtime.** When a supported Java/Dex Spider really needs
-  Android, the app can install and manage its own pinned environment. Advanced
-  users may explicitly choose a compatible External SDK instead.
-- **Release engineering.** Public DMGs are Developer ID signed, notarized,
-  stapled, checked by Gatekeeper, and accompanied by hashes and source/SBOM
-  material.
-
-## Compatibility at a glance
-
-| Capability | Status | Notes |
-| --- | --- | --- |
-| Native macOS UI | Supported | SwiftUI/AppKit; no Android UI shell |
-| Apple Silicon | Supported | `arm64`, macOS 12.0 or later |
-| VOD and libmpv playback | Supported | Media behavior still depends on the source/server |
-| Live TV and XMLTV EPG | Supported | M3U, TXT, and JSON import paths |
-| Native Xtream | Supported | Authentication, Movies, Series, Movie/Series search and Basic Live; server differences apply |
-| Native CMS JSON | Supported | Home, category, filter, detail, search, and play handoff |
-| QuickJS Spider | Selected | Compatible scripts matching the implemented API |
-| Node Spider | Selected | CatVod/CatPaw-style video-interface subset |
-| Java/Dex `csp_` Spider | Experimental | Requires Managed Runtime or a confirmed External SDK |
-| Managed Android Runtime | Available | Recommended Android mode; installed only when needed |
-| Managed component storage / uninstall | Available | Categorized usage; preserves user data and external SDKs |
-| External Android SDK | Available | Explicit advanced-user choice; never auto-selected from `PATH` |
-| Intel Mac | Not supported | No Intel or Universal Binary release is provided |
-
-Compatibility depends on the source format, runtime, API shape, parsing
-requirements, and media behavior—not only on an ecosystem name. See the
-[full compatibility guide](OKVideoMac/macOS/OKVideoMac/Docs/COMPATIBILITY.md).
-
-## Android Runtime: optional and on demand
-
-Most of OKVideoMac does **not** need Android. Native providers, QuickJS and
-Node Spiders, live TV, XMLTV, search, and ordinary playback run directly on
-macOS.
-
-Only selected Java/Dex `csp_` Android Spider sources use the optional Android
-Bridge:
-
-- **Managed Runtime (recommended):** on the first real Dex request, OKVideoMac
-  asks for confirmation, downloads the pinned JRE/Android components into its
-  private Application Support directory, verifies them, and resumes the
-  request. No Android Studio, Homebrew ADB, system Java, `ANDROID_HOME`, or
-  manually created AVD is required.
-- **External SDK (advanced):** users who already have a compatible Android SDK
-  can select and confirm it in Settings. OKVideoMac does not silently switch
-  modes because Android Studio, Homebrew, `PATH`, or environment variables
-  expose another SDK.
-
-Android Compatibility can show categorized storage usage and safely uninstall
-Android components managed by OKVideoMac when they are no longer needed. Android
-user data and login state, private ADB identity, user-data backups, runtime selection,
-and external Android SDKs are preserved. The confirmation shows estimated reclaim
-based on the recognized installation; it does not promise a fixed amount of space.
-See [Android storage and uninstall](Docs/ANDROID_MANAGED_UNINSTALL.md).
-
-Managed installation is transactional and separate from Emulator session
-management. Full behavior, storage, repair, licensing, and current real-machine
-validation limits are documented in [Android Bridge Setup](OKVideoMac/macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP.md).
-
-## Quick start
-
-1. [Download the latest stable DMG](https://github.com/yaolin-dev/OKVideoMac/releases/latest),
-   open it, and move the app to Applications.
-2. Launch OKVideoMac and add a provider configuration or live playlist that
-   you are authorized to use.
-3. Browse, search, open a detail page, or import an M3U/TXT/JSON live list.
-4. If a selected Java/Dex provider needs Android, follow the in-app Managed
-   Runtime prompt. Other provider and live paths need no Android setup.
-
-## Provider and Spider support
-
-| Source / runtime | Level | Current scope |
-| --- | --- | --- |
-| Native Xtream | Supported | Authentication, Movies, Series, Movie/Series search and Basic Live; server differences apply |
-| Native CMS JSON | Supported | Main provider path |
-| CMS XML / native type 4 | Partial | Narrower coverage than CMS JSON |
-| TVBox/CatVod-style QuickJS | Selected | `home`, `category`, `detail`, `search`, `play`, and selected helpers |
-| CatVod/CatPaw-style Node `.js.md5` | Selected | Supported video-interface subset; not the complete CatPawOpen protocol |
-| Java/Dex Android `csp_` | Experimental | Selected CatVod-style methods through the optional Bridge |
-| M3U / TXT / JSON live lists | Supported | Dedicated live importer; top-level TVBox `lives` is not wired to it |
-| XMLTV EPG | Supported | Remote HTTP(S), gzip, cache, and channel matching |
-| Parser type 0 / 1 | Partial / Supported | WKWebView sniffing / JSON parsing |
-| Parser types 2 / 3 / 4 | Unsupported | Fields may parse, but there is no complete execution path |
-
-OKVideoMac implements selected TVBox-, CatVod-, and CatPaw-style interfaces;
-it is not an official client for those projects and does not promise that every
-public or private provider will work.
-
-## Privacy and content sources
-
-- No video catalogue, IPTV service, provider account, cookie, parser service,
-  or DRM key is bundled.
-- You choose the configurations, scripts, playlists, and media you are
-  authorized to access. Remote Node bundles have broad execution capability;
-  load only sources you trust.
-- Logs and diagnostics are designed to redact credentials and private paths,
-  but issue reports should still be reviewed before publication.
-- OKVideoMac does not implement DRM bypass. Please use the project only with
-  content and services you are permitted to access.
-
-## System requirements
-
-- macOS 12.0 Monterey or later;
-- Apple Silicon (`arm64`); Intel Macs are not supported;
-- network access for remote providers/media and, if selected, Managed Runtime
-  installation;
-- sufficient free disk space only when the optional Managed Android Runtime is
-  installed.
-
-## FAQ
-
-### Is this TVBox for macOS?
-
-OKVideoMac is an independent, native macOS TVBox-style provider client—not an
-official TVBox app and not an Android wrapper. It implements selected compatible
-configuration and Spider paths, so people looking for a TVBox for Mac should
-check the compatibility table before assuming a particular source will work.
-
-### Does OKVideoMac include video or live-TV sources?
-
-No. It is a player/provider client. You supply configurations and playlists
-that you are authorized to use; no third-party catalogue, account, cookie,
-parsing service, or DRM key is bundled.
-
-### Do I need Android Studio or an Android SDK?
-
-Not for normal use, and not for Managed Runtime. If a selected Java/Dex
-Android Spider needs Android, OKVideoMac can download and manage the required
-environment after you confirm. External SDK remains an optional advanced mode.
-
-### Why does a Java/Dex `csp_` Spider need Android?
-
-That provider contains Android bytecode. OKVideoMac runs the supported subset
-through a private Android Bridge; Native, QuickJS, Node, live-TV, and XMLTV
-paths do not use it.
-
-### Does it support CatVod macOS or CatPaw macOS providers?
-
-It supports selected CatVod/FongMi-style QuickJS APIs and a selected
-CatVod/CatPaw-style Node video subset. Java/Dex support is Experimental. It is
-not complete TVBox, CatVod, CatPaw, or CatPawOpen ecosystem compatibility.
-
-### Does it run on Intel Macs?
-
-No. Current releases target Apple Silicon only; the app and optional Android
-Runtime are not shipped as an Intel or Universal Binary stack.
-
-## Known limitations
-
-- Java/Dex compatibility remains Experimental. The Managed API 35 profile has
-  real Emulator/Bridge/Dex E2E evidence on one M1 / macOS 14.8.8 host; Managed
-  Emulator E2E on macOS 12, 13, and 15 remains unverified.
-- QuickJS, Node, cloud, and web-sniffing paths cover selected interfaces and
-  may need updates when upstream implementations change.
-- Top-level TVBox/FongMi `lives`, catchup/timeshift, parser types 2/3/4, and DRM
-  are not supported.
-- Playback ultimately depends on libmpv, codecs, headers/cookies, the media
-  server, and the selected provider.
-- A large legacy database may cause a one-time startup pause.
-
-## Development and architecture
-
-The repository separates core models/networking, SQLite persistence, macOS UI,
-native playback bridges, provider runtimes, Managed Runtime installation, and
-Android Emulator sessions. Installation and session lifecycle are deliberately
-separate state machines.
-
-- [Build from source](OKVideoMac/macOS/OKVideoMac/Docs/BUILDING.md)
+- Project repository: [wxyanwu/OKVideoMac](https://github.com/wxyanwu/OKVideoMac) (repository path not yet renamed).
+- Upstream repository: [yaolin-dev/OKVideoMac](https://github.com/yaolin-dev/OKVideoMac).
+- `origin` is the independently maintained repository; `upstream` tracks the original project.
+  Existing Git history and attribution are retained.
+- [Build instructions](OKVideoMac/macOS/OKVideoMac/Docs/BUILDING.md)
 - [Architecture](OKVideoMac/macOS/OKVideoMac/Docs/ARCHITECTURE.md)
-- [Compatibility evidence](OKVideoMac/macOS/OKVideoMac/Docs/COMPATIBILITY.md)
-- [Contributing](CONTRIBUTING.md)
-
-Release builds require the repository's controlled scripts and fail-closed
-checks; a local Debug compile is not a public release artifact.
-
-## Release integrity
-
-The 0.6.1 / Build 101 DMG passed Release packaging, Developer ID signing,
-Apple notarization (`Accepted`), stapling, Gatekeeper and installation smoke tests
-under the [DMG release process](Docs/DMG_RELEASE_PROCESS.md). Tag `v0.6.1` pins
-release commit `25155f52fb8c416f3245c9a829a93175dec9857b`; matching source archives,
-SBOMs and checksums accompany the download. Later documentation updates do not
-change that signed binary or its source snapshot. The v0.6.0 release remains unchanged. See the [0.6.1 release notes](Docs/RELEASE_NOTES_0.6.1.md)
-and [source release process](Docs/SOURCE_RELEASE_PROCESS.md).
-
-## Documentation
-
-- [Detailed project documentation](OKVideoMac/README.md)
-- [Compatibility guide](OKVideoMac/macOS/OKVideoMac/Docs/COMPATIBILITY.md)
-- [Android Bridge Setup](OKVideoMac/macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP.md)
-- [Build from source](OKVideoMac/macOS/OKVideoMac/Docs/BUILDING.md)
-- [Architecture](OKVideoMac/macOS/OKVideoMac/Docs/ARCHITECTURE.md)
+- [Android compatibility setup](OKVideoMac/macOS/OKVideoMac/Docs/ANDROID_BRIDGE_SETUP_zh-CN.md)
 - [Android storage and uninstall](Docs/ANDROID_MANAGED_UNINSTALL.md)
-- [0.6.1 release notes](Docs/RELEASE_NOTES_0.6.1.md)
-- [Changelog](CHANGELOG.md)
-- [Security policy](SECURITY.md)
+- [Historical changelog](CHANGELOG.md)
 
-## License
+Source directories, the Xcode project, and some technical documentation retain the OKVideoMac name.
+Historical releases, screenshots, and validation reports describe their recorded versions;
+they are not automatically release or validation claims for the current MacBox project.
 
-OKVideoMac is distributed under the [GNU General Public License v3.0](LICENSE).
-Third-party components remain subject to their respective licenses and notices.
+## Content and privacy
+
+MacBox does not bundle media subscriptions, videos, accounts, cookies, parsing services, or DRM keys.
+Only import configurations, scripts, and media that you trust and are entitled to use.
+Third-party subscription plugins can execute code and access the network.
+
+## License and copyright
+
+Upstream-owned code is licensed under [GPL-3.0-only](LICENSE); this project continues under that license.
+Copyright and license notices for Yao Lin, other contributors, and third-party components are retained.
+Renaming the product does not change ownership of the original code.
+
+See [source and modification notices](OKVideoMac/NOTICE.md),
+[third-party notices](OKVideoMac/THIRD_PARTY_NOTICES.md), and
+[binary/source mappings](Docs/BINARY_SOURCE_MAPPING.md).
