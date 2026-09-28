@@ -261,7 +261,7 @@ def make_source_release(args: argparse.Namespace) -> None:
     cache = Path(args.cache_dir).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
     cache.mkdir(parents=True, exist_ok=True)
-    base = f"OKVideoMac-{version}-build{build}"
+    base = f"MacBox-{version}-build{build}"
 
     lock_path = repo / "ThirdParty/source-release-lock.json"
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
@@ -545,7 +545,7 @@ def make_source_release(args: argparse.Namespace) -> None:
             artifact_input = Path(value).expanduser().resolve()
             if not artifact_input.is_file():
                 fail(f"Release artifact does not exist: {artifact_input}")
-            expected_artifact_name = f"OKVideoMac-{version}.dmg"
+            expected_artifact_name = f"MacBox-{version}.dmg"
             if artifact_input.name != expected_artifact_name:
                 fail(
                     f"Public release artifact must be {expected_artifact_name}: "
@@ -570,7 +570,7 @@ def make_source_release(args: argparse.Namespace) -> None:
         apk_input = Path(args.apk).expanduser().resolve()
         if not apk_input.is_file():
             fail(f"APK artifact does not exist: {apk_input}")
-        apk = output / f"OKVideoMac-{version}-AndroidDexBridge-release.apk"
+        apk = output / f"MacBox-{version}-AndroidDexBridge-release.apk"
         if apk_input != apk:
             temporary_apk = apk.with_suffix(apk.suffix + ".tmp")
             shutil.copy2(apk_input, temporary_apk)

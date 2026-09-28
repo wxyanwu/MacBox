@@ -113,10 +113,10 @@ trap cleanup EXIT
 hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT_POINT" "$DMG" >/dev/null
 ATTACHED=1
 
-APP="$MOUNT_POINT/OKVideoMac.app"
+APP="$MOUNT_POINT/MacBox.app"
 APPLICATIONS_LINK="$MOUNT_POINT/Applications"
 if [[ ! -d "$APP" ]]; then
-  echo "DMG does not contain OKVideoMac.app." >&2
+  echo "DMG does not contain MacBox.app." >&2
   exit 1
 fi
 if [[ ! -L "$APPLICATIONS_LINK" ]] || [[ "$(readlink "$APPLICATIONS_LINK")" != "/Applications" ]]; then
@@ -127,7 +127,7 @@ fi
 unexpected=()
 while IFS= read -r entry; do
   case "$(basename "$entry")" in
-    OKVideoMac.app|Applications) ;;
+    MacBox.app|Applications) ;;
     *) unexpected+=("$(basename "$entry")") ;;
   esac
 done < <(find "$MOUNT_POINT" -mindepth 1 -maxdepth 1 -print | sort)
