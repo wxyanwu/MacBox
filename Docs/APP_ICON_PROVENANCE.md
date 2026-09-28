@@ -1,3 +1,19 @@
+# MacBox App Icon Provenance
+
+Current product: MacBox 1.0.0 (Build 102), 2026-09-28.
+
+The current icon is newly generated artwork: a blue rounded tile containing a cyan box and white play symbol. It was created with the built-in image generation tool from a text-only brief, without the upstream icon as input. No external stock image, logo, or font was supplied.
+
+Master: `OKVideoMac/Assets/AppIcon/MacBox-AppIcon-master.png`
+
+Master SHA-256: `a327dba4334a08e2d10473a015a0851f985b08ad1c86771e03905e8359a01bbc`
+
+The ten AppIcon catalog PNGs are resized from this master with macOS `sips`; Xcode generates the installed AppIcon.icns and Assets.car. Original source transparency is retained. The brief requested a navy macOS tile, cyan open box, white play triangle, and no text or third-party marks. This records provenance, not a legal determination about AI-assisted copyrightability.
+
+## Historical upstream icon record
+
+The following describes previous OKVideoMac icons and is retained for attribution. Its references to the runtime asset catalog describe the historical commits, not current MacBox artwork.
+
 # OKVideoMac App Icon Provenance
 
 Status: **FINAL RELEASE IDENTITY VERIFIED; FINAL ARTWORK SOURCE PROVENANCE IS

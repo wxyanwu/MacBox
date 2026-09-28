@@ -1,16 +1,16 @@
 {
   "sourceLanguage": "en",
   "strings": {
-    "settings.android.action.uninstall-runtime": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Uninstall OKVideoMac-managed Components…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"卸载 OKVideoMac 管理的组件…"}}}},
-    "settings.android.uninstall.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Uninstall OKVideoMac-managed Android components?"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"卸载 OKVideoMac 管理的 Android 组件？"}}}},
-    "settings.android.uninstall.message": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Approximately %@ will be removed. The OKVideoMac Android session will be stopped first. Android sign-in data, user-data backups, private keys, and your external SDK selection will be kept. External SDK files will not be deleted."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"预计清理约 %@。将先停止 OKVideoMac Android 会话。Android 登录数据、用户数据备份、私有密钥和外部 SDK 选择将保留，不会删除外部 SDK 文件。"}}}},
+    "settings.android.action.uninstall-runtime": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Uninstall MacBox-managed Components…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"卸载 MacBox 管理的组件…"}}}},
+    "settings.android.uninstall.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Uninstall MacBox-managed Android components?"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"卸载 MacBox 管理的 Android 组件？"}}}},
+    "settings.android.uninstall.message": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Approximately %@ will be removed. The MacBox Android session will be stopped first. Android sign-in data, user-data backups, private keys, and your external SDK selection will be kept. External SDK files will not be deleted."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"预计清理约 %@。将先停止 MacBox Android 会话。Android 登录数据、用户数据备份、私有密钥和外部 SDK 选择将保留，不会删除外部 SDK 文件。"}}}},
     "settings.android.uninstall.confirm": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Uninstall Components"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"卸载组件"}}}},
     "settings.android.uninstall.running": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Stopping Android and checking the uninstall transaction…"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在停止 Android 并检查卸载事务…"}}}},
     "settings.android.uninstall.cleanup-pending": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Components are uninstalled, but some files still need cleanup. Android user data was kept. Retry cleanup before installing again."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"组件已卸载，但部分文件仍待清理。Android 用户数据已保留，请先重试清理再重新安装。"}}}},
     "settings.android.uninstall.success": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Maintenance completed. Android user data, private keys, and the external SDK were kept."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"维护已完成。Android 用户数据、私有密钥和外部 SDK 已保留。"}}}},
     "settings.android.uninstall.plan-changed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The uninstall plan expired or the files changed. Nothing further was removed. Review a new plan and try again."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"卸载计划已过期或文件发生变化，已停止后续删除。请重新查看计划后再试。"}}}},
     "settings.android.uninstall.busy": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Another Android operation is in progress. Wait for it to finish before trying again."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"其他 Android 操作正在进行，请等待完成后再试。"}}}},
-    "settings.android.uninstall.stop-failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The OKVideoMac Android session could not be confirmed stopped. No components were removed."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"无法确认 OKVideoMac Android 会话已停止，未删除任何组件。"}}}},
+    "settings.android.uninstall.stop-failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The MacBox Android session could not be confirmed stopped. No components were removed."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"无法确认 MacBox Android 会话已停止，未删除任何组件。"}}}},
     "settings.android.uninstall.empty": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"No recognized managed components or installation cache need removal."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"没有需要清理的已识别管理组件或安装缓存。"}}}},
     "settings.android.uninstall.failure": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Maintenance could not finish safely. Unrecognized files and recovery data were kept. Export diagnostics before trying again."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"维护未能安全完成。未识别文件和恢复数据已保留，请导出诊断信息后再处理。"}}}},
     "settings.android.storage.summary": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Components: %@ · Installation cache: %@ · Android user data: %@ · Backups: %@"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"组件：%@ · 安装缓存：%@ · Android 用户数据：%@ · 备份：%@"}}}},
@@ -157,17 +157,17 @@
     "quickjs.script.load.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The QuickJS script failed to load."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"QuickJS 脚本载入失败"}}}},
     "quickjs.symbol.missing": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The QuickJS bridge is missing symbol %@."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"QuickJS 桥缺少符号 %@"}}}},
     "web-sniffer.click-script.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Click script failed: %@"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"点击脚本执行失败：%@"}}}},
-    "web-sniffer.debug.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"OKVideoMac Web Sniffing Debugger"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"OKVideoMac Web 嗅探调试"}}}},
+    "web-sniffer.debug.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"MacBox Web Sniffing Debugger"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"MacBox Web 嗅探调试"}}}},
     "web-sniffer.local-address.denied": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Web sniffing cannot access local or private-network addresses."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"Web 嗅探拒绝访问本机或内网地址"}}}},
     "web-sniffer.navigation.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Web navigation failed: %@"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"网页导航失败：%@"}}}},
     "web-sniffer.page-load.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Web page loading failed: %@"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"网页加载失败：%@"}}}},
     "web-sniffer.scheme.invalid": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Web sniffing only allows HTTP/HTTPS pages."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"Web 嗅探只允许 HTTP/HTTPS 页面"}}}},
     "web-sniffer.timeout": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Web sniffing timed out."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"Web 嗅探超时"}}}},
     "android.runtime.rebuild.action": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Back Up and Rebuild"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"备份并重建"}}}},
-    "android.runtime.rebuild.message": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The current OKVideoMac Android Runtime will be moved to a recoverable backup, then rebuilt using an existing system image from the selected Android SDK.\n\nThe runtime's internal state will be reset, and some cloud drives may require you to sign in or authorize again. OKVideoMac settings, favorites, and history will not be affected."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"当前 OKVideoMac 专用 Android Runtime 会先移到可恢复备份，再使用已选 Android SDK 中现有的 system image 重建。\n\nAndroid Runtime 内部状态会重置，部分网盘可能需要重新登录或授权。OKVideoMac 的普通设置、收藏和历史不受影响。"}}}},
+    "android.runtime.rebuild.message": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The current MacBox Android Runtime will be moved to a recoverable backup, then rebuilt using an existing system image from the selected Android SDK.\n\nThe runtime's internal state will be reset, and some cloud drives may require you to sign in or authorize again. MacBox settings, favorites, and history will not be affected."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"当前 MacBox 专用 Android Runtime 会先移到可恢复备份，再使用已选 Android SDK 中现有的 system image 重建。\n\nAndroid Runtime 内部状态会重置，部分网盘可能需要重新登录或授权。MacBox 的普通设置、收藏和历史不受影响。"}}}},
     "android.status.failure-detail": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"%1$@: %2$@"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"%1$@：%2$@"}}}},
-    "app.instance.conflict": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Another OKVideoMac instance is running (%@). This instance did not open the shared database to protect your data. Close the older version or duplicate copy, then try again."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"检测到另一个 OKVideoMac 实例正在运行（%@）。为保护同一数据库，本实例没有打开数据库。请关闭旧版本或重复副本后重试。"}}}},
-    "app.instance.database-in-use": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Another OKVideoMac instance is using the application database. This instance did not open it to protect your data."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"另一个 OKVideoMac 实例正在使用应用数据库。为保护数据，本实例没有打开数据库。"}}}},
+    "app.instance.conflict": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Another MacBox instance is running (%@). This instance did not open the shared database to protect your data. Close the older version or duplicate copy, then try again."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"检测到另一个 MacBox 实例正在运行（%@）。为保护同一数据库，本实例没有打开数据库。请关闭旧版本或重复副本后重试。"}}}},
+    "app.instance.database-in-use": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Another MacBox instance is using the application database. This instance did not open it to protect your data."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"另一个 MacBox 实例正在使用应用数据库。为保护数据，本实例没有打开数据库。"}}}},
     "backup.read.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Unable to read the backup file: %@"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"无法读取备份文件：%@"}}}},
     "backup.write.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Unable to write the backup file: %@"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"无法写入备份文件：%@"}}}},
     "cloud.authorization.no-explicit-expiry": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The playback URL could not be retrieved, but no explicit account-expiration signal was received. If authorization has not been completed, open the configuration page. After saving, only the current title will be verified once."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"播放地址获取失败，但没有收到明确的账号失效信号。如果尚未授权，可打开配置页；保存后将只验证当前影片一次。"}}}},
@@ -907,7 +907,7 @@
     "app.startup.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Startup Failed"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"启动失败"}}}},
     "backup.error.checksum": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Backup verification failed. The file may be damaged or modified."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"备份文件校验失败，文件可能已损坏或被修改"}}}},
     "backup.error.invalid-configuration": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The VOD configuration in the backup is incomplete or failed validation."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"备份中的点播配置不完整或校验失败"}}}},
-    "backup.error.invalid-document": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"This is not a valid OKVideoMac backup file."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"这不是有效的 OKVideoMac 备份文件"}}}},
+    "backup.error.invalid-document": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"This is not a valid MacBox backup file."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"这不是有效的 MacBox 备份文件"}}}},
     "backup.error.invalid-history": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The history in the backup is incomplete or contains unsafe fields."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"备份中的历史记录不完整或包含不安全字段"}}}},
     "backup.error.too-large": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The backup file exceeds the allowed size."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"备份文件超过允许的大小"}}}},
     "backup.error.unsupported-format": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The backup file format is unsupported."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"备份文件格式不受支持"}}}},
@@ -993,14 +993,14 @@
     "android.coordinator.avd-incompatible": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The dedicated Android environment is incompatible with the current runtime (%@). To protect sign-in data, it was not deleted or rebuilt automatically."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"专用 Android 环境与当前运行环境不兼容（%@）。为保护登录数据，未自动删除或重建。"}}}},
     "android.coordinator.external-not-configured": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"No existing Android SDK has been selected."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"尚未选择现有 Android SDK"}}}},
     "android.coordinator.external-unavailable": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The existing Android SDK is unavailable: %@"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"现有 Android SDK 当前不可用：%@"}}}},
-    "android.coordinator.managed-unavailable": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The OKVideoMac-managed Android environment is unavailable."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"OKVideoMac 托管 Android 环境当前不可用"}}}},
+    "android.coordinator.managed-unavailable": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The MacBox-managed Android environment is unavailable."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"MacBox 托管 Android 环境当前不可用"}}}},
     "android.coordinator.must-stop": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Stop the Android compatibility module before switching runtimes."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"切换 Android 运行环境前，请先停止当前 Android 兼容模块"}}}},
     "android.coordinator.selection-changed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The Android runtime selection changed. Try again."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"Android 运行环境选择已变化，请重试"}}}},
-    "android.external.issue.avd-config-unreadable": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The system image configuration for the OKVideoMac Android environment could not be read."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"OKVideoMac 专用 Android 环境的 system image 配置无法读取"}}}},
+    "android.external.issue.avd-config-unreadable": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The system image configuration for the MacBox Android environment could not be read."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"MacBox 专用 Android 环境的 system image 配置无法读取"}}}},
     "android.external.issue.avd-image-mismatch": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The dedicated Android environment's API, ABI, or tag does not match the system image metadata."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"专用 Android 环境的 API、ABI、tag 与 system image 元数据不一致"}}}},
     "android.external.issue.avd-image-missing": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The system image used by the dedicated Android environment is not present in the selected SDK."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"专用 Android 环境引用的 system image 不在所选 SDK 中"}}}},
     "android.external.issue.avd-incompatible": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The dedicated Android environment is incompatible with the existing SDK (%@). userdata was not modified."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"专用 Android 环境与现有 SDK 不兼容（%@）；未修改 userdata"}}}},
-    "android.external.issue.avd-incomplete": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The OKVideoMac Android environment folder is incomplete. Existing data was not overwritten."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"OKVideoMac 专用 Android 环境目录不完整；未自动覆盖现有数据"}}}},
+    "android.external.issue.avd-incomplete": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The MacBox Android environment folder is incomplete. Existing data was not overwritten."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"MacBox 专用 Android 环境目录不完整；未自动覆盖现有数据"}}}},
     "android.external.issue.avdmanager-required": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"avdmanager is required to create or repair the dedicated Android environment."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"创建或修复专用 Android 环境需要 avdmanager"}}}},
     "android.external.issue.java-required": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"A Java Runtime is required to create or repair the dedicated Android environment."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"创建或修复专用 Android 环境需要 Java Runtime"}}}},
     "android.external.issue.sdk-folder-missing": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The previously configured Android SDK folder no longer exists."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"以前配置的 Android SDK 文件夹已不存在"}}}},
@@ -1031,7 +1031,7 @@
     "android.failure.ownership": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The dedicated Android Emulator could not be identified safely. No other devices were modified."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"无法安全确认专用 Android Emulator，已停止操作其他设备。"}}}},
     "android.failure.port-conflict": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"A port required by Android Emulator is in use. The occupying process was not terminated."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"Android Emulator 所需端口被其他进程占用，未终止占用进程。"}}}},
     "android.failure.port-forward": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"ADB port mapping failed, so Android Bridge cannot connect to the Mac."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"ADB 端口映射失败，Android Bridge 无法连接到 Mac。"}}}},
-    "android.failure.private-adb": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"OKVideoMac could not start its isolated ADB service. The system ADB service was not connected or stopped."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"OKVideoMac 无法启动独立的 ADB 服务；没有连接或关闭系统默认 ADB。"}}}},
+    "android.failure.private-adb": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"MacBox could not start its isolated ADB service. The system ADB service was not connected or stopped."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"MacBox 无法启动独立的 ADB 服务；没有连接或关闭系统默认 ADB。"}}}},
     "android.failure.process-mismatch": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The Android Emulator PID no longer belongs to this launch instance."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"Android Emulator PID 已不再属于本次启动实例。"}}}},
     "android.failure.runtime-conflict": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Another Emulator is using the dedicated AVD or recorded port. No action was taken."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"检测到其他 Emulator 正在使用专用 AVD 或记录端口，未执行任何操作。"}}}},
     "android.failure.sdk-incomplete": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The Android SDK is incomplete. In Settings, choose an SDK containing ADB, Emulator, and a system image."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"Android SDK 不完整，请在设置中选择包含 ADB、Emulator 和系统镜像的 SDK。"}}}},
@@ -1039,11 +1039,11 @@
     "android.failure.unexpected-device": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"ADB found another Emulator but not the device expected for this launch."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"ADB 发现了其他 Emulator，但没有发现本次启动所预期的设备。"}}}},
     "android.failure.unknown": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The Android compatibility environment failed to start. Export diagnostics now."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"Android 兼容环境启动失败，请立即导出诊断信息。"}}}},
     "android.mode.external": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Existing Android SDK"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"现有 Android SDK"}}}},
-    "android.mode.managed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Managed by OKVideoMac"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"OKVideoMac 自动管理"}}}},
+    "android.mode.managed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Managed by MacBox"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"MacBox 自动管理"}}}},
     "android.runtime.component-unavailable": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Android Compatibility Component Unavailable"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"Android 兼容组件暂不可用"}}}},
     "android.runtime.environment-uninitialized": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"The application environment has not finished initializing."}},"zh-Hans":{"stringUnit":{"state":"translated","value":"应用运行环境未完成初始化"}}}},
     "android.runtime.rebuild.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Unable to Rebuild Android Runtime"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"Android Runtime 重建失败"}}}},
-    "android.runtime.rebuild.progress": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Backing Up and Rebuilding the OKVideoMac Android Runtime"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在备份并重建 OKVideoMac 专用 Android Runtime"}}}},
+    "android.runtime.rebuild.progress": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Backing Up and Rebuilding the MacBox Android Runtime"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"正在备份并重建 MacBox 专用 Android Runtime"}}}},
     "android.runtime.rebuild.title": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Repair Android Runtime?"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"修复 Android Runtime？"}}}},
     "android.runtime.repair.failed": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Unable to Repair Android Compatibility Module"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"Android 兼容模块修复失败"}}}},
     "android.runtime.repair.preparing": {"extractionState":"manual","localizations":{"en":{"stringUnit":{"state":"translated","value":"Preparing to Rebuild Port Mapping and Reinstall Bridge"}},"zh-Hans":{"stringUnit":{"state":"translated","value":"准备重建端口映射并重新安装 Bridge"}}}},
@@ -1264,13 +1264,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "OKVideoMac could not start its private ADB server. The system ADB server was not connected to or stopped."
+            "value": "MacBox could not start its private ADB server. The system ADB server was not connected to or stopped."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "OKVideoMac 无法启动独立的 ADB 服务；没有连接或关闭系统默认 ADB。"
+            "value": "MacBox 无法启动独立的 ADB 服务；没有连接或关闭系统默认 ADB。"
           }
         }
       }
@@ -1298,7 +1298,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "ADB is unavailable, so OKVideoMac cannot connect to its dedicated Android Emulator."
+            "value": "ADB is unavailable, so MacBox cannot connect to its dedicated Android Emulator."
           }
         },
         "zh-Hans": {
@@ -1315,7 +1315,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Android Emulator startup was cancelled or ended by OKVideoMac."
+            "value": "Android Emulator startup was cancelled or ended by MacBox."
           }
         },
         "zh-Hans": {
@@ -1400,13 +1400,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Android Bridge could not be installed. Reinstall OKVideoMac or export diagnostics."
+            "value": "Android Bridge could not be installed. Reinstall MacBox or export diagnostics."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Android Bridge 安装失败，请重新安装 OKVideoMac 或导出诊断。"
+            "value": "Android Bridge 安装失败，请重新安装 MacBox 或导出诊断。"
           }
         }
       }
@@ -1434,7 +1434,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Android Bridge does not match this version of OKVideoMac. Use Repair to install the current Bridge."
+            "value": "Android Bridge does not match this version of MacBox. Use Repair to install the current Bridge."
           }
         },
         "zh-Hans": {
@@ -1468,7 +1468,7 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "OKVideoMac could not safely verify ownership of the dedicated Android Emulator and did not touch other devices."
+            "value": "MacBox could not safely verify ownership of the dedicated Android Emulator and did not touch other devices."
           }
         },
         "zh-Hans": {
@@ -1859,13 +1859,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "OKVideoMac installs the required environment in its own private directory. It does not change Android Studio, Homebrew, or your other emulators."
+            "value": "MacBox installs the required environment in its own private directory. It does not change Android Studio, Homebrew, or your other emulators."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "OKVideoMac 会将所需环境安装到自己的专用目录，不会更改 Android Studio、Homebrew 或您的其他模拟器。"
+            "value": "MacBox 会将所需环境安装到自己的专用目录，不会更改 Android Studio、Homebrew 或您的其他模拟器。"
           }
         }
       }
@@ -2301,13 +2301,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "OKVideoMac Private Directory"
+            "value": "MacBox Private Directory"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "OKVideoMac 专用目录"
+            "value": "MacBox 专用目录"
           }
         }
       }
@@ -2913,13 +2913,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "ADB and Emulator always come from the selected SDK, while OKVideoMac continues to use its private ADB server, keys, and dedicated AVD."
+            "value": "ADB and Emulator always come from the selected SDK, while MacBox continues to use its private ADB server, keys, and dedicated AVD."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "ADB 与 Emulator 固定来自所选 SDK；仍使用 OKVideoMac 私有 ADB、密钥和专用 AVD。"
+            "value": "ADB 与 Emulator 固定来自所选 SDK；仍使用 MacBox 私有 ADB、密钥和专用 AVD。"
           }
         }
       }
@@ -2930,13 +2930,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Required files are downloaded on demand to an OKVideoMac private directory. External Android tools are never read or reused."
+            "value": "Required files are downloaded on demand to an MacBox private directory. External Android tools are never read or reused."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "所需文件按需下载到 OKVideoMac 专用目录；不会读取或借用外部 Android 工具。"
+            "value": "所需文件按需下载到 MacBox 专用目录；不会读取或借用外部 Android 工具。"
           }
         }
       }
@@ -3015,13 +3015,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Managed independently by OKVideoMac and started only when Dex content needs it"
+            "value": "Managed independently by MacBox and started only when Dex content needs it"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "受 OKVideoMac 独立管理，仅在 Dex 内容需要时启动"
+            "value": "受 MacBox 独立管理，仅在 Dex 内容需要时启动"
           }
         }
       }
@@ -3083,13 +3083,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Android content uses only verified components managed by OKVideoMac"
+            "value": "Android content uses only verified components managed by MacBox"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Android 内容只使用经过校验的 OKVideoMac 托管组件"
+            "value": "Android 内容只使用经过校验的 MacBox 托管组件"
           }
         }
       }
@@ -3100,13 +3100,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Managed by OKVideoMac (Recommended)"
+            "value": "Managed by MacBox (Recommended)"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "OKVideoMac 自动管理（推荐）"
+            "value": "MacBox 自动管理（推荐）"
           }
         }
       }
@@ -3950,13 +3950,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "OKVideoMac couldn't restart automatically. Quit and reopen the app to apply the new language."
+            "value": "MacBox couldn't restart automatically. Quit and reopen the app to apply the new language."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "OKVideoMac 无法自动重新启动。请退出并重新打开 App 以应用新的语言。"
+            "value": "MacBox 无法自动重新启动。请退出并重新打开 App 以应用新的语言。"
           }
         }
       }
@@ -4001,13 +4001,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Restart OKVideoMac to apply the new display language."
+            "value": "Restart MacBox to apply the new display language."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "重启 OKVideoMac 后将使用新的显示语言。"
+            "value": "重启 MacBox 后将使用新的显示语言。"
           }
         }
       }
@@ -4035,13 +4035,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Choose the language used by OKVideoMac"
+            "value": "Choose the language used by MacBox"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "选择 OKVideoMac 使用的界面语言"
+            "value": "选择 MacBox 使用的界面语言"
           }
         }
       }

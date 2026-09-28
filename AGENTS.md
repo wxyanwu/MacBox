@@ -5,4 +5,4 @@
 - Only deliver and install the verified Release app. A Debug build may be used for a quick compile check, but it must never replace the Desktop app or be presented as the deliverable.
 - Never replace either installed copy when packaging or bundle verification fails.
 
-- Product branch: `macbox`; product name: MacBox. Preserve the internal Bundle ID and data paths until an explicit migration is implemented. Legacy OKVideoMac launch links should target the same MacBox installation.
+- Product branch: `main`; product name: MacBox. Preserve the internal Bundle ID and data paths until an explicit migration is implemented. Legacy OKVideoMac launch links should target the same MacBox installation.

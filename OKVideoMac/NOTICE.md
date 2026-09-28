@@ -1,3 +1,7 @@
+# MacBox modification notice
+
+MacBox is independently maintained by wxyanwu and based on OKVideoMac 0.6.1 (baseline 9970e2c). Original copyright, GPL-3.0-only licensing, and third-party notices below remain in effect. MacBox changes include Android configuration compatibility, playback recovery, display-sleep and CoreAudio fixes, responsive settings, compressed runtime storage, and independent branding. The product is not an official upstream release. Current icon provenance is documented in Docs/APP_ICON_PROVENANCE.md at the repository root.
+
 # Source, Copyright, and Modification Notice
 
 OK影视 Mac (`OKVideoMac`) is an independent native macOS implementation. Code

@@ -18,7 +18,7 @@ OKVideoMac 是代码来源，Android TVBox 是兼容目标；MacBox 与上游独
 
 - 当前应用版本：1.0.0（Build 102）
 - 上游代码基线：OKVideoMac 0.6.1，提交 `9970e2c`。
-- 产品分支：`macbox`。应用及安装包名称为 MacBox，使用独立版本号；当前沿用上游图标。
+- 产品分支：`main`。应用及安装包名称为 MacBox，使用独立版本号；使用独立的 MacBox 图标。
 - 当前开发及实际验收以 Apple Silicon（M 系列）Mac 为主，最低部署目标为 macOS 12.0。
 - Intel Mac、iPhone 和 iPad 尚未完成适配验收。
 
@@ -52,7 +52,7 @@ Android 兼容组件不是完整内置于 App 的离线资源；首次安装需�
 
 ## 开发与项目来源
 
-- 本项目仓库：[wxyanwu/OKVideoMac](https://github.com/wxyanwu/OKVideoMac)（仓库路径暂沿用旧名）。
+- 本项目仓库：[wxyanwu/MacBox](https://github.com/wxyanwu/MacBox)。
 - 上游仓库：[yaolin-dev/OKVideoMac](https://github.com/yaolin-dev/OKVideoMac)。
 - `origin` 用于本项目维护，`upstream` 用于跟踪原项目；保留原有 Git 历史和归属信息。
 - [构建说明](OKVideoMac/macOS/OKVideoMac/Docs/BUILDING.md)

@@ -20,7 +20,7 @@ MacBox is maintained and released independently and is not an official upstream 
 
 - Current app version: 1.0.0 (Build 102)
 - Upstream baseline: OKVideoMac 0.6.1, commit `9970e2c`.
-- Product branch: `macbox`. The application and installers are named MacBox with independent version numbering; the upstream icon is currently retained.
+- Product branch: `main`. The application and installers are named MacBox with independent version numbering; a new MacBox icon is included.
 - Development and device validation currently focus on Apple Silicon Macs; the minimum deployment target is macOS 12.0.
 - Intel Macs, iPhone, and iPad have not completed adaptation and validation.
 
@@ -56,7 +56,7 @@ upstream and modified builds should not be treated as two apps with isolated dat
 
 ## Development and provenance
 
-- Project repository: [wxyanwu/OKVideoMac](https://github.com/wxyanwu/OKVideoMac) (repository path not yet renamed).
+- Project repository: [wxyanwu/MacBox](https://github.com/wxyanwu/MacBox).
 - Upstream repository: [yaolin-dev/OKVideoMac](https://github.com/yaolin-dev/OKVideoMac).
 - `origin` is the independently maintained repository; `upstream` tracks the original project.
   Existing Git history and attribution are retained.
