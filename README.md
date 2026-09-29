@@ -18,7 +18,7 @@ MacBox is maintained and released independently and is not an official upstream 
 
 ## Current status
 
-- Current app version: 1.1.1 (Build 104)
+- Current app version: 1.1.2 (Build 105)
 - Upstream baseline: OKVideoMac 0.6.1, commit `9970e2c`.
 - Product branch: `main`. The application and installers are named MacBox with independent version numbering; a new MacBox icon is included.
 - Development and device validation currently focus on Apple Silicon Macs; the minimum deployment target is macOS 12.0.
@@ -32,7 +32,7 @@ MacBox is maintained and released independently and is not an official upstream 
 - Improved Gson-style configuration parsing, subscription requests, Android media format detection, and fresh playback retries.
 - Per-show intro and outro times with one-row capture controls and second-precise editing; settings carry across episodes.
 - Optional skipping of complete, explicitly marked VOD HLS ad breaks, disabled by default.
-- Android/DEX search recovery for a stalled Bridge operation and clearer search progress for searchable sites.
+- Android/DEX search recovery for a stalled Bridge operation, bounded concurrent aggregate searches, and clearer search progress for searchable sites.
 - Settings layout fixes, isolated live-source validation progress, and prevention of idle display sleep during playback.
 - CoreAudio callback lifetime protection for potential crashes during audio device changes.
 - Losslessly compressed complete Android components: approximately 5.35 GiB to 1.82 GiB in the verified installation.
@@ -47,7 +47,7 @@ Current builds are locally verified Release builds with ad-hoc signing. They are
 Developer ID signed or Apple-notarized upstream releases. Upstream downloads do not contain
 this project's modifications.
 
-[Download MacBox 1.1.1 for Apple Silicon Macs](https://github.com/wxyanwu/MacBox/releases/download/v1.1.1/MacBox-1.1.1.dmg) · [Release notes, checksums, and corresponding source](https://github.com/wxyanwu/MacBox/releases/tag/v1.1.1)
+[Download MacBox 1.1.2 for Apple Silicon Macs](https://github.com/wxyanwu/MacBox/releases/download/v1.1.2/MacBox-1.1.2.dmg) · [Release notes, checksums, and corresponding source](https://github.com/wxyanwu/MacBox/releases/tag/v1.1.2)
 
 1. Use a Release build made from this project.
 2. Import your own TVBox configuration in Settings → VOD Sources; manage live sources in Settings → Live Sources.

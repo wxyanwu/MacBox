@@ -10889,6 +10889,16 @@ final class AppState: ObservableObject {
         let aggregatePolicies: [String: MultiSiteSearchProviderPolicy] = Dictionary(
             uniqueKeysWithValues: searchableProviders.compactMap {
                 provider -> (String, MultiSiteSearchProviderPolicy)? in
+                if provider is AndroidDexSpiderSiteProvider {
+                    return (
+                        provider.site.key,
+                        MultiSiteSearchProviderPolicy(
+                            concurrencyGroup: "android-dex-bridge",
+                            maximumGroupConcurrency: 8,
+                            maximumPagesPerSite: 1
+                        )
+                    )
+                }
                 guard provider is NodeHTTPSpiderSiteProvider else { return nil }
                 return (
                     provider.site.key,

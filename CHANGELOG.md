@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.2] - 2026-09-30
+
+- Treat an empty Android/DEX result as a valid outcome in aggregate search instead of rebuilding the Spider and loading its home page for every site.
+- Bound concurrent Android Bridge searches and search only the first page per site during aggregate search. Standalone site search keeps its recovery behavior.
+- Preserve existing subscriptions, preferences, viewing history, and the Android Bridge APK.
+
 ## [1.1.1] - 2026-09-29
 
 - Bound unattended Android/DEX playback resolution to 45 seconds and recover the owned Bridge if a provider ignores cancellation.

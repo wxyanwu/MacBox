@@ -968,7 +968,7 @@ enum MyDriveGuardActionContract {
     }
 }
 
-final class AndroidDexSpiderSiteProvider: SiteProvider {
+final class AndroidDexSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
     let site: SiteConfiguration
     let capability: SiteCapability = .javaDexSpider
 
@@ -1379,6 +1379,29 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
             )
         }
         return mapped
+    }
+
+    func aggregateSearch(
+        keyword: String,
+        page: Int,
+        quick: Bool
+    ) async throws -> VideoPage {
+        guard site.searchable != 0, !quick || site.quickSearch == 1 else {
+            return VideoPage(items: [], pagination: Pagination(page: page, pageCount: 0))
+        }
+        let arguments: [JSONValue] = page <= 1
+            ? [.string(keyword), .bool(quick)]
+            : [.string(keyword), .bool(quick), .string(String(page))]
+        // An empty search page is a valid result. Rebuilding the Spider and
+        // loading its home page for every empty site can occupy the shared
+        // Bridge workers until the aggregate search times out.
+        let value = try await invoke(method: "search", arguments: arguments)
+        return try SpiderResponseMapper.page(
+            value,
+            site: site,
+            baseURL: baseURL,
+            page: page
+        )
     }
 
     static func shouldRetrySearch(page: Int, value: JSONValue) -> Bool {

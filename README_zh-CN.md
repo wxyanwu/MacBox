@@ -16,7 +16,7 @@ OKVideoMac 是代码来源，Android TVBox 是兼容目标；MacBox 与上游独
 
 ## 当前状态
 
-- 当前应用版本：1.1.1（Build 104）
+- 当前应用版本：1.1.2（Build 105）
 - 上游代码基线：OKVideoMac 0.6.1，提交 `9970e2c`。
 - 产品分支：`main`。应用及安装包名称为 MacBox，使用独立版本号；使用独立的 MacBox 图标。
 - 当前开发及实际验收以 Apple Silicon（M 系列）Mac 为主，最低部署目标为 macOS 12.0。
@@ -30,7 +30,7 @@ OKVideoMac 是代码来源，Android TVBox 是兼容目标；MacBox 与上游独
 - 改进 Gson 风格订阅解析、配置请求、安卓播放格式识别与播放地址刷新重试。
 - 片头、片尾时间按剧记忆，单行按钮可取当前播放时间，时间框支持按秒调整，并在连续选集时生效。
 - 可选跳过 VOD HLS 播放列表中明确且完整标记的广告区间，默认关闭。
-- 搜索前检查 Android Bridge 状态，遇到旧请求卡住时恢复，并准确统计可搜索站点。
+- 搜索前检查 Android Bridge 状态，遇到旧请求卡住时恢复；批量搜索限制并发，空结果直接计入进度，并准确统计可搜索站点。
 - 修复设置页宽度适配、直播源检测引起的全局刷新，以及播放时屏幕空闲休眠问题。
 - 加入 CoreAudio 回调生命周期保护，处理音频设备变化时的潜在崩溃。
 - 完整 Android 组件采用无损压缩镜像；已验证样本中，组件占用由约 5.35 GiB 降至 1.82 GiB。
@@ -44,7 +44,7 @@ OKVideoMac 是代码来源，Android TVBox 是兼容目标；MacBox 与上游独
 本项目当前使用经过本地验证的 Release 构建，采用 ad-hoc 签名。
 它不是上游 Developer ID 签名及 Apple 公证的安装包；上游下载页提供的也不是本项目修改版。
 
-[下载 MacBox 1.1.1（Apple Silicon Mac）](https://github.com/wxyanwu/MacBox/releases/download/v1.1.1/MacBox-1.1.1.dmg) · [发布说明、校验文件与对应源码](https://github.com/wxyanwu/MacBox/releases/tag/v1.1.1)
+[下载 MacBox 1.1.2（Apple Silicon Mac）](https://github.com/wxyanwu/MacBox/releases/download/v1.1.2/MacBox-1.1.2.dmg) · [发布说明、校验文件与对应源码](https://github.com/wxyanwu/MacBox/releases/tag/v1.1.2)
 
 1. 使用本项目构建的 Release 应用。
 2. 在“设置 → 点播片源”导入你自己的 TVBox 配置；直播来源在“设置 → 直播源”管理。

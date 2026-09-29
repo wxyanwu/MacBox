@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "release": "MacBox 1.1.1 (104)",
+  "release": "MacBox 1.1.2 (105)",
   "target": {
     "architecture": "arm64",
     "deployment_target": "12.0",
