@@ -424,6 +424,27 @@ struct SettingsView: View {
                     .labelsHidden()
                     .toggleStyle(.switch)
                 }
+
+                SettingsDivider()
+
+                SettingsControlRow(
+                    icon: "hand.raised.fill",
+                    color: .orange,
+                    title: SettingsL10n.string("settings.playback.ads.title", "Skip Marked HLS Ads"),
+                    subtitle: SettingsL10n.string("settings.playback.ads.subtitle", "Only complete ad breaks explicitly marked in VOD HLS playlists; off by default")
+                ) {
+                    Toggle(
+                        SettingsL10n.string("settings.playback.ads.title", "Skip Marked HLS Ads"),
+                        isOn: Binding(
+                            get: { state.adFilteringEnabled },
+                            set: { enabled in
+                                Task { await state.setAdFilteringEnabled(enabled) }
+                            }
+                        )
+                    )
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                }
             }
 
             SettingsSectionTitle(SettingsL10n.string("settings.common.about.section", "About"))

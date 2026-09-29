@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0] - 2026-09-29
+
+- Add per-show intro/outro capture and second-precise editing across episodes.
+- Add opt-in skipping for complete, explicitly marked VOD HLS ad breaks.
+- Recover Android/DEX searches when a stale Bridge request blocks all providers; exclude providers marked non-searchable from progress.
+- Preserve the existing signed Android Bridge APK and user data.
+
 ## [1.0.0] - 2026-09-28
 
 - Start the independently maintained MacBox product branch and version series (Build 102).

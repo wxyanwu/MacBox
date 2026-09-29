@@ -9043,6 +9043,127 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
+    func testEpisodeSkipSettingsKeepShowIdentityAndRespectResume() {
+        let config = UUID()
+        XCTAssertEqual(
+            EpisodeSkipSettings.settingKey(
+                configurationID: config, siteKey: "one", videoID: "show"
+            ),
+            EpisodeSkipSettings.settingKey(
+                configurationID: config, siteKey: "one", videoID: "show"
+            )
+        )
+        XCTAssertNotEqual(
+            EpisodeSkipSettings.settingKey(
+                configurationID: config, siteKey: "one", videoID: "show"
+            ),
+            EpisodeSkipSettings.settingKey(
+                configurationID: config, siteKey: "one", videoID: "other"
+            )
+        )
+        let settings = EpisodeSkipSettings(introSeconds: 90, outroStartSeconds: 540)
+        XCTAssertEqual(EpisodeSkipSettings(setting: settings.setting), settings)
+        XCTAssertEqual(settings.introTarget(snapshot: PlayerSnapshot(
+            status: .playing, position: 20, duration: 600
+        )), 90)
+        XCTAssertNil(settings.introTarget(snapshot: PlayerSnapshot(
+            status: .playing, position: 120, duration: 600
+        )))
+        XCTAssertNil(settings.introTarget(snapshot: PlayerSnapshot(
+            status: .playing, position: 20, duration: 90
+        )))
+        XCTAssertEqual(EpisodeSkipSettings(
+            introSeconds: -1, outroStartSeconds: 100_000
+        ).outroStartSeconds, 86_399)
+    }
+
+    func testOutroSkipRequiresNaturalProgressAcrossBoundary() {
+        let settings = EpisodeSkipSettings(introSeconds: 30, outroStartSeconds: 540)
+        XCTAssertTrue(settings.shouldSkipOutro(
+            previous: PlayerSnapshot(status: .playing, position: 538, duration: 600),
+            current: PlayerSnapshot(status: .playing, position: 540, duration: 600)
+        ))
+        XCTAssertFalse(settings.shouldSkipOutro(
+            previous: PlayerSnapshot(status: .playing, position: 400, duration: 600),
+            current: PlayerSnapshot(status: .playing, position: 541, duration: 600)
+        ))
+        XCTAssertFalse(settings.shouldSkipOutro(
+            previous: PlayerSnapshot(status: .playing, position: 538, duration: 600),
+            current: PlayerSnapshot(status: .playing, position: 540, duration: 600, isSeeking: true)
+        ))
+    }
+
+    func testPlaybackTimecodeEditingAndOneSecondAdjustment() {
+        XCTAssertEqual(PlaybackTimecode.format(3_661), "01:01:01")
+        XCTAssertEqual(PlaybackTimecode.parse("1:01:01"), 3_661)
+        XCTAssertEqual(PlaybackTimecode.parse("00:00:59"), 59)
+        XCTAssertNil(PlaybackTimecode.parse("00:60:00"))
+        XCTAssertNil(PlaybackTimecode.parse("01:02"))
+        XCTAssertEqual(PlaybackTimecode.adjusted(59, by: 1), 60)
+        XCTAssertEqual(PlaybackTimecode.adjusted(0, by: -1), 0)
+        XCTAssertEqual(PlaybackTimecode.capture(3_661.9), 3_661)
+    }
+
+    func testHLSAdTimelineOnlyAcceptsCompleteMarkedVODBreaks() {
+        let manifest = """
+        #EXTM3U
+        #EXT-X-PLAYLIST-TYPE:VOD
+        #EXTINF:4,
+        main-1.ts
+        #EXTINF:4,
+        main-2.ts
+        #EXT-X-CUE-OUT:8
+        #EXT-X-DISCONTINUITY
+        #EXTINF:4,
+        ad-1.ts
+        #EXTINF:4,
+        ad-2.ts
+        #EXT-X-CUE-IN
+        #EXT-X-DISCONTINUITY
+        #EXTINF:4,
+        main-3.ts
+        #EXT-X-ENDLIST
+        """
+        let timeline = HLSAdTimeline.parse(manifest)
+        XCTAssertEqual(timeline?.breaks, [HLSAdBreak(start: 8, end: 16)])
+        XCTAssertEqual(timeline?.breakToSkip(at: 9, playerDuration: 20), 0)
+        XCTAssertNil(timeline?.breakToSkip(at: 17, playerDuration: 20))
+        XCTAssertNil(timeline?.breakToSkip(at: 9, playerDuration: 45))
+        XCTAssertNil(HLSAdTimeline.parse(manifest.replacingOccurrences(
+            of: "#EXT-X-CUE-IN", with: "#EXT-X-DISCONTINUITY"
+        )))
+        XCTAssertNil(HLSAdTimeline.parse(manifest.replacingOccurrences(
+            of: "#EXT-X-CUE-OUT:8", with: "#EXT-X-DISCONTINUITY"
+        )))
+        XCTAssertNil(HLSAdTimeline.parse(manifest.replacingOccurrences(
+            of: "#EXT-X-CUE-OUT:8\n#EXT-X-DISCONTINUITY",
+            with: "#EXT-X-CUE-OUT:8"
+        )))
+        XCTAssertNil(HLSAdTimeline.parse(manifest.replacingOccurrences(
+            of: "#EXT-X-CUE-OUT:8", with: "#EXT-X-CUE-OUT:unknown"
+        )))
+        XCTAssertNil(HLSAdTimeline.parse(manifest.replacingOccurrences(
+            of: "#EXT-X-CUE-OUT:8", with: "#EXT-X-CUE-OUT:30"
+        )))
+    }
+
+    func testRealMarkedHLSAdVideoKeepsNormalTimeline() async throws {
+        guard let rawURL = ProcessInfo.processInfo.environment["MACBOX_AD_FIXTURE_URL"],
+              let url = URL(string: rawURL) else {
+            throw XCTSkip("Set MACBOX_AD_FIXTURE_URL to a local HLS video with a marked ad break")
+        }
+        let media = ResolvedMedia(
+            url: url, headers: [:], format: "m3u8", siteKey: "fixture",
+            sourceName: "fixture", episodeName: "fixture"
+        )
+        let detected = await HLSAdBreakDetector.detect(media: media)
+        let timeline = try XCTUnwrap(detected)
+        XCTAssertEqual(timeline.breaks, [HLSAdBreak(start: 6, end: 16)])
+        XCTAssertNil(timeline.breakToSkip(at: 3, playerDuration: 22))
+        XCTAssertEqual(timeline.breakToSkip(at: 7, playerDuration: 22), 0)
+        XCTAssertNil(timeline.breakToSkip(at: 18, playerDuration: 22))
+    }
+
     @MainActor
     func testAutomaticEpisodeAdvanceRunsAfterEventHandlerReturns() async {
         let controller = AutomaticEpisodeAdvanceController()

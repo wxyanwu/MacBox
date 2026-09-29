@@ -3489,6 +3489,206 @@ enum PlayerEpisodeAdvancePolicy {
     }
 }
 
+struct EpisodeSkipSettings: Equatable {
+    static let maximumSeconds = 86_399
+    var introSeconds = 0
+    /// Absolute episode timeline position where the ending begins.
+    var outroStartSeconds = 0
+
+    init(introSeconds: Int = 0, outroStartSeconds: Int = 0) {
+        self.introSeconds = Self.clamped(introSeconds)
+        self.outroStartSeconds = Self.clamped(outroStartSeconds)
+    }
+
+    init(setting: JSONValue?) {
+        let values = setting?.objectValue ?? [:]
+        self.init(
+            introSeconds: Self.seconds(values["introSeconds"]),
+            outroStartSeconds: Self.seconds(values["outroStartSeconds"])
+        )
+    }
+
+    var setting: JSONValue {
+        .object([
+            "introSeconds": .integer(Int64(introSeconds)),
+            "outroStartSeconds": .integer(Int64(outroStartSeconds))
+        ])
+    }
+
+    static func settingKey(configurationID: UUID, siteKey: String, videoID: String) -> String {
+        let identity = "\(configurationID.uuidString)::\(siteKey)::\(videoID)"
+        let digest = SHA256.hash(data: Data(identity.utf8))
+        return "playback.episodeSkip." + digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    func introTarget(snapshot: PlayerSnapshot) -> TimeInterval? {
+        guard introSeconds > 0, snapshot.duration.isFinite,
+              snapshot.duration > TimeInterval(introSeconds + 1),
+              snapshot.position < TimeInterval(introSeconds) - 0.5,
+              snapshot.status == .playing, !snapshot.isSeeking,
+              snapshot.seekTarget == nil else { return nil }
+        return TimeInterval(introSeconds)
+    }
+
+    func shouldSkipOutro(previous: PlayerSnapshot, current: PlayerSnapshot) -> Bool {
+        guard outroStartSeconds > introSeconds,
+              current.duration.isFinite,
+              current.duration > TimeInterval(outroStartSeconds + 1),
+              current.status == .playing, !current.isSeeking,
+              current.seekTarget == nil else { return false }
+        let boundary = TimeInterval(outroStartSeconds)
+        return previous.position < boundary
+            && current.position >= boundary
+            && current.position - previous.position >= 0
+            && current.position - previous.position <= 5
+    }
+
+    private static func clamped(_ value: Int) -> Int {
+        min(max(value, 0), maximumSeconds)
+    }
+
+    private static func seconds(_ value: JSONValue?) -> Int {
+        guard case .integer(let seconds) = value else { return 0 }
+        return Int(min(max(seconds, 0), Int64(maximumSeconds)))
+    }
+}
+
+enum PlaybackTimecode {
+    static func format(_ seconds: Int) -> String {
+        let clamped = min(max(seconds, 0), EpisodeSkipSettings.maximumSeconds)
+        return String(
+            format: "%02d:%02d:%02d",
+            clamped / 3_600,
+            (clamped / 60) % 60,
+            clamped % 60
+        )
+    }
+
+    static func parse(_ raw: String) -> Int? {
+        let parts = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 3,
+              parts.allSatisfy({ !$0.isEmpty && $0.count <= 2
+                  && $0.allSatisfy(\.isNumber) }),
+              let hours = Int(parts[0]), let minutes = Int(parts[1]),
+              let seconds = Int(parts[2]),
+              (0...23).contains(hours), (0...59).contains(minutes),
+              (0...59).contains(seconds) else { return nil }
+        return hours * 3_600 + minutes * 60 + seconds
+    }
+
+    static func capture(_ position: TimeInterval) -> Int? {
+        guard position.isFinite, position >= 0 else { return nil }
+        return Int(min(
+            position.rounded(.down),
+            Double(EpisodeSkipSettings.maximumSeconds)
+        ))
+    }
+
+    static func adjusted(_ seconds: Int, by delta: Int) -> Int {
+        min(max(seconds + delta, 0), EpisodeSkipSettings.maximumSeconds)
+    }
+}
+
+struct HLSAdBreak: Equatable {
+    let start: TimeInterval
+    let end: TimeInterval
+}
+
+struct HLSAdTimeline: Equatable {
+    let duration: TimeInterval
+    let breaks: [HLSAdBreak]
+
+    /// Only complete, explicit CUE-OUT/CUE-IN pairs in a finished media
+    /// playlist qualify. Discontinuities and filenames are never ad evidence.
+    static func parse(_ text: String) -> HLSAdTimeline? {
+        let lines = text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard lines.first == "#EXTM3U",
+              lines.contains("#EXT-X-PLAYLIST-TYPE:VOD"),
+              lines.contains("#EXT-X-ENDLIST"),
+              !lines.contains(where: { $0.hasPrefix("#EXT-X-STREAM-INF:") }) else {
+            return nil
+        }
+        var elapsed: TimeInterval = 0
+        var pendingDuration: TimeInterval?
+        var adStart: TimeInterval?
+        var declaredAdDuration: TimeInterval?
+        var breaks: [HLSAdBreak] = []
+        var segmentCount = 0
+        for (index, line) in lines.enumerated() {
+            if line.hasPrefix("#EXT-X-CUE-OUT:") {
+                let rawDuration = line.dropFirst("#EXT-X-CUE-OUT:".count)
+                let durationText = rawDuration.hasPrefix("DURATION=")
+                    ? rawDuration.dropFirst("DURATION=".count)
+                    : rawDuration[...]
+                guard let declared = Double(durationText.split(separator: ",", maxSplits: 1).first ?? ""),
+                      declared.isFinite, declared > 0, declared <= 600,
+                      adStart == nil, pendingDuration == nil,
+                      lines.dropFirst(index + 1).first(where: { !$0.isEmpty })
+                        == "#EXT-X-DISCONTINUITY" else { return nil }
+                adStart = elapsed
+                declaredAdDuration = declared
+            } else if line == "#EXT-X-CUE-IN" {
+                guard let start = adStart, let declared = declaredAdDuration,
+                      pendingDuration == nil,
+                      elapsed > start, elapsed - start <= 600,
+                      abs((elapsed - start) - declared) <= 1,
+                      lines.dropFirst(index + 1).first(where: { !$0.isEmpty })
+                        == "#EXT-X-DISCONTINUITY" else { return nil }
+                breaks.append(HLSAdBreak(start: start, end: elapsed))
+                adStart = nil
+                declaredAdDuration = nil
+            } else if line.hasPrefix("#EXTINF:") {
+                guard pendingDuration == nil,
+                      let value = Double(line.dropFirst(8).split(separator: ",", maxSplits: 1).first ?? ""),
+                      value.isFinite, value > 0, value <= 60 else { return nil }
+                pendingDuration = value
+            } else if !line.isEmpty && !line.hasPrefix("#") {
+                guard let duration = pendingDuration else { return nil }
+                elapsed += duration
+                pendingDuration = nil
+                segmentCount += 1
+            }
+        }
+        guard adStart == nil, pendingDuration == nil,
+              segmentCount > 0, !breaks.isEmpty,
+              breaks.allSatisfy({ elapsed - $0.end >= 1 }) else { return nil }
+        return HLSAdTimeline(duration: elapsed, breaks: breaks)
+    }
+
+    func breakToSkip(at position: TimeInterval, playerDuration: TimeInterval) -> Int? {
+        guard position.isFinite, playerDuration.isFinite,
+              abs(duration - playerDuration) <= max(5, duration * 0.01) else {
+            return nil
+        }
+        return breaks.firstIndex {
+            position >= $0.start && position < $0.end - 0.5
+        }
+    }
+}
+
+enum HLSAdBreakDetector {
+    static func detect(media: ResolvedMedia) async -> HLSAdTimeline? {
+        let url = media.url
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              url.pathExtension.lowercased() == "m3u8" else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("bytes=0-262143", forHTTPHeaderField: "Range")
+        for (name, value) in media.headers.dictionary {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let response = response as? HTTPURLResponse,
+              (200...206).contains(response.statusCode),
+              data.count <= 262_144,
+              let text = String(data: data, encoding: .utf8) else { return nil }
+        return HLSAdTimeline.parse(text)
+    }
+}
+
 enum PlayerSeekConfirmationPolicy {
     /// `absolute+keyframes` is deliberately imprecise: mpv may restart from a
     /// keyframe well before the requested timestamp. Native seek completion is
@@ -4871,6 +5071,8 @@ final class AppState: ObservableObject {
     @Published private(set) var playerAspectRatio: String?
     @Published private(set) var playerHardwareDecoding = true
     @Published private(set) var autoPlayNextEpisode = true
+    @Published private(set) var episodeSkipSettings = EpisodeSkipSettings()
+    @Published private(set) var adFilteringEnabled = false
     @Published private(set) var playbackResolutionState: PlaybackResolutionState = .idle
     @Published private(set) var currentPlaybackAttempt: PlaybackAttempt?
     @Published private(set) var playbackFailureSummary: String?
@@ -5026,6 +5228,11 @@ final class AppState: ObservableObject {
     private var siteActionStatusGeneration: UInt64 = 0
     private var siteActionStatusDismissTask: Task<Void, Never>?
     private var activePlayback: ActivePlaybackContext?
+    private var currentEpisodeSkipSettingsKey: String?
+    private var didApplyCurrentIntro = false
+    private var didSkipCurrentOutro = false
+    private var detectedAdTimeline: HLSAdTimeline?
+    private var skippedAdBreakIndices = Set<Int>()
     private var pendingPlayback: PendingCloudPlayback?
     /// Retains only a CatPaw-owned Node proxy generation. TVBox, ordinary
     /// direct media and cloud bridge sessions never create this lease.
@@ -10644,14 +10851,33 @@ final class AppState: ObservableObject {
             return
         }
         // CatPawOpen metadata is not reliable enough to decide whether a
-        // registered route can search. In particular, utility-looking sites
-        // and older bundles may report `searchable == 0` even though their
-        // route accepts a normal search request. Schedule every selected,
-        // runnable provider and let the request's exact outcome decide.
-        let searchableProviders: [SiteProvider] = searchCatalogSites.compactMap { site in
+        // registered route can search. Android/Dex providers, however,
+        // explicitly return an empty page when searchable == 0, so exclude
+        // those from search progress rather than reporting false successes.
+        var searchableProviders: [SiteProvider] = searchCatalogSites.compactMap { site in
             guard selectedKeys.contains(site.key) else { return nil }
-            return providers[site.key]
+            guard let provider = providers[site.key] else { return nil }
+            if provider is AndroidDexSpiderSiteProvider,
+               provider.site.searchable == 0 { return nil }
+            return provider
         }
+        if let dexProvider = searchableProviders.compactMap({
+            $0 as? AndroidDexSpiderSiteProvider
+        }).first {
+            do {
+                try await dexProvider.prepareSearch()
+            } catch {
+                guard searchSessionGate.accepts(sessionID) else { return }
+                show(error, title: L10n.string(
+                    "search.bridge.preparation.failed",
+                    fallback: "Android Search Unavailable"
+                ))
+                searchableProviders.removeAll {
+                    $0 is AndroidDexSpiderSiteProvider
+                }
+            }
+        }
+        guard searchSessionGate.accepts(sessionID) else { return }
         activeSearchSiteKeys = Set(searchableProviders.map { $0.site.key })
         searchTotalSiteCount = searchableProviders.count
         isSearching = !searchableProviders.isEmpty
@@ -11343,6 +11569,12 @@ final class AppState: ObservableObject {
         }
         playbackSessionID = sessionID
         activePlayerRequestID = sessionID
+        currentEpisodeSkipSettingsKey = nil
+        episodeSkipSettings = EpisodeSkipSettings()
+        didApplyCurrentIntro = false
+        didSkipCurrentOutro = false
+        detectedAdTimeline = nil
+        skippedAdBreakIndices = []
         pendingNodePlaybackConfigurationFallback = nil
         playbackQualitySwitchSessionID = UUID()
         playbackQualities = []
@@ -13762,6 +13994,47 @@ final class AppState: ObservableObject {
         }
     }
 
+    func setEpisodeSkipSeconds(intro: Int? = nil, outroStart: Int? = nil) async {
+        guard let environment, let key = currentEpisodeSkipSettingsKey else { return }
+        let previous = episodeSkipSettings
+        let updated = EpisodeSkipSettings(
+            introSeconds: intro ?? previous.introSeconds,
+            outroStartSeconds: outroStart ?? previous.outroStartSeconds
+        )
+        guard updated != previous else { return }
+        episodeSkipSettings = updated
+        do {
+            try await environment.database.setSetting(updated.setting, forKey: key)
+        } catch {
+            if currentEpisodeSkipSettingsKey == key,
+               episodeSkipSettings == updated {
+                episodeSkipSettings = previous
+            }
+            show(error, title: L10n.string("player.skip.save.failed", fallback: "Unable to Save Skip Settings"), target: .player)
+        }
+    }
+
+    func setAdFilteringEnabled(_ enabled: Bool) async {
+        guard let environment else { return }
+        let previous = adFilteringEnabled
+        adFilteringEnabled = enabled
+        if !enabled {
+            detectedAdTimeline = nil
+            skippedAdBreakIndices = []
+        }
+        do {
+            try await environment.database.setSetting(
+                .bool(enabled), forKey: "playback.adFilteringEnabled"
+            )
+            if enabled, let playback = activePlayback {
+                scheduleAdBreakDetection(media: playback.media, sessionID: playbackSessionID)
+            }
+        } catch {
+            if adFilteringEnabled == enabled { adFilteringEnabled = previous }
+            show(error, title: L10n.string("player.ads.save.failed", fallback: "Unable to Save Ad Filter Setting"), target: .player)
+        }
+    }
+
     func clearPosterCache() async {
         guard let repository = environment?.imageRepository else { return }
         do {
@@ -14460,6 +14733,13 @@ final class AppState: ObservableObject {
                 playbackResult: playbackResult,
                 providerResourceReference: playback.providerResourceReference
             )
+            detectedAdTimeline = nil
+            skippedAdBreakIndices = []
+            if adFilteringEnabled {
+                scheduleAdBreakDetection(
+                    media: resolvedMedia, sessionID: owningPlaybackSessionID
+                )
+            }
             playbackQualities = playbackResult.qualities
             selectedPlaybackQualityID = quality.id
             playbackResolutionState = .playing
@@ -17520,6 +17800,11 @@ final class AppState: ObservableObject {
             autoPlayNextEpisode = enabled
         }
         if let value = try await environment.database.setting(
+            forKey: "playback.adFilteringEnabled"
+        ), case .bool(let enabled) = value {
+            adFilteringEnabled = enabled
+        }
+        if let value = try await environment.database.setting(
             forKey: "playback.subtitlesEnabled"
         ), case .bool(let enabled) = value {
             prefersPlayerSubtitlesEnabled = enabled
@@ -17597,6 +17882,74 @@ final class AppState: ObservableObject {
         return playback.source.episodes.indices.contains(currentIndex + offset)
     }
 
+    private func scheduleAdBreakDetection(media: ResolvedMedia, sessionID: UUID) {
+        detectedAdTimeline = nil
+        skippedAdBreakIndices = []
+        Task { [weak self] in
+            let timeline = await HLSAdBreakDetector.detect(media: media)
+            guard let self, self.adFilteringEnabled,
+                  self.playbackSessionID == sessionID,
+                  self.activePlayback?.media.url == media.url else { return }
+            self.detectedAdTimeline = timeline
+        }
+    }
+
+    private func applyAutomaticSkips(
+        previous: PlayerSnapshot,
+        current: PlayerSnapshot
+    ) {
+        guard canSeekPlayback, current.status == .playing,
+              !current.isSeeking, current.seekTarget == nil else { return }
+        let sessionID = playbackSessionID
+        if !didApplyCurrentIntro, current.duration > 0,
+           episodeSkipSettings.introSeconds > 0 {
+            if let target = episodeSkipSettings.introTarget(snapshot: current) {
+                didApplyCurrentIntro = true
+                Task { [weak self] in
+                    guard let self, self.playbackSessionID == sessionID else { return }
+                    await self.seek(to: target)
+                }
+                return
+            }
+            if current.position >= TimeInterval(episodeSkipSettings.introSeconds) {
+                didApplyCurrentIntro = true
+            }
+        }
+        if adFilteringEnabled,
+           let timeline = detectedAdTimeline,
+           let index = timeline.breakToSkip(
+               at: current.position, playerDuration: current.duration
+           ), skippedAdBreakIndices.insert(index).inserted {
+            let end = timeline.breaks[index].end
+            Task { [weak self] in
+                guard let self, self.playbackSessionID == sessionID,
+                      self.adFilteringEnabled else { return }
+                await self.seek(to: end)
+            }
+            return
+        }
+        guard !didSkipCurrentOutro,
+              episodeSkipSettings.shouldSkipOutro(
+                  previous: previous, current: current
+              ) else { return }
+        didSkipCurrentOutro = true
+        if autoPlayNextEpisode, hasAdjacentEpisode(offset: 1) {
+            Task { [weak self] in
+                guard let self, self.playbackSessionID == sessionID else { return }
+                try? await self.savePlaybackHistory(
+                    position: current.duration, duration: current.duration
+                )
+                guard self.playbackSessionID == sessionID else { return }
+                self.scheduleAdvanceAfterNaturalEnd(endedSessionID: sessionID)
+            }
+        } else {
+            Task { [weak self] in
+                guard let self, self.playbackSessionID == sessionID else { return }
+                await self.seek(to: current.duration)
+            }
+        }
+    }
+
     private func startPlayerEventLoop() {
         guard !isShutdownRequested,
               playerEventTask == nil,
@@ -17612,7 +17965,11 @@ final class AppState: ObservableObject {
                     ) else {
                         continue
                     }
+                    let previousSnapshot = self.playerSnapshot
                     self.playerSnapshot = snapshot
+                    self.applyAutomaticSkips(
+                        previous: previousSnapshot, current: snapshot
+                    )
                     let subtitleTracks = snapshot.tracks.filter {
                         $0.type == .subtitle
                     }
@@ -18075,7 +18432,19 @@ final class AppState: ObservableObject {
                     || $0.videoID == detail.summary.videoID)
                 && Self.historyRecord($0, matches: source, episode: episode)
         }
+        let skipSettingsKey = EpisodeSkipSettings.settingKey(
+            configurationID: configurationID,
+            siteKey: detail.summary.siteKey,
+            videoID: detail.summary.videoID
+        )
+        let storedSkipSettings = try? await environment.database.setting(
+            forKey: skipSettingsKey
+        )
+        guard playbackSessionID == sessionID else { throw CancellationError() }
+        let skipSettings = EpisodeSkipSettings(setting: storedSkipSettings)
         let startPosition = Self.historyResumePosition(from: existing)
+        currentEpisodeSkipSettingsKey = skipSettingsKey
+        episodeSkipSettings = skipSettings
         let playback = ActivePlaybackContext(
             configurationID: configurationID,
             detail: detail,
@@ -18213,6 +18582,9 @@ final class AppState: ObservableObject {
             )
         }
         activePlayback = playback
+        if adFilteringEnabled {
+            scheduleAdBreakDetection(media: scopedMedia, sessionID: sessionID)
+        }
         if let authoritativeHistoryRecord {
             historyPlaybackSessionCache.store(
                 playback,

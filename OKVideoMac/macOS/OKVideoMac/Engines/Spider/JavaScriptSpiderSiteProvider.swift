@@ -1013,6 +1013,15 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         }
     }
 
+    func prepareSearch() async throws {
+        try await bridge.prepareSearch(
+            configurationID: configurationIdentity,
+            hosts: configurationHosts,
+            jarReference: jarReference,
+            baseURL: baseURL
+        )
+    }
+
     func home() async throws -> SiteHome {
         var values = try await loadHomeValues()
         if Self.shouldResetSpider(
@@ -2391,6 +2400,82 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     func startRuntime() async throws -> AndroidRuntimeStatus {
         try await runtime.start()
         return await runtime.status()
+    }
+
+    func prepareSearch(
+        configurationID: String,
+        hosts: [String],
+        jarReference: String,
+        baseURL: URL?
+    ) async throws {
+        try await operationAdmission.perform { [self] in
+            try await runtimePrerequisite()
+            try await runtime.ensureReady()
+            do {
+                try await searchPreflight(
+                    configurationID: configurationID,
+                    hosts: hosts,
+                    jarReference: jarReference,
+                    baseURL: baseURL
+                )
+            } catch let error as URLError where error.code == .timedOut {
+                try Task.checkCancellation()
+                // An old third-party player can ignore cancellation while
+                // holding the bridge's configuration DNS lease. Recover the
+                // owned Bridge process once, without replacing its APK or data.
+                try await runtime.resetAuthorizationUI()
+                try await searchPreflight(
+                    configurationID: configurationID,
+                    hosts: hosts,
+                    jarReference: jarReference,
+                    baseURL: baseURL
+                )
+            }
+        }
+    }
+
+    private func searchPreflight(
+        configurationID: String,
+        hosts: [String],
+        jarReference: String,
+        baseURL: URL?
+    ) async throws {
+        let jar = try Self.jarParts(jarReference, baseURL: baseURL)
+        let siteKey = "__macbox_search_preflight__"
+        var request = URLRequest(url: invokeURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(
+            Request(
+                configurationID: configurationID,
+                hosts: hosts,
+                siteKey: siteKey,
+                api: "csp___MacBoxSearchPreflight__",
+                ext: "",
+                jarURL: jar.url.absoluteString,
+                jarMD5: jar.md5,
+                method: "init",
+                arguments: [],
+                siteHeaders: nil,
+                monitorsAuthorization: false,
+                interactionID: nil,
+                interactionKind: nil,
+                providerOwnerID: Self.providerOwnerID(
+                    configurationID: configurationID,
+                    siteKey: siteKey,
+                    jarURL: jar.url,
+                    jarMD5: jar.md5
+                ),
+                refreshPlayback: nil
+            )
+        )
+        let (data, response) = try await session.data(for: request)
+        guard let response = response as? HTTPURLResponse,
+              let state = try? JSONDecoder().decode(Response.self, from: data),
+              (200..<300).contains(response.statusCode), state.ok else {
+            throw AppError.spider("Android Bridge 搜索准备响应无效")
+        }
     }
 
     func beginManagedMaintenance() async throws {

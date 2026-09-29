@@ -1458,7 +1458,7 @@ struct PlayerView: View {
     }
 
     private func playbackSettingsPanel(maximumSize: CGSize) -> some View {
-        playerPanel(width: 370, maximumSize: maximumSize) {
+        playerPanel(width: 420, maximumSize: maximumSize) {
             Group {
                 VStack(alignment: .leading, spacing: 12) {
                     panelHeader(title: L10n.string("player.settings", fallback: "Playback Settings"), detail: nil)
@@ -1477,6 +1477,21 @@ struct PlayerView: View {
                                 }
                             )
                         )
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                    }
+
+                    panelDivider
+                    HStack {
+                        Text(L10n.string("player.ads.filter", fallback: "Skip marked HLS ads"))
+                        Spacer()
+                        Toggle("", isOn: Binding(
+                            get: { state.adFilteringEnabled },
+                            set: { enabled in
+                                Task { await state.setAdFilteringEnabled(enabled) }
+                            }
+                        ))
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .controlSize(.small)
@@ -1553,12 +1568,73 @@ struct PlayerView: View {
                     )
 
                     panelDivider
-                    panelActionButton(L10n.string("player.save-screenshot", fallback: "Save Screenshot…")) {
-                        chooseScreenshotLocation()
+                    HStack(spacing: 8) {
+                        panelActionButton(L10n.string("player.save-screenshot.compact", fallback: "Screenshot")) {
+                            chooseScreenshotLocation()
+                        }
+                        Spacer(minLength: 0)
+                        if state.currentPlaybackEpisode != nil, !state.isLivePlayback {
+                            playbackSkipCaptureControls
+                        }
                     }
                 }
             }
         }
+    }
+
+    private var playbackSkipCaptureControls: some View {
+        HStack(spacing: 5) {
+            playbackCaptureButton(
+                L10n.string("player.skip.intro", fallback: "Intro")
+            ) {
+                guard let seconds = PlaybackTimecode.capture(
+                    state.playerSnapshot.position
+                ) else { return }
+                Task { await state.setEpisodeSkipSeconds(intro: seconds) }
+            }
+            PlaybackTimecodeField(seconds: Binding(
+                get: { state.episodeSkipSettings.introSeconds },
+                set: { seconds in
+                    Task { await state.setEpisodeSkipSeconds(intro: seconds) }
+                }
+            ))
+            .help(L10n.string("player.skip.intro.help", fallback: "Opening end · hours:minutes:seconds"))
+
+            playbackCaptureButton(
+                L10n.string("player.skip.outro", fallback: "Outro")
+            ) {
+                guard let seconds = PlaybackTimecode.capture(
+                    state.playerSnapshot.position
+                ) else { return }
+                Task { await state.setEpisodeSkipSeconds(outroStart: seconds) }
+            }
+            PlaybackTimecodeField(seconds: Binding(
+                get: { state.episodeSkipSettings.outroStartSeconds },
+                set: { seconds in
+                    Task { await state.setEpisodeSkipSeconds(outroStart: seconds) }
+                }
+            ))
+            .help(L10n.string("player.skip.outro.help", fallback: "Ending begins · hours:minutes:seconds"))
+        }
+        .disabled(!state.canSeekPlayback)
+    }
+
+    private func playbackCaptureButton(
+        _ title: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .padding(.horizontal, 6)
+                .frame(height: 26)
+                .background(
+                    Color.white.opacity(0.08),
+                    in: RoundedRectangle(cornerRadius: 6)
+                )
+        }
+        .buttonStyle(.plain)
+        .foregroundColor(.white.opacity(0.9))
     }
 
     private func playerPanel<Content: View>(
@@ -2590,6 +2666,119 @@ enum PlayerEpisodePagePolicy {
         let start = safeIndex * pageSize + 1
         let end = start + values.count - 1
         return L10n.string("player.item-range", fallback: "Items %d–%d", start, end)
+    }
+}
+
+private struct PlaybackTimecodeField: NSViewRepresentable {
+    @Environment(\.isEnabled) private var isEnabled
+    @Binding var seconds: Int
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSStackView {
+        let field = NSTextField(string: PlaybackTimecode.format(seconds))
+        field.delegate = context.coordinator
+        field.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        field.alignment = .center
+        field.textColor = .white
+        field.isBezeled = false
+        field.drawsBackground = true
+        field.backgroundColor = NSColor.white.withAlphaComponent(0.08)
+        field.wantsLayer = true
+        field.layer?.cornerRadius = 6
+        field.translatesAutoresizingMaskIntoConstraints = false
+        field.widthAnchor.constraint(equalToConstant: 78).isActive = true
+        field.heightAnchor.constraint(equalToConstant: 26).isActive = true
+
+        let stepper = NSStepper()
+        stepper.minValue = 0
+        stepper.maxValue = Double(EpisodeSkipSettings.maximumSeconds)
+        stepper.increment = 1
+        stepper.integerValue = seconds
+        stepper.controlSize = .small
+        stepper.target = context.coordinator
+        stepper.action = #selector(Coordinator.stepperChanged(_:))
+
+        let stack = NSStackView(views: [field, stepper])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 2
+        context.coordinator.field = field
+        context.coordinator.stepper = stepper
+        return stack
+    }
+
+    func updateNSView(_ view: NSStackView, context: Context) {
+        context.coordinator.parent = self
+        if let field = context.coordinator.field {
+            field.isEnabled = isEnabled
+            if field.currentEditor() == nil {
+                field.stringValue = PlaybackTimecode.format(seconds)
+            }
+        }
+        context.coordinator.stepper?.isEnabled = isEnabled
+        context.coordinator.stepper?.integerValue = seconds
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: PlaybackTimecodeField
+        weak var field: NSTextField?
+        weak var stepper: NSStepper?
+
+        init(_ parent: PlaybackTimecodeField) {
+            self.parent = parent
+        }
+
+        @objc func stepperChanged(_ sender: NSStepper) {
+            apply(sender.integerValue)
+        }
+
+        func controlTextDidEndEditing(_ notification: Notification) {
+            commit()
+        }
+
+        func control(
+            _ control: NSControl,
+            textView: NSTextView,
+            doCommandBy commandSelector: Selector
+        ) -> Bool {
+            switch NSStringFromSelector(commandSelector) {
+            case "moveUp:":
+                adjust(by: 1)
+                return true
+            case "moveDown:":
+                adjust(by: -1)
+                return true
+            case "insertNewline:":
+                commit()
+                control.window?.makeFirstResponder(nil)
+                return true
+            default:
+                return false
+            }
+        }
+
+        private func adjust(by delta: Int) {
+            let current = field.flatMap {
+                PlaybackTimecode.parse($0.stringValue)
+            } ?? parent.seconds
+            apply(PlaybackTimecode.adjusted(current, by: delta))
+        }
+
+        private func commit() {
+            guard let field else { return }
+            guard let value = PlaybackTimecode.parse(field.stringValue) else {
+                field.stringValue = PlaybackTimecode.format(parent.seconds)
+                return
+            }
+            apply(value)
+        }
+
+        private func apply(_ value: Int) {
+            parent.seconds = value
+            field?.stringValue = PlaybackTimecode.format(value)
+            stepper?.integerValue = value
+        }
     }
 }
 
