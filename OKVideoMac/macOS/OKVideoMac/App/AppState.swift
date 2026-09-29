@@ -11995,7 +11995,7 @@ final class AppState: ObservableObject {
                         L10n.string(
                             "player.stream.failure-detail",
                             fallback: "%1$@: %2$@",
-                            candidateSource.name,
+                            "\(candidateDetail.summary.siteName) · \(candidateSource.name) · \(candidateEpisode.name)",
                             message
                         )
                     )
@@ -12120,10 +12120,16 @@ final class AppState: ObservableObject {
                                 return
                             }
                         }
-                        playbackFailureSummary = Self.playbackFailureMessage(
+                        let reason = Self.playbackFailureMessage(
                             message,
                             validationPolicy: result.validationPolicy,
                             refreshPerformed: refreshWasExplicitlyObserved
+                        )
+                        playbackFailureSummary = L10n.string(
+                            "player.stream.failure-detail",
+                            fallback: "%1$@: %2$@",
+                            "\(candidateSource.name) · \(candidateEpisode.name)",
+                            reason
                         )
                     case .resolved:
                         if let receipt = result.transferReceipt {
@@ -12162,10 +12168,16 @@ final class AppState: ObservableObject {
                                 return
                             }
                         }
-                        candidateFailure = Self.playbackFailureMessage(
+                        let reason = Self.playbackFailureMessage(
                             message,
                             validationPolicy: result.validationPolicy,
                             refreshPerformed: refreshWasExplicitlyObserved
+                        )
+                        candidateFailure = L10n.string(
+                            "player.stream.failure-detail",
+                            fallback: "%1$@: %2$@",
+                            "\(candidateSource.name) · \(candidateEpisode.name)",
+                            reason
                         )
                     case .cancelled:
                         throw CancellationError()
@@ -18474,9 +18486,7 @@ final class AppState: ObservableObject {
             requestID: sessionID,
             activation: .preserveFocus
         )
-        let startupGate = isTVBoxPlayback
-            ? nil
-            : beginPlaybackStartupGate(requestID: sessionID)
+        let startupGate = beginPlaybackStartupGate(requestID: sessionID)
         let acquiredNodeLease: NodeRuntimePlaybackLease?
         if let mediaSession = playbackResult?.mediaSession {
             // The Runtime independently verifies the provider kind, transport,
@@ -18503,12 +18513,10 @@ final class AppState: ObservableObject {
             preparedTransferReceipts[sessionID] = receipt
         }
         defer {
-            if let startupGate {
-                cancelPlaybackStartupGate(
-                    requestID: sessionID,
-                    expectedIdentity: startupGate.identity
-                )
-            }
+            cancelPlaybackStartupGate(
+                requestID: sessionID,
+                expectedIdentity: startupGate.identity
+            )
         }
         var didReachFileLoaded = false
         do {
@@ -18533,10 +18541,44 @@ final class AppState: ObservableObject {
             guard playbackSessionID == sessionID else {
                 throw CancellationError()
             }
-            if let startupGate {
+            do {
                 try await awaitPlaybackStartup(startupGate.stream)
+            } catch {
+                if isTVBoxPlayback,
+                   Self.playbackOpenedAtEnd(
+                       playerSnapshot,
+                       requestedStart: startPosition
+                   ) {
+                    throw AppError.playback(
+                        L10n.string(
+                            "player.validation.opened-at-end",
+                            fallback: "This line opened at the end without playing the episode. Choose another line."
+                        )
+                    )
+                }
+                throw error
+            }
+            guard playbackSessionID == sessionID else {
+                throw CancellationError()
+            }
+            if isTVBoxPlayback {
+                // Some HLS lines report a full duration yet open at EOF. A
+                // file-loaded event or first render swap alone would accept
+                // them and autoplay through the whole series in seconds.
+                try await Task.sleep(nanoseconds: 350_000_000)
                 guard playbackSessionID == sessionID else {
                     throw CancellationError()
+                }
+                if Self.playbackOpenedAtEnd(
+                    playerSnapshot,
+                    requestedStart: startPosition
+                ) {
+                    throw AppError.playback(
+                        L10n.string(
+                            "player.validation.opened-at-end",
+                            fallback: "This line opened at the end without playing the episode. Choose another line."
+                        )
+                    )
                 }
             }
         } catch {
@@ -18601,6 +18643,17 @@ final class AppState: ObservableObject {
             position: startPosition ?? 0,
             duration: existing?.duration ?? 0
         )
+    }
+
+    static func playbackOpenedAtEnd(
+        _ snapshot: PlayerSnapshot,
+        requestedStart: TimeInterval?
+    ) -> Bool {
+        guard requestedStart == nil,
+              snapshot.duration.isFinite,
+              snapshot.duration >= 120,
+              snapshot.position.isFinite else { return false }
+        return snapshot.position >= snapshot.duration - 2
     }
 
     private func savePlaybackHistory(

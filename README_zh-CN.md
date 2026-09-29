@@ -16,7 +16,7 @@ OKVideoMac 是代码来源，Android TVBox 是兼容目标；MacBox 与上游独
 
 ## 当前状态
 
-- 当前应用版本：1.1.0（Build 103）
+- 当前应用版本：1.1.1（Build 104）
 - 上游代码基线：OKVideoMac 0.6.1，提交 `9970e2c`。
 - 产品分支：`main`。应用及安装包名称为 MacBox，使用独立版本号；使用独立的 MacBox 图标。
 - 当前开发及实际验收以 Apple Silicon（M 系列）Mac 为主，最低部署目标为 macOS 12.0。
@@ -44,7 +44,7 @@ OKVideoMac 是代码来源，Android TVBox 是兼容目标；MacBox 与上游独
 本项目当前使用经过本地验证的 Release 构建，采用 ad-hoc 签名。
 它不是上游 Developer ID 签名及 Apple 公证的安装包；上游下载页提供的也不是本项目修改版。
 
-[下载 MacBox 1.1.0（Apple Silicon Mac）](https://github.com/wxyanwu/MacBox/releases/download/v1.1.0/MacBox-1.1.0.dmg) · [发布说明、校验文件与对应源码](https://github.com/wxyanwu/MacBox/releases/tag/v1.1.0)
+[下载 MacBox 1.1.1（Apple Silicon Mac）](https://github.com/wxyanwu/MacBox/releases/download/v1.1.1/MacBox-1.1.1.dmg) · [发布说明、校验文件与对应源码](https://github.com/wxyanwu/MacBox/releases/tag/v1.1.1)
 
 1. 使用本项目构建的 Release 应用。
 2. 在“设置 → 点播片源”导入你自己的 TVBox 配置；直播来源在“设置 → 直播源”管理。

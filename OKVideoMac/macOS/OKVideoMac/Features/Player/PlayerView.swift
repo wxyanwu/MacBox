@@ -2677,6 +2677,9 @@ private struct PlaybackTimecodeField: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSStackView {
         let field = NSTextField(string: PlaybackTimecode.format(seconds))
+        field.cell = VerticallyCenteredTimecodeCell(
+            textCell: PlaybackTimecode.format(seconds)
+        )
         field.delegate = context.coordinator
         field.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
         field.alignment = .center
@@ -2779,6 +2782,50 @@ private struct PlaybackTimecodeField: NSViewRepresentable {
             field?.stringValue = PlaybackTimecode.format(value)
             stepper?.integerValue = value
         }
+    }
+}
+
+private final class VerticallyCenteredTimecodeCell: NSTextFieldCell {
+    override func drawingRect(forBounds rect: NSRect) -> NSRect {
+        let textHeight = cellSize(forBounds: rect).height
+        var centered = rect
+        centered.origin.y += max(0, (rect.height - textHeight) / 2)
+        centered.size.height = min(rect.height, textHeight)
+        return super.drawingRect(forBounds: centered)
+    }
+
+    override func edit(
+        withFrame rect: NSRect,
+        in controlView: NSView,
+        editor textObj: NSText,
+        delegate: Any?,
+        event: NSEvent?
+    ) {
+        super.edit(
+            withFrame: drawingRect(forBounds: rect),
+            in: controlView,
+            editor: textObj,
+            delegate: delegate,
+            event: event
+        )
+    }
+
+    override func select(
+        withFrame rect: NSRect,
+        in controlView: NSView,
+        editor textObj: NSText,
+        delegate: Any?,
+        start selStart: Int,
+        length selLength: Int
+    ) {
+        super.select(
+            withFrame: drawingRect(forBounds: rect),
+            in: controlView,
+            editor: textObj,
+            delegate: delegate,
+            start: selStart,
+            length: selLength
+        )
     }
 }
 

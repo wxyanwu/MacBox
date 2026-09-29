@@ -18,7 +18,7 @@ MacBox is maintained and released independently and is not an official upstream 
 
 ## Current status
 
-- Current app version: 1.1.0 (Build 103)
+- Current app version: 1.1.1 (Build 104)
 - Upstream baseline: OKVideoMac 0.6.1, commit `9970e2c`.
 - Product branch: `main`. The application and installers are named MacBox with independent version numbering; a new MacBox icon is included.
 - Development and device validation currently focus on Apple Silicon Macs; the minimum deployment target is macOS 12.0.
@@ -47,7 +47,7 @@ Current builds are locally verified Release builds with ad-hoc signing. They are
 Developer ID signed or Apple-notarized upstream releases. Upstream downloads do not contain
 this project's modifications.
 
-[Download MacBox 1.1.0 for Apple Silicon Macs](https://github.com/wxyanwu/MacBox/releases/download/v1.1.0/MacBox-1.1.0.dmg) · [Release notes, checksums, and corresponding source](https://github.com/wxyanwu/MacBox/releases/tag/v1.1.0)
+[Download MacBox 1.1.1 for Apple Silicon Macs](https://github.com/wxyanwu/MacBox/releases/download/v1.1.1/MacBox-1.1.1.dmg) · [Release notes, checksums, and corresponding source](https://github.com/wxyanwu/MacBox/releases/tag/v1.1.1)
 
 1. Use a Release build made from this project.
 2. Import your own TVBox configuration in Settings → VOD Sources; manage live sources in Settings → Live Sources.

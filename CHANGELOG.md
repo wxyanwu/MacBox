@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1] - 2026-09-29
+
+- Bound unattended Android/DEX playback resolution to 45 seconds and recover the owned Bridge if a provider ignores cancellation.
+- Require actual media startup for TVBox lines; report lines that load directly at EOF instead of silently advancing through episodes.
+- Include the source line and episode in playback failures and center intro/outro timecodes vertically.
+- Preserve the existing Android Bridge APK, subscriptions, preferences, and viewing history.
+
 ## [1.1.0] - 2026-09-29
 
 - Add per-show intro/outro capture and second-precise editing across episodes.

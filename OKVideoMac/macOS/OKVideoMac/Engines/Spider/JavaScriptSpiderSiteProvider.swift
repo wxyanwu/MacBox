@@ -254,6 +254,11 @@ final class InteractionHandle: @unchecked Sendable, Identifiable {
         guard let cancelProvider else { return }
         try? await cancelProvider(id, reason)
     }
+
+    func cancelAndReportFailure(reason: String) async throws {
+        invocationTask?.cancel()
+        try await cancelProvider?(id, reason)
+    }
 }
 
 struct AndroidBridgeSurfaceBounds: Decodable, Equatable, Sendable {
@@ -3325,6 +3330,28 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         private var isResolved = false
         private var keepsTerminalObserverAlive = false
 
+        // Claim the deadline before cancelling the provider. Its cancelled
+        // HTTP request can otherwise race the useful timeout diagnosis.
+        func claimTimeout() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !isResolved else { return false }
+            isResolved = true
+            return true
+        }
+
+        func finishTimeout(_ error: Error) {
+            lock.lock()
+            let continuation = self.continuation
+            let terminalObserver = self.terminalObserver
+            self.continuation = nil
+            self.terminalObserver = nil
+            self.monitor = nil
+            lock.unlock()
+            terminalObserver?.cancel()
+            continuation?.resume(throwing: error)
+        }
+
         func begin(_ continuation: CheckedContinuation<Output, Error>) {
             lock.lock()
             self.continuation = continuation
@@ -3468,7 +3495,8 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                 }
                 gate.setTerminalObserver(terminalObserver)
                 let monitor = Task { [weak self] in
-                    for _ in 0..<2_400 {
+                    let timeoutSeconds = actionKind == .playback ? 45 : 600
+                    for _ in 0..<(timeoutSeconds * 4) {
                         guard !Task.isCancelled else { return }
                         try? await Task.sleep(nanoseconds: 250_000_000)
                         guard !Task.isCancelled, let self else { return }
@@ -3493,11 +3521,41 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                             return
                         }
                     }
-                    handle.cancel()
-                    gate.resolve(
-                        .failure(AppError.spider("等待 Java/Dex 响应超时")),
-                        keepTerminalObserverAlive: false
-                    )
+                    guard !Task.isCancelled, gate.claimTimeout() else {
+                        return
+                    }
+                    if actionKind == .playback {
+                        do {
+                            // /cancel waits for the real worker to exit. If
+                            // third-party code ignores interruption, the
+                            // client restarts only the owned Bridge process
+                            // before another line is allowed to resolve.
+                            try await handle.cancelAndReportFailure(
+                                reason: "providerTimeout"
+                            )
+                            gate.finishTimeout(AppError.spider(
+                                L10n.string(
+                                    "player.bridge.playback-timeout",
+                                    fallback: "The line took more than 45 seconds to resolve. The unresponsive provider was stopped and Android Bridge recovered. Try another line."
+                                )
+                            ))
+                        } catch {
+                            gate.finishTimeout(AppError.spider(
+                                L10n.string(
+                                    "player.bridge.playback-recovery-failed",
+                                    fallback: "The line took more than 45 seconds to resolve, and Android Bridge recovery failed: %@",
+                                    Self.userFacingBridgeError(
+                                        error.localizedDescription
+                                    )
+                                )
+                            ))
+                        }
+                    } else {
+                        handle.cancel()
+                        gate.finishTimeout(AppError.spider(
+                            "等待 Java/Dex 响应超时"
+                        ))
+                    }
                 }
                 gate.setMonitor(monitor)
             }

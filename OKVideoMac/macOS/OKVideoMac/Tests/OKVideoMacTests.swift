@@ -9104,6 +9104,22 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(PlaybackTimecode.capture(3_661.9), 3_661)
     }
 
+    @MainActor
+    func testTVBoxLineOpeningAtEOFIsRejected() {
+        XCTAssertTrue(AppState.playbackOpenedAtEnd(
+            PlayerSnapshot(position: 2_796, duration: 2_796),
+            requestedStart: nil
+        ))
+        XCTAssertFalse(AppState.playbackOpenedAtEnd(
+            PlayerSnapshot(position: 30, duration: 2_796),
+            requestedStart: nil
+        ))
+        XCTAssertFalse(AppState.playbackOpenedAtEnd(
+            PlayerSnapshot(position: 2_796, duration: 2_796),
+            requestedStart: 2_790
+        ))
+    }
+
     func testHLSAdTimelineOnlyAcceptsCompleteMarkedVODBreaks() {
         let manifest = """
         #EXTM3U
@@ -10028,6 +10044,30 @@ final class OKVideoMacTests: XCTestCase {
         let events = await recorder.events
 
         XCTAssertEqual(events, ["start:\(requestID)", "ack:\(requestID)"])
+    }
+
+    func testInteractionHandleReportsCancellationRecoveryFailure()
+        async throws {
+        let handle = InteractionHandle(
+            actionKind: .playback,
+            cancelProvider: { _, _ in
+                throw AppError.spider("Bridge restart failed")
+            }
+        ) {
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+            throw CancellationError()
+        }
+
+        do {
+            try await handle.cancelAndReportFailure(
+                reason: "providerTimeout"
+            )
+            XCTFail("The failed Bridge recovery must reach the player")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains(
+                "Bridge restart failed"
+            ))
+        }
     }
 
     func testInteractionHandleForwardsExplicitCompletionConfirmation()
