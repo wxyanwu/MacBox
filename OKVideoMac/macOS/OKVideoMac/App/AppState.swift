@@ -3916,6 +3916,55 @@ struct ActivePlaybackContext {
     var replacedHistoryRecord: HistoryRecord? = nil
 }
 
+/// Wex exposes two Baidu signing modes for some files. Only retry the second
+/// mode when its opaque episode token identifies the same underlying file.
+struct WexEquivalentBaiduRoutePolicy {
+    static func alternative(
+        in detail: VideoDetail,
+        source: PlaySource,
+        episode: PlayEpisode
+    ) -> (source: PlaySource, episode: PlayEpisode)? {
+        guard source.name.contains("百度原画"),
+              !source.name.contains("百度原画(无限)"),
+              let originalIdentity = fileIdentity(in: episode.url) else {
+            return nil
+        }
+        let alternativeName = source.name.replacingOccurrences(
+            of: "百度原画",
+            with: "百度原画(无限)"
+        )
+        guard let alternativeSource = detail.playSources.first(where: {
+            $0.name == alternativeName
+        }),
+            let alternativeEpisode = alternativeSource.episodes.first(where: {
+                $0.name == episode.name
+                    && fileIdentity(in: $0.url) == originalIdentity
+            }) else {
+            return nil
+        }
+        return (alternativeSource, alternativeEpisode)
+    }
+
+    private static func fileIdentity(in token: String) -> [String]? {
+        guard let data = Data(base64Encoded: token),
+              let outer = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+              let payload = outer["b"] as? String,
+              let payloadData = payload.data(using: .utf8),
+              let fields = try? JSONSerialization.jsonObject(with: payloadData)
+                as? [String: Any] else {
+            return nil
+        }
+        let identity = ["a", "b", "c", "d", "e", "f"].compactMap {
+            fields[$0] as? String
+        }
+        guard identity.count == 6, identity.allSatisfy({ !$0.isEmpty }) else {
+            return nil
+        }
+        return identity
+    }
+}
+
 struct HistoryPlaybackChoice: Identifiable, Equatable {
     let id: UUID
     let detail: VideoDetail
@@ -5272,7 +5321,7 @@ final class AppState: ObservableObject {
     private var shutdownTask: Task<Void, Never>?
     private var isShutdownRequested = false
     private var hasCompletedShutdown = false
-    private var shouldResumeAfterWake = false
+    private var wakeResumeRequestID: UUID?
     private var isClosingPlayer = false
     private var playerCloseWaiters: [CheckedContinuation<Void, Never>] = []
     private var prefersPlayerSubtitlesEnabled = false
@@ -7604,7 +7653,7 @@ final class AppState: ObservableObject {
                 operation: operation,
                 semantic: operation.initialSemantic,
                 actionStatusGeneration: actionStatusGeneration,
-                presentsPlaceholder: false
+                presentsPlaceholder: true
             ) else {
                 // A Java/Dex action must never fall through to the legacy
                 // unscoped invocation path. The active configuration may have
@@ -8082,9 +8131,9 @@ final class AppState: ObservableObject {
                 operation: operation,
                 semantic: operation.initialSemantic,
                 actionStatusGeneration: actionStatusGeneration,
-                // FongMi does not manufacture a host dialog while action()
-                // runs. Present only if Android actually publishes a surface.
-                presentsPlaceholder: false
+                // Interactive login actions can take time before Android
+                // publishes a surface; keep progress and cancel visible.
+                presentsPlaceholder: presentsProviderUI
             ) else {
                 // Do not send a stale Java/Dex command without the host-owned
                 // interaction/session identity.
@@ -11465,7 +11514,8 @@ final class AppState: ObservableObject {
         continuingRequestID: UUID? = nil,
         authorizationRetry: Bool = false,
         windowActivation: PlayerWindowActivationPolicy = .userInitiated,
-        automaticAdvanceRequestID: UUID? = nil
+        automaticAdvanceRequestID: UUID? = nil,
+        equivalentBaiduRouteRetry: Bool = false
     ) async {
         if let automaticAdvanceRequestID {
             guard automaticEpisodeAdvanceController.owns(
@@ -12208,6 +12258,26 @@ final class AppState: ObservableObject {
                 if completedAttempts >= 8 {
                     break
                 }
+            }
+
+            if !equivalentBaiduRouteRetry,
+               provider is AndroidDexSpiderSiteProvider,
+               let alternative = WexEquivalentBaiduRoutePolicy.alternative(
+                   in: detail,
+                   source: source,
+                   episode: episode
+               ),
+               playbackSessionID == sessionID {
+                await startPlayback(
+                    detail: detail,
+                    source: alternative.source,
+                    episode: alternative.episode,
+                    origin: .direct,
+                    configurationID: playbackConfigurationID,
+                    windowActivation: windowActivation,
+                    equivalentBaiduRouteRetry: true
+                )
+                return
             }
 
             let message = Self.consolidatedPlaybackFailureMessage(failures)
@@ -14316,29 +14386,42 @@ final class AppState: ObservableObject {
         guard !isSystemSleeping else { return }
         isSystemSleeping = true
         displaySleepAssertion.update(playing: false)
-        switch playerSnapshot.status {
-        case .playing, .buffering:
-            shouldResumeAfterWake = true
+        if (playerSnapshot.status == .playing || playerSnapshot.status == .buffering)
+            && isPlayerPresented
+            && (activePlayback != nil || livePlaybackChannel != nil)
+            && environment?.player.renderPlayer != nil {
+            wakeResumeRequestID = activePlayerRequestID
             try? await environment?.player.pause()
-        default:
-            shouldResumeAfterWake = false
+        } else {
+            wakeResumeRequestID = nil
         }
         await persistPlaybackProgress()
     }
 
     func handleSystemWake() async {
         isSystemSleeping = false
-        guard shouldResumeAfterWake else { return }
-        shouldResumeAfterWake = false
+        let requestID = wakeResumeRequestID
+        wakeResumeRequestID = nil
+        guard let requestID,
+              requestID == activePlayerRequestID,
+              isPlayerPresented,
+              !isClosingPlayer,
+              activePlayback != nil || livePlaybackChannel != nil,
+              environment?.player.renderPlayer != nil else { return }
         do {
             try await environment?.player.play()
         } catch {
+            guard requestID == activePlayerRequestID,
+                  isPlayerPresented,
+                  !isClosingPlayer,
+                  environment?.player.renderPlayer != nil else { return }
             show(error, title: L10n.string("player.wake-resume.failed", fallback: "Unable to Resume After Wake"), target: .player)
         }
     }
 
     func closePlayer() async {
         guard !isShutdownRequested else { return }
+        wakeResumeRequestID = nil
         if isClosingPlayer {
             await withCheckedContinuation { continuation in
                 playerCloseWaiters.append(continuation)

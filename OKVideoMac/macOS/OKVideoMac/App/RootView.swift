@@ -1564,6 +1564,10 @@ struct CloudAuthorizationView: View {
                 )
                     .font(.title2.bold())
                 Spacer()
+                Button(L10n.string("common.close", fallback: "Close")) {
+                    Task { await state.cancelCloudAuthorization() }
+                }
+                .keyboardShortcut(.cancelAction)
                 Button {
                     Task { await state.refreshCloudAuthorization() }
                 } label: {
@@ -1731,7 +1735,6 @@ struct CloudAuthorizationView: View {
                 ) {
                     Task { await state.cancelCloudAuthorization() }
                 }
-                .keyboardShortcut(.cancelAction)
             }
         }
         .padding(usesDialogCropLayout ? 18 : 22)

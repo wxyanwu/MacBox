@@ -6374,6 +6374,44 @@ final class OKVideoMacTests: XCTestCase {
         XCTAssertEqual(normalized.actionItems.first?.tag, "authorization")
     }
 
+    func testPanConfigurationCenterPreservesTabsAndRoutesCardsAsActions() {
+        let site = SiteConfiguration(
+            key: "Wexconfig",
+            name: "配置中心",
+            type: 3,
+            api: "csp_PanConfigGuard"
+        )
+        let card = VideoSummary(
+            siteKey: site.key,
+            siteName: site.name,
+            videoID: "web-config",
+            title: "网页版配置中心"
+        )
+        let home = SiteHome(
+            categories: [
+                VideoCategory(id: "all", name: "综合设置"),
+                VideoCategory(id: "quark", name: "夸克网盘")
+            ],
+            recommendations: [card]
+        )
+
+        let normalized = AndroidDexSpiderSiteProvider.applyingHomeContract(
+            to: home,
+            site: site
+        )
+
+        XCTAssertTrue(normalized.categories.allSatisfy {
+            $0.resolvedContentKind == .media
+        })
+        XCTAssertEqual(normalized.recommendations.count, 1)
+        XCTAssertEqual(normalized.recommendations.first?.resolvedContentKind, .action)
+        XCTAssertTrue(normalized.actionItems.isEmpty)
+        XCTAssertEqual(
+            SiteActionItem(summary: normalized.recommendations[0]).resolvedRoute,
+            .providerSelection(itemID: "web-config")
+        )
+    }
+
     func testCloudAccountStatusReconcilesStatusOnlyConfigurationCard() {
         let providerID = CloudAccountProviderIdentity.identifier(
             capability: .javaDexSpider,
@@ -8467,6 +8505,51 @@ final class OKVideoMacTests: XCTestCase {
         )
         XCTAssertEqual(firstGrid, unchangedGrid)
         XCTAssertNotEqual(firstGrid, changedSelectionGrid)
+    }
+
+    func testWexBaiduRetryRequiresTheSameOpaqueFileAndEpisode() throws {
+        func token(file: String, mode: String) throws -> String {
+            let payload = [
+                "a": file, "b": "share", "c": "file", "d": "size",
+                "e": "account", "f": "path", "g": "private-cookie"
+            ]
+            let nested = try JSONSerialization.data(withJSONObject: payload)
+            let outer: [String: String] = [
+                "b": String(decoding: nested, as: UTF8.self), "c": mode
+            ]
+            return try JSONSerialization.data(withJSONObject: outer)
+                .base64EncodedString()
+        }
+        let selected = PlayEpisode(
+            name: "[1.9GB]S01E02.mkv", url: try token(file: "episode-2", mode: "normal")
+        )
+        let matching = PlayEpisode(
+            name: selected.name, url: try token(file: "episode-2", mode: "unlimited")
+        )
+        let unrelated = PlayEpisode(
+            name: selected.name, url: try token(file: "episode-3", mode: "unlimited")
+        )
+        let source = PlaySource(name: "百度原画#01", episodes: [selected])
+        let summary = VideoSummary(
+            siteKey: "AiNewHuBan", siteName: "test", videoID: "video", title: "test"
+        )
+        let detail = VideoDetail(summary: summary, playSources: [
+            source,
+            PlaySource(name: "百度原画(无限)#01", episodes: [matching])
+        ])
+        XCTAssertEqual(
+            WexEquivalentBaiduRoutePolicy.alternative(
+                in: detail, source: source, episode: selected
+            )?.episode.url,
+            matching.url
+        )
+        let differentFile = VideoDetail(summary: summary, playSources: [
+            source,
+            PlaySource(name: "百度原画(无限)#01", episodes: [unrelated])
+        ])
+        XCTAssertNil(WexEquivalentBaiduRoutePolicy.alternative(
+            in: differentFile, source: source, episode: selected
+        ))
     }
 
     func testEpisodeNameParserDoesNotInferNumberFromSourcePosition() {
@@ -13861,6 +13944,29 @@ final class OKVideoMacTests: XCTestCase {
                 "/sdk/emulator -avd Pixel_8 -port 5560",
                 avdName: "OKVideoMac_Runtime",
                 consolePort: 5_560
+            )
+        )
+    }
+
+    func testPrivateADBPortRotationDoesNotRetireOwnedEmulator() {
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.requiresLegacyADBServerMigration(
+                recordedPort: 50_438
+            )
+        )
+        XCTAssertFalse(
+            AndroidDexBridgeRuntime.requiresLegacyADBServerMigration(
+                recordedPort: 50_437
+            )
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.requiresLegacyADBServerMigration(
+                recordedPort: nil
+            )
+        )
+        XCTAssertTrue(
+            AndroidDexBridgeRuntime.requiresLegacyADBServerMigration(
+                recordedPort: 5_037
             )
         )
     }

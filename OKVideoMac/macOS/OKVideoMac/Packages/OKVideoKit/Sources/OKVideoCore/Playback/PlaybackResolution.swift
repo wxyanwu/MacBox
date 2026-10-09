@@ -229,8 +229,12 @@ public struct DefaultMediaProbe: MediaProbe {
             switch response.statusCode {
             case 200...299:
                 break
-            case 401, 403:
+            case 401:
                 throw AppError.playback("媒体授权已失效，请重新登录网盘")
+            case 403:
+                throw AppError.playback(
+                    "媒体服务拒绝读取（状态码 403）。登录状态未必失效，请重新解析或更换播放线路"
+                )
             case 404, 410:
                 throw AppError.playback("临时播放地址或分享已失效，请重新解析")
             default:

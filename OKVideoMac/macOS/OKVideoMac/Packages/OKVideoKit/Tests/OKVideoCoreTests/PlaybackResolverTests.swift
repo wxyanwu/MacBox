@@ -307,6 +307,27 @@ final class PlaybackResolverTests: XCTestCase {
         }
     }
 
+    func testAndroidBridgeMediaSessionDoesNotTreatUpstream403AsExpiredLogin()
+        async throws {
+        let url = try XCTUnwrap(
+            URL(string: "http://127.0.0.1:19978/proxy/media/session-upstream-denied")
+        )
+        let client = ScriptedProbeHTTPClient(responses: [
+            HTTPResponse(url: url, statusCode: 403, headers: [:], body: Data())
+        ])
+
+        do {
+            _ = try await DefaultMediaProbe(httpClient: client)
+                .validate(url: url, headers: [:])
+            XCTFail("denied upstream media must stop playback")
+        } catch let error as AppError {
+            XCTAssertEqual(
+                error,
+                .playback("媒体服务拒绝读取（状态码 403）。登录状态未必失效，请重新解析或更换播放线路")
+            )
+        }
+    }
+
     func testAndroidBridgeMediaSessionDistinguishesExpiredCapability()
         async throws {
         let url = try XCTUnwrap(

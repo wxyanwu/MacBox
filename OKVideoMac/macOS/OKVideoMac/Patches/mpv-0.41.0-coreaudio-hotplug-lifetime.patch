@@ -8,17 +8,65 @@
  #include <libavutil/mathematics.h>
  
  #include "ao.h"
-@@ -53,6 +54,9 @@
+@@ -53,6 +54,10 @@
      dispatch_queue_t queue;
  
      int hotplug_cb_registration_times;
++    int hotplug_registered_properties;
 +    dispatch_queue_t hotplug_queue;
 +    AudioObjectPropertyListenerBlock hotplug_listener;
 +    dispatch_block_t hotplug_cancel;
  };
  
  static int64_t ca_get_hardware_latency(struct ao *ao) {
-@@ -497,6 +501,17 @@
+@@ -196,6 +201,7 @@
+     return CONTROL_OK;
+ 
+ coreaudio_error:
++    unregister_hotplug_cb(ao);
+     return CONTROL_ERROR;
+ }
+ 
+@@ -489,7 +495,38 @@
+ {
+     unregister_hotplug_cb(ao);
+ }
++
++static void revoke_hotplug_cb(struct ao *ao)
++{
++    struct priv *p = ao->priv;
++    if (!p->hotplug_queue)
++        return;
+ 
++    // Drain active callbacks and make any late CoreAudio delivery inert.
++    dispatch_sync(p->hotplug_queue, p->hotplug_cancel);
++    for (int i = 0; i < p->hotplug_registered_properties; i++) {
++        AudioObjectPropertyAddress addr = {
++            hotplug_properties[i],
++            kAudioObjectPropertyScopeGlobal,
++            kAudioObjectPropertyElementMain
++        };
++        OSStatus err = AudioObjectRemovePropertyListenerBlock(
++            kAudioObjectSystemObject, &addr, p->hotplug_queue, p->hotplug_listener);
++        if (err != noErr) {
++            char *c1 = mp_tag_str(hotplug_properties[i]);
++            char *c2 = mp_tag_str(err);
++            MP_ERR(ao, "failed to remove device listener %s (%s)", c1, c2);
++        }
++    }
++    Block_release(p->hotplug_listener);
++    Block_release(p->hotplug_cancel);
++    dispatch_release(p->hotplug_queue);
++    p->hotplug_listener = NULL;
++    p->hotplug_cancel = NULL;
++    p->hotplug_queue = NULL;
++    p->hotplug_registered_properties = 0;
++}
++
+ static bool register_hotplug_cb(struct ao *ao)
+ {
+     struct priv *p = ao->priv;
+@@ -497,6 +534,17 @@
      if (p->hotplug_cb_registration_times++)
          return true;
  
@@ -36,7 +84,7 @@
      OSStatus err = noErr;
      for (int i = 0; i < MP_ARRAY_SIZE(hotplug_properties); i++) {
          AudioObjectPropertyAddress addr = {
-@@ -504,8 +519,8 @@
+@@ -504,19 +552,22 @@
              kAudioObjectPropertyScopeGlobal,
              kAudioObjectPropertyElementMain
          };
@@ -47,7 +95,21 @@
          if (err != noErr) {
              char *c1 = mp_tag_str(hotplug_properties[i]);
              char *c2 = mp_tag_str(err);
-@@ -524,9 +539,11 @@
+             MP_ERR(ao, "failed to set device listener %s (%s)", c1, c2);
+             goto coreaudio_error;
+         }
++        p->hotplug_registered_properties++;
+     }
+ 
+     return true;
+ 
+ coreaudio_error:
++    revoke_hotplug_cb(ao);
++    p->hotplug_cb_registration_times = 0;
+     return false;
+ }
+ 
+@@ -524,24 +575,10 @@
  {
      struct priv *p = ao->priv;
  
@@ -55,31 +117,22 @@
 +    if (p->hotplug_cb_registration_times <= 0 || --p->hotplug_cb_registration_times)
          return;
  
-+    // Drain in-flight callbacks and make even late queued deliveries inert.
-+    dispatch_sync(p->hotplug_queue, p->hotplug_cancel);
-     OSStatus err = noErr;
-     for (int i = 0; i < MP_ARRAY_SIZE(hotplug_properties); i++) {
-         AudioObjectPropertyAddress addr = {
-@@ -534,14 +551,20 @@
-             kAudioObjectPropertyScopeGlobal,
-             kAudioObjectPropertyElementMain
-         };
+-    OSStatus err = noErr;
+-    for (int i = 0; i < MP_ARRAY_SIZE(hotplug_properties); i++) {
+-        AudioObjectPropertyAddress addr = {
+-            hotplug_properties[i],
+-            kAudioObjectPropertyScopeGlobal,
+-            kAudioObjectPropertyElementMain
+-        };
 -        err = AudioObjectRemovePropertyListener(
 -            kAudioObjectSystemObject, &addr, hotplug_cb, (void *)ao);
-+        err = AudioObjectRemovePropertyListenerBlock(
-+            kAudioObjectSystemObject, &addr, p->hotplug_queue, p->hotplug_listener);
-         if (err != noErr) {
-             char *c1 = mp_tag_str(hotplug_properties[i]);
-             char *c2 = mp_tag_str(err);
-             MP_ERR(ao, "failed to set device listener %s (%s)", c1, c2);
-         }
-     }
-+    Block_release(p->hotplug_listener);
-+    Block_release(p->hotplug_cancel);
-+    dispatch_release(p->hotplug_queue);
-+    p->hotplug_listener = NULL;
-+    p->hotplug_cancel = NULL;
-+    p->hotplug_queue = NULL;
+-        if (err != noErr) {
+-            char *c1 = mp_tag_str(hotplug_properties[i]);
+-            char *c2 = mp_tag_str(err);
+-            MP_ERR(ao, "failed to set device listener %s (%s)", c1, c2);
+-        }
+-    }
++    revoke_hotplug_cb(ao);
  }
  
  #define OPT_BASE_STRUCT struct priv

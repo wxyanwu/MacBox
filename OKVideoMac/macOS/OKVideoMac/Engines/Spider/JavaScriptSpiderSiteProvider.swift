@@ -1111,6 +1111,16 @@ final class AndroidDexSpiderSiteProvider: SiteProvider, AggregateSearchProviding
         to home: SiteHome,
         site: SiteConfiguration
     ) -> SiteHome {
+        if site.api.trimmingCharacters(in: .whitespacesAndNewlines)
+            == "csp_PanConfigGuard" {
+            var updated = home
+            updated.recommendations = updated.recommendations.map { summary in
+                var actionSummary = summary
+                actionSummary.contentKind = .action
+                return actionSummary
+            }
+            return updated
+        }
         guard MyDriveGuardActionContract.supportsAccountAuthorization(
             api: site.api
         ) else {
@@ -1154,8 +1164,18 @@ final class AndroidDexSpiderSiteProvider: SiteProvider, AggregateSearchProviding
         page: Int,
         filters: [String: String]
     ) async throws -> VideoPage {
-        try SpiderResponseMapper.javaDexCategoryPage(
-            await categoryValue(id: id, page: page, filters: filters),
+        let value = try await categoryValue(id: id, page: page, filters: filters)
+        if site.api.trimmingCharacters(in: .whitespacesAndNewlines)
+            == "csp_PanConfigGuard" {
+            return try SpiderResponseMapper.actionPage(
+                value,
+                site: site,
+                baseURL: baseURL,
+                page: page
+            )
+        }
+        return try SpiderResponseMapper.javaDexCategoryPage(
+            value,
             site: site,
             baseURL: baseURL,
             page: page
@@ -12252,7 +12272,9 @@ actor AndroidDexBridgeRuntime {
         _ identity: AndroidRuntimeIdentity,
         toolchain: AndroidToolchain
     ) async throws -> Bool {
-        guard identity.adbServerPort != privateADBServerPort,
+        guard Self.requiresLegacyADBServerMigration(
+                  recordedPort: identity.adbServerPort
+              ),
               processExecutablePath(pid: identity.pid) != nil else {
             return false
         }
@@ -12294,6 +12316,15 @@ actor AndroidDexBridgeRuntime {
             detail: "private ADB relaunch permitted"
         )
         return true
+    }
+
+    static func requiresLegacyADBServerMigration(
+        recordedPort: Int?
+    ) -> Bool {
+        guard let recordedPort else { return true }
+        // Private ADB may select a different port after an orphaned server
+        // occupies the recorded one. The Emulator process is still the same.
+        return !candidatePrivateADBServerPorts.contains(recordedPort)
     }
 
     private func waitForEmulatorPortsToRelease(
@@ -12492,8 +12523,6 @@ actor AndroidDexBridgeRuntime {
               identity.adbExecutable == nil
                 || identity.adbExecutable?.standardizedFileURL
                     == toolchain.adb.standardizedFileURL,
-              identity.adbServerPort == nil
-                || identity.adbServerPort == privateADBServerPort,
               let executablePath = processExecutablePath(pid: identity.pid)
         else { return false }
 

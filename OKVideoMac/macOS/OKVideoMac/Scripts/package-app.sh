@@ -75,6 +75,15 @@ case "$PACKAGE_MODE" in
     ;;
 esac
 
+local_source_arguments=()
+if [[ "${OKVIDEOMAC_LOCAL_WORKTREE_SOURCE:-0}" == "1" ]]; then
+  if [[ "$PACKAGE_MODE" != "local" ]]; then
+    echo "Working-tree source is only supported for local test packages." >&2
+    exit 64
+  fi
+  local_source_arguments=(--working-tree)
+fi
+
 if [[ "$NOTARIZE" -eq 1 && "$PACKAGE_MODE" != "distribution" ]]; then
   echo "--notarize is only valid in distribution mode." >&2
   exit 64
@@ -263,6 +272,7 @@ source_release_arguments=(
   --cache-dir "$SOURCE_RELEASE_CACHE"
   --commit HEAD
   --apk "$ANDROID_BRIDGE_APK"
+  "${local_source_arguments[@]}"
 )
 if [[ "${OKVIDEOMAC_SOURCE_RELEASE_OFFLINE:-0}" == "1" ]]; then
   source_release_arguments+=(--offline)
@@ -684,6 +694,7 @@ fi
   --output-dir "$SOURCE_RELEASE_DIR" \
   --cache-dir "$SOURCE_RELEASE_CACHE" \
   --commit HEAD \
+  "${local_source_arguments[@]}" \
   --apk "$ANDROID_BRIDGE_APK" \
   --binary "$ARCHIVE" \
   --release-artifact "$DMG" \

@@ -44,6 +44,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.InetAddress;
 import java.net.HttpURLConnection;
+import java.net.URI;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
@@ -2048,6 +2049,62 @@ public final class BridgeProtocolTest extends TestCase {
                 session.upstreamFingerprint,
                 secured.getString("upstreamFingerprint")
         );
+    }
+
+    public void testKaiserFallbackKeepsSignedQueryAndRejectsOtherProxyRoutes()
+            throws Exception {
+        URI raw = BridgeServer.kaiserNestedMediaURI(URI.create(
+                "http://127.0.0.1:38125/kaiser?url="
+                        + "https://cdn.example/movie.mkv?key=a%2Bb&thread=8"
+        ));
+        assertNotNull(raw);
+        assertEquals(
+                "https://cdn.example/movie.mkv?key=a%2Bb&thread=8",
+                raw.toString()
+        );
+        URI encoded = BridgeServer.kaiserNestedMediaURI(URI.create(
+                "http://127.0.0.1:38125/kaiser?url="
+                        + "https%3A%2F%2Fcdn.example%2Fmovie.mkv%3Fkey%3Da%252Bb%26thread%3D8"
+        ));
+        assertNotNull(encoded);
+        assertEquals(raw, encoded);
+        assertNull(BridgeServer.kaiserNestedMediaURI(URI.create(
+                "http://127.0.0.1:38125/proxy?url=https://cdn.example/movie.mkv"
+        )));
+        assertNull(BridgeServer.kaiserNestedMediaURI(URI.create(
+                "http://127.0.0.1:38125/kaiser?url=http://127.0.0.1:9978/v1/media"
+        )));
+        assertNull(BridgeServer.kaiserNestedMediaURI(URI.create(
+                "http://cdn.example/kaiser?url=https://cdn.example/movie.mkv"
+        )));
+    }
+
+    public void testWexKaiserCookieStaysScopedToOwnerAndCloudHost()
+            throws Exception {
+        BridgeProviderOwnerRegistry.Binding wex =
+                new BridgeProviderOwnerRegistry.Binding(
+                        "owner", "configuration", "site", "",
+                        "fc8f993c9297d38139363cd0e3db9853"
+                );
+        URI quark = URI.create("http://127.0.0.1:38125/kaiser?url="
+                + "https://dl-c-zb-u.drive.quark.cn/movie.mp4");
+        URI baidu = URI.create("http://127.0.0.1:38125/kaiser?url="
+                + "https://appall01.baidupcs.com/movie.mkv");
+        assertEquals("Wex_quark_cookie",
+                BridgeServer.wexKaiserCredentialKey(wex, quark));
+        assertEquals("Wex_baidu_cookie",
+                BridgeServer.wexKaiserCredentialKey(wex, baidu));
+        assertNull(BridgeServer.wexKaiserCredentialKey(wex, URI.create(
+                "http://127.0.0.1:38125/kaiser?url=https://quark.cn.evil.invalid/file"
+        )));
+        assertNull(BridgeServer.wexKaiserCredentialKey(wex, URI.create(
+                "https://dl-c-zb-u.drive.quark.cn/movie.mp4"
+        )));
+        BridgeProviderOwnerRegistry.Binding other =
+                new BridgeProviderOwnerRegistry.Binding(
+                        "owner", "configuration", "site", "", "another-jar"
+                );
+        assertNull(BridgeServer.wexKaiserCredentialKey(other, quark));
     }
 
     public void testFongMiCompatibilityProxyUsesSeparateLoopbackPortAndLease()

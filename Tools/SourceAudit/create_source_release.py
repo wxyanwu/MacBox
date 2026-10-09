@@ -78,8 +78,8 @@ def parse_release(repo: Path) -> tuple[str, str]:
     return version, build
 
 
-def validate_repo(repo: Path, commit: str) -> tuple[str, str]:
-    if run(repo, "git", "status", "--porcelain", "--untracked-files=all"):
+def validate_repo(repo: Path, commit: str, working_tree: bool = False) -> tuple[str, str]:
+    if not working_tree and run(repo, "git", "status", "--porcelain", "--untracked-files=all"):
         fail("Source releases require a clean worktree.")
     resolved = run(repo, "git", "rev-parse", "--verify", f"{commit}^{{commit}}")
     timestamp = run(repo, "git", "show", "-s", "--format=%cI", resolved)
@@ -184,6 +184,40 @@ def safe_relative(name: str) -> PurePosixPath:
     return value
 
 
+def deterministic_working_tree_archive(repo: Path, output: Path, prefix: str) -> None:
+    """Archive tracked local files for an explicitly requested local test package."""
+    raw_paths = subprocess.check_output(["git", "ls-files", "-z"], cwd=repo)
+    tracked = sorted(
+        safe_relative(os.fsdecode(raw))
+        for raw in raw_paths.split(b"\0")
+        if raw and raw != b"AGENTS.md"
+    )
+    directories = {
+        parent
+        for relative in tracked
+        for parent in relative.parents
+        if parent != PurePosixPath(".")
+    }
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    with temporary.open("wb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w") as archive:
+                archive.addfile(normalized_info(prefix, True))
+                for relative in sorted(directories):
+                    archive.addfile(normalized_info(f"{prefix}/{relative}", True))
+                for relative in tracked:
+                    path = repo.joinpath(*relative.parts)
+                    if path.is_symlink() or not path.is_file():
+                        fail(f"Tracked source file is missing or unsupported: {relative}")
+                    info = normalized_info(
+                        f"{prefix}/{relative}", False, bool(path.stat().st_mode & 0o111)
+                    )
+                    info.size = path.stat().st_size
+                    with path.open("rb") as data:
+                        archive.addfile(info, data)
+    os.replace(temporary, output)
+
+
 def filtered_fongmi_archive(source: Path, output: Path, commit: str) -> None:
     selected = ("LICENSE.md", "catvod/build.gradle", "catvod/src/main")
     destination_prefix = f"FongMi-TV-catvod-{commit}"
@@ -240,10 +274,12 @@ def copy_relative(repo: Path, staging: Path, relative: str) -> None:
         shutil.copy2(source, destination)
 
 
-def write_readme(path: Path, commit: str) -> None:
+def write_readme(path: Path, commit: str, working_tree: bool = False) -> None:
     path.write_text(
         "OKVideoMac third-party corresponding source\n"
-        f"Project commit: {commit}\n\n"
+        f"Project commit: {commit}\n"
+        + ("Local working tree changes are included in the project source archive.\n" if working_tree else "")
+        + "\n"
         "SourceInputs contains fixed, SHA-256-verified upstream source archives.\n"
         "BuildRecipes contains the project patch, build scripts, Android dependency\n"
         "lock, change notices, and exact MPL covered-file list. See\n"
@@ -256,7 +292,7 @@ def make_source_release(args: argparse.Namespace) -> None:
     script = Path(__file__).resolve()
     repo = script.parents[2]
     version, build = parse_release(repo)
-    commit, timestamp = validate_repo(repo, args.commit)
+    commit, timestamp = validate_repo(repo, args.commit, args.working_tree)
     output = Path(args.output_dir).expanduser().resolve()
     cache = Path(args.cache_dir).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -296,7 +332,10 @@ def make_source_release(args: argparse.Namespace) -> None:
     project_archive = output / f"{base}-source.tar.gz"
     third_party_archive = output / f"{base}-third-party-source.tar.gz"
     licenses_archive = output / f"{base}-licenses.tar.gz"
-    deterministic_git_archive(repo, commit, project_archive, f"{base}-source")
+    if args.working_tree:
+        deterministic_working_tree_archive(repo, project_archive, f"{base}-source")
+    else:
+        deterministic_git_archive(repo, commit, project_archive, f"{base}-source")
 
     filtered_fongmi = None
     with tempfile.TemporaryDirectory(prefix="okvideomac-source-release-") as temporary:
@@ -343,6 +382,8 @@ def make_source_release(args: argparse.Namespace) -> None:
             "OKVideoMac/Helpers/AndroidDexBridge/gradle/wrapper/gradle-wrapper.properties",
             "OKVideoMac/macOS/OKVideoMac/Patches/mpv-0.41.0-coreaudio-without-cocoa.patch",
             "OKVideoMac/macOS/OKVideoMac/Patches/mpv-0.41.0-coreaudio-without-cocoa.NOTICE.md",
+            "OKVideoMac/macOS/OKVideoMac/Patches/mpv-0.41.0-coreaudio-hotplug-lifetime.patch",
+            "OKVideoMac/macOS/OKVideoMac/Patches/mpv-0.41.0-coreaudio-hotplug-lifetime.NOTICE.md",
             "OKVideoMac/macOS/OKVideoMac/Scripts/build-libmpv.sh",
             "OKVideoMac/macOS/OKVideoMac/Scripts/build-libmpv-repro.sh",
             "OKVideoMac/macOS/OKVideoMac/Scripts/build-third-party-native.sh",
@@ -352,7 +393,7 @@ def make_source_release(args: argparse.Namespace) -> None:
             "OKVideoMac/macOS/OKVideoMac/Scripts/build-android-dex-bridge.sh",
         ):
             copy_relative(repo, recipes, relative)
-        write_readme(third / "README.txt", commit)
+        write_readme(third / "README.txt", commit, args.working_tree)
         deterministic_tar_from_tree(third, third_party_archive, f"{base}-third-party-source")
 
         licenses = root / "licenses"
@@ -458,7 +499,12 @@ def make_source_release(args: argparse.Namespace) -> None:
         "schema_version": 1,
         "release": {"version": version, "build": build, "git_commit": commit},
         "commit_timestamp": timestamp,
-        "publication_status": "generated-and-hash-verified; public upload is a separate release action",
+        "source_mode": "local-working-tree" if args.working_tree else "clean-commit",
+        "publication_status": (
+            "local test package with uncommitted source; not for public upload"
+            if args.working_tree else
+            "generated-and-hash-verified; public upload is a separate release action"
+        ),
         "build_environment": {
             "architecture": "arm64",
             "macos_deployment_target": "12.0",
@@ -477,6 +523,8 @@ def make_source_release(args: argparse.Namespace) -> None:
                 "source_sha256": "ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209",
                 "patch": "mpv-0.41.0-coreaudio-without-cocoa.patch",
                 "patch_sha256": sha256(repo / "OKVideoMac/macOS/OKVideoMac/Patches/mpv-0.41.0-coreaudio-without-cocoa.patch"),
+                "hotplug_patch": "mpv-0.41.0-coreaudio-hotplug-lifetime.patch",
+                "hotplug_patch_sha256": sha256(repo / "OKVideoMac/macOS/OKVideoMac/Patches/mpv-0.41.0-coreaudio-hotplug-lifetime.patch"),
                 "build_recipe": "OKVideoMac/macOS/OKVideoMac/Scripts/build-libmpv.sh",
             },
             "android_apk": {
@@ -608,6 +656,7 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--commit", default="HEAD")
+    parser.add_argument("--working-tree", action="store_true", help="local test packages only")
     parser.add_argument("--binary")
     parser.add_argument("--release-artifact", action="append")
     parser.add_argument("--apk")

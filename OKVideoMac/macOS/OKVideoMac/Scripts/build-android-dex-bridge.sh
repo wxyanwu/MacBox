@@ -45,9 +45,19 @@ print -r -- "$EXPECTED_CERTIFICATE" | grep -Eq '^[0-9a-f]{64}$' || {
 SIGNING_ROOT="${OKVIDEOMAC_ANDROID_BRIDGE_SIGNING_ROOT:-$HOME/Library/Application Support/OKVideoMac/Signing}"
 RELEASE_KEYSTORE="${OKVIDEOMAC_ANDROID_BRIDGE_KEYSTORE:-$SIGNING_ROOT/AndroidBridgeRelease.jks}"
 LEGACY_KEYSTORE="${OKVIDEOMAC_ANDROID_BRIDGE_LEGACY_KEYSTORE:-$HOME/.android/debug.keystore}"
-STORE_PASSWORD="${OKVIDEOMAC_ANDROID_BRIDGE_STORE_PASSWORD:-android}"
+PASSWORD_FILE="$SIGNING_ROOT/AndroidBridgeRelease.password"
+if [[ -f "$PASSWORD_FILE" ]]; then
+    [[ "$(stat -f '%Lp' "$PASSWORD_FILE")" == "600" ]] || {
+        print -u2 "Android Bridge signing password file must be mode 600."
+        exit 1
+    }
+    SAVED_PASSWORD="$(<"$PASSWORD_FILE")"
+else
+    SAVED_PASSWORD="android"
+fi
+STORE_PASSWORD="${OKVIDEOMAC_ANDROID_BRIDGE_STORE_PASSWORD:-$SAVED_PASSWORD}"
 KEY_ALIAS="${OKVIDEOMAC_ANDROID_BRIDGE_KEY_ALIAS:-androiddebugkey}"
-KEY_PASSWORD="${OKVIDEOMAC_ANDROID_BRIDGE_KEY_PASSWORD:-android}"
+KEY_PASSWORD="${OKVIDEOMAC_ANDROID_BRIDGE_KEY_PASSWORD:-$STORE_PASSWORD}"
 KEYTOOL="$JAVA_HOME/bin/keytool"
 [[ -x "$KEYTOOL" ]] || {
     print -u2 "JDK keytool is required to verify the Android Bridge signer."

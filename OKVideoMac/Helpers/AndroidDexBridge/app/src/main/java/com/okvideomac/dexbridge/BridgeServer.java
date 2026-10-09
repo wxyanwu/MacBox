@@ -48,6 +48,9 @@ import okhttp3.ResponseBody;
 final class BridgeServer {
     static final int PORT = 9978;
     private static final String TAG = "OKVideoDexBridge";
+    private static final String WEX_JAR_MD5 = "fc8f993c9297d38139363cd0e3db9853";
+    private static final String LEGACY_WEX_JAR_MD5 =
+            "8af3bd6512cac8c518a4c6d65c9f6539";
     private static final int MAX_BODY_BYTES = 8 * 1024 * 1024;
     // The Mac client can issue 20 provider calls at once. Keep additional
     // workers available for health, authorization UI, and playback proxy
@@ -1267,11 +1270,50 @@ final class BridgeServer {
         final SessionMediaResponse mediaResponse;
         try {
             URI upstream = requireSessionMediaURI(session.upstreamURL);
-            mediaResponse = executeSessionMedia(
+            String credentialKey = wexKaiserCredentialKey(
+                    session.owner, upstream
+            );
+            if (credentialKey != null) {
+                String cookie = context.getSharedPreferences(
+                        "NewWexFnw_preferences", Context.MODE_PRIVATE
+                ).getString(credentialKey, "");
+                if (cookie != null && !cookie.trim().isEmpty()
+                        && cookie.length() <= 16_384
+                        && cookie.indexOf('\r') < 0
+                        && cookie.indexOf('\n') < 0) {
+                    // Wex's Kaiser service needs the current cloud login on
+                    // its loopback request. Keep it inside Android; the
+                    // cross-origin fallback below drops this header.
+                    putHeaderIgnoreCase(forwarded, "Cookie", cookie);
+                }
+            }
+            SessionMediaResponse initialResponse = executeSessionMedia(
                     upstream,
                     forwarded,
                     headersOnly
             );
+            URI kaiserMedia = initialResponse.response.code() == 502
+                    ? kaiserNestedMediaURI(upstream)
+                    : null;
+            if (kaiserMedia == null) {
+                mediaResponse = initialResponse;
+            } else {
+                // The provider's local Kaiser route can reject an otherwise
+                // usable signed cloud URL. Keep the session on Android, but
+                // never forward local proxy credentials to the cloud host.
+                initialResponse.response.close();
+                LinkedHashMap<String, String> remoteHeaders =
+                        new LinkedHashMap<>(forwarded);
+                stripCrossOriginProviderHeaders(remoteHeaders);
+                mediaResponse = executeSessionMedia(
+                        kaiserMedia,
+                        remoteHeaders,
+                        headersOnly
+                );
+                Log.i(TAG, "Media session request=" + requestID
+                        + " session=" + shortHash(session.id)
+                        + " fallback=kaiser_remote");
+            }
         } catch (IOException | IllegalArgumentException error) {
             Log.w(
                     TAG,
@@ -1403,6 +1445,70 @@ final class BridgeServer {
             upstream = redirected;
         }
     }
+
+    static URI kaiserNestedMediaURI(URI localURI) {
+        String host = localURI.getHost();
+        String path = localURI.getPath();
+        if (host == null || path == null
+                || !("localhost".equalsIgnoreCase(host)
+                || "127.0.0.1".equals(host)
+                || "::1".equals(host))
+                || !("/kaiser".equals(path) || path.startsWith("/kaiser/"))) {
+            return null;
+        }
+        String query = localURI.getRawQuery();
+        if (query == null) return null;
+        int start = 0;
+        while (start < query.length()) {
+            int end = query.indexOf('&', start);
+            if (end < 0) end = query.length();
+            if (query.regionMatches(true, start, "url=", 0, 4)) {
+                // Signed URLs can contain unescaped '&' and '%2B'. Everything
+                // after url= belongs to the nested URL, not to Kaiser.
+                String nested = query.substring(start + 4);
+                if (!nested.regionMatches(true, 0, "http://", 0, 7)
+                        && !nested.regionMatches(true, 0, "https://", 0, 8)) {
+                    try {
+                        nested = URLDecoder.decode(
+                                nested.replace("+", "%2B"), "UTF-8"
+                        );
+                    } catch (Exception ignored) {
+                        return null;
+                    }
+                }
+                try {
+                    return requireRemoteMediaURI(nested);
+                } catch (IOException ignored) {
+                    return null;
+                }
+            }
+            start = end + 1;
+        }
+        return null;
+    }
+
+    static String wexKaiserCredentialKey(
+            BridgeProviderOwnerRegistry.Binding owner,
+            URI localURI
+    ) {
+        if (owner == null || !(WEX_JAR_MD5.equals(owner.jarKey)
+                || LEGACY_WEX_JAR_MD5.equals(owner.jarKey))) {
+            return null;
+        }
+        URI media = kaiserNestedMediaURI(localURI);
+        if (media == null) return null;
+        String host = media.getHost().toLowerCase(Locale.ROOT);
+        if (host.equals("drive.quark.cn")
+                || host.endsWith(".drive.quark.cn")) {
+            return "Wex_quark_cookie";
+        }
+        if (host.equals("baidupcs.com")
+                || host.endsWith(".baidupcs.com")) {
+            return "Wex_baidu_cookie";
+        }
+        return null;
+    }
+
 
     private static boolean isRedirect(int status) {
         return status == 300
